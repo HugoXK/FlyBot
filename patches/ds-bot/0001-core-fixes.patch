@@ -2211,7 +2211,7 @@ diff --git a/src/host/diagnostics.js b/src/host/diagnostics.js
 diff --git a/src/host/memory.js b/src/host/memory.js
 --- a/src/host/memory.js
 +++ b/src/host/memory.js
-@@ -25,6 +25,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSyn
+@@ -25,9 +25,11 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSyn
  import { appendFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
  import { dirname, join } from 'node:path'
  import { BlockAssembler } from '@deepseek-ai/dsh-llm'
@@ -2219,6 +2219,10 @@ diff --git a/src/host/memory.js b/src/host/memory.js
  import { defineTool } from '@deepseek-ai/dsh-tools'
  import { splitRef, unquote } from './text.js'
  import { output } from './tools.js'
++import { createReflexionTracker, lessonText } from './reflexion.js'
+ 
+ // Fixed sizes, in characters. Both MEMORY.md files ride in every request of every
+ // part, so together they stay near 8,000 characters, a few thousand tokens. A topic is
 @@ -312,7 +312,7 @@ const teamRule = (main, writer) => (main
      ? '- The team memory is shared by every Bot. As a group admin you write it with remember scope "team", for what the whole team needs.'
      : '- The team memory is shared by every Bot. Main Bots and group admins write it; when the whole team should know something, tell a Main Bot with message_bot.')
@@ -2246,6 +2250,14 @@ diff --git a/src/host/memory.js b/src/host/memory.js
    'Reply with one JSON object and nothing else: {"changes": […]}, with an empty list when nothing should change.',
    `At most ${REVIEW_CHANGES_MAX} changes in one answer, the most lasting first; the rest can wait for the next review.`,
    'Keep, as a new entry:',
+@@ -417,6 +417,7 @@ export function install(rt) {
+   const journalPath = join(root, 'journal.jsonl')
+   const dayFormat = new Intl.DateTimeFormat('en-CA', { ...(config.timeZone ? { timeZone: config.timeZone } : {}), year: 'numeric', month: '2-digit', day: '2-digit' })
+   const today = () => dayFormat.format(Date.now())
++  const reflexion = createReflexionTracker()
+ 
+   // Ids are Session ids; anything else becomes a hash, so no id can leave the folder.
+   const safeId = id => (/^[\w-]{1,128}$/.test(id) ? id : createHash('sha256').update(String(id)).digest('hex').slice(0, 32))
 @@ -488,6 +488,22 @@ export function install(rt) {
  
    const writesTeam = botId => rt.isMain(botId) || Object.values(state.rooms).some(room => room.admin === botId)
@@ -2354,6 +2366,35 @@ diff --git a/src/host/memory.js b/src/host/memory.js
        if (rt.botOf(bot.id) === undefined) return
        // An answer at the limit may have left some out, so the same lines are read
        // again, a few times at most, while each pass still changes something.
+@@ -1371,6 +1371,21 @@ export function install(rt) {
+     }, 'ds-bot: memory review')
+   }
+ 
++  // A failure that repeated becomes a lasting note in the Bot's own memory (#TBD). Best
++  // effort: a full MEMORY.md or a Bot that is gone drops the note, and it never throws into
++  // the turn that reported the failure.
++  function reflexionNote(botId, signature) {
++    if (config.reflexion === false) return
++    if (!reflexion.hit(botId, signature)) return
++    const bot = rt.botOf(botId)
++    const text = lessonText(signature)
++    if (bot === undefined || text === undefined) return
++    void addEntry({
++      scope: ownScope(botId), text, meta: { lesson: signature, added: today() },
++      actor: { id: botId, name: bot.name }, label: 'your memory',
++    }).catch(() => { /* the Bot is gone or its MEMORY.md is full: the note is dropped */ })
++  }
++
+   async function memoryEndpoint(endpoint, body) {
+     if (endpoint === 'memory-view') return memoryView(body)
+     if (endpoint === 'memory-ask') return memoryAsk(body)
+@@ -1381,5 +1381,6 @@ export function install(rt) {
+   Object.assign(rt, {
+     memoryEnabled: true, renewMemory, archiveBotMemory, memoryEndpoint, memoryReviews,
+     memoryNews: () => Object.fromEntries(news),
++    reflexionNote,
+   })
+ }
 diff --git a/src/host/models.js b/src/host/models.js
 --- a/src/host/models.js
 +++ b/src/host/models.js
@@ -2889,6 +2930,25 @@ diff --git a/src/host/turns.js b/src/host/turns.js
    // Where a Session speaks, for the diagnostics log.
    const placeOf = (id) => {
      const room = rt.roomOf(rt.groupOwners.get(id)?.roomId) ?? rt.roomOf(id)
+@@ -279,9 +279,17 @@ export function install(rt) {
+       case 'tool/ptc-dispatch':
+         endCall(id, entry, event.data?.subCallId)
+         break
+-      case 'tool/result':
++      case 'tool/result': {
++        const call = entry.calls?.get(event.data?.callId)
++        const failed = event.data?.message?.isError === true || event.data?.error !== undefined
+         endCall(id, entry, event.data?.callId)
++        // A tool that errors repeatedly becomes a Reflexion note for its Bot (reflexion.js).
++        if (failed) {
++          const botId = rt.selfOf(id)
++          if (rt.botOf(botId) !== undefined) rt.reflexionNote?.(botId, `tool:${String(call?.name ?? 'tool').slice(0, 60)}`)
++        }
+         break
++      }
+       case 'turn/start':
+         setActivity(id, 'thinking')
+         entry.turn = event.data.turn
 @@ -293,6 +293,10 @@ export function install(rt) {
          entry.answers = false
          entry.opened = false
@@ -2967,7 +3027,7 @@ diff --git a/src/host/turns.js b/src/host/turns.js
          entry.turn = undefined
          entry.info = undefined
          entry.texts = []
-@@ -401,6 +401,8 @@ export function install(rt) {
+@@ -401,9 +401,16 @@ export function install(rt) {
          entry.calls = undefined
          entry.lastText = undefined
          entry.lastCalled = undefined
@@ -2975,7 +3035,16 @@ diff --git a/src/host/turns.js b/src/host/turns.js
 +        rt.connectorTurnChanged?.(id)
          const reason = event.data?.reason
          const failure = reason?.kind === 'error' && !switched ? turnFailure(reason.error) : undefined
-         if (failure !== undefined) noteTurnFailure(id, failure)
+-        if (failure !== undefined) noteTurnFailure(id, failure)
++        if (failure !== undefined) {
++          noteTurnFailure(id, failure)
++          // A model call that fails repeatedly becomes a Reflexion note for its Bot (reflexion.js).
++          const botId = rt.selfOf(id)
++          if (rt.botOf(botId) !== undefined) rt.reflexionNote?.(botId, `model:${failure.code}`)
++        }
+         if (switched) break
+         // A model that writes its tool call as text ends the turn as if it were done,
+         // though nothing ran. It gets one more turn on the same trigger, so a waiting
 @@ -411,7 +411,8 @@ export function install(rt) {
          // the call.
          const wroteCall = failure === undefined && reason?.kind === 'completed' && lastCalled !== true && writesToolCall(lastText)
@@ -4123,7 +4192,7 @@ diff --git a/test/memory.test.js b/test/memory.test.js
    const view = (await call('memory-view', { botId: 'b2' })).value
    assert.equal(view.error, null)
    assert.equal(view.summary?.text, 'You like tea.')
-@@ -1076,3 +1076,70 @@ test('a memory call names the current part of the Bot chat', async (t) => {
+@@ -1076,3 +1076,95 @@ test('a memory call names the current part of the Bot chat', async (t) => {
    assert.equal(answer.ok, true)
    assert.equal(requests[0].sessionId, 'b2-part2')
  })
@@ -4193,6 +4262,31 @@ diff --git a/test/memory.test.js b/test/memory.test.js
 +  }
 +  assert.equal(existsSync(join(home, 'memory', 'team', 'MEMORY.md')), false, 'no team write from another owner\'s room')
 +  assert.match(readFileSync(join(home, 'memory', 'bots', 'b3', 'MEMORY.md'), 'utf8'), /The launch stays on Friday/)
++})
++
++test('a tool that keeps failing leaves a Reflexion note in the Bot\'s own memory', async (t) => {
++  const { ctx, home, tool, read, stop } = start()
++  t.after(() => stop())
++  await tool('recall', {}, 'b2') // load the team so b2 is a known chat session
++  const fail = () => {
++    ctx.emitArgs('session/event', { id: 'b2' }, { type: 'tool/call', data: { callId: 'c1', name: 'bash', arguments: '{}' } })
++    ctx.emitArgs('session/event', { id: 'b2' }, { type: 'tool/result', data: { callId: 'c1', message: { isError: true } } })
++  }
++  fail(); fail(); fail()
++  const path = join(home, 'memory', 'bots', 'b2', 'MEMORY.md')
++  for (let i = 0; i < 200; i++) {
++    await settle()
++    if (existsSync(path) && read('bots', 'b2', 'MEMORY.md').includes('bash')) break
++  }
++  assert.match(read('bots', 'b2', 'MEMORY.md'), /The tool "bash" has failed several times in a row\./)
++  // A successful call first (no accumulated failures) writes nothing.
++  const cleared = start()
++  t.after(() => cleared.stop())
++  await cleared.tool('recall', {}, 'b2')
++  cleared.ctx.emitArgs('session/event', { id: 'b2' }, { type: 'tool/call', data: { callId: 'c9', name: 'webfetch', arguments: '{}' } })
++  cleared.ctx.emitArgs('session/event', { id: 'b2' }, { type: 'tool/result', data: { callId: 'c9' } })
++  await settle()
++  assert.equal(existsSync(join(cleared.home, 'memory', 'bots', 'b2', 'MEMORY.md')), false, 'a successful call notes nothing')
 +})
 diff --git a/test/model-menu.test.js b/test/model-menu.test.js
 --- a/test/model-menu.test.js

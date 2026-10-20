@@ -67,6 +67,11 @@ external backend or task-specific session mapping; see the
 
 - Context sharing (#53) is specified in [team](team.md), **Context sharing foundation**: the own-chat brief is share-gated (`share-brief` / `briefShared`), a memory review reads only its owner as the user (`isUserLine`) and labels another human as `peer` (not `bot`), and keeps cross-owner entries out of the team scope (`teamAllowedFrom`), `list_bots` lists only the caller's owner's Bots (a granted child: that child's `createdBy` subtree), Bots granted to the same owner, and Bots in the current room — another owner's folder and instructions stay private — and a `dsh-session:` chip in actor-authored `send` / `room-post` / `answer-question` / `schedule-create` text must resolve for the author (`sessionOwnedBy`; `schedule-create` authz keys off `body.target`). Bot-authored group posts and Bot-to-Bot / own-chat followups drop chips so they cannot tunnel a private chat into another Session. Host modules: `src/host/groups.js`, `src/host/memory.js`, `src/host/tools.js`, `src/host/channel.js`, `src/host/room-membership.js`, `src/host/authz.js`. Team mode stays disabled.
 
+### Reflexion: learning from repeated failures
+
+- `src/host/reflexion.js` turns a failure that repeats into a lasting note: `turns.js` reports every failed tool call (`tool/result` with `isError`/`error`, by tool name) and every failed model turn (by error code), and `createReflexionTracker` notes a signature once it has crossed the threshold inside the window and no note was written for it within the cooldown. `lessonText` words the note.
+- The note is written through the ordinary memory path into the failing Bot's own `MEMORY.md` (meta `lesson: <signature>`), so it is size-capped, secret-scanned, visible in the memory panel and removable with `forget`. The write is best effort: a full `MEMORY.md` or a Bot that is gone drops it, and it never throws into the turn. `config.reflexion: false` turns it off. Tests: `core/test/reflexion.test.js` (pure) and the tool-failure case in `core/test/memory.test.js`.
+
 ### Tasks
 
 The requester may also cancel a `result-ready` task before acceptance (#202).

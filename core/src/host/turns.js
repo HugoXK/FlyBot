@@ -319,9 +319,17 @@ export function install(rt) {
       case 'tool/ptc-dispatch':
         endCall(id, entry, event.data?.subCallId)
         break
-      case 'tool/result':
+      case 'tool/result': {
+        const call = entry.calls?.get(event.data?.callId)
+        const failed = event.data?.message?.isError === true || event.data?.error !== undefined
         endCall(id, entry, event.data?.callId)
+        // A tool that errors repeatedly becomes a Reflexion note for its Bot (reflexion.js).
+        if (failed) {
+          const botId = rt.selfOf(id)
+          if (rt.botOf(botId) !== undefined) rt.reflexionNote?.(botId, `tool:${String(call?.name ?? 'tool').slice(0, 60)}`)
+        }
         break
+      }
       case 'turn/start':
         setActivity(id, 'thinking')
         entry.turn = event.data.turn
@@ -476,7 +484,12 @@ export function install(rt) {
         rt.connectorTurnChanged?.(id)
         const reason = event.data?.reason
         const failure = reason?.kind === 'error' && !switched ? turnFailure(reason.error) : undefined
-        if (failure !== undefined) noteTurnFailure(id, failure)
+        if (failure !== undefined) {
+          noteTurnFailure(id, failure)
+          // A model call that fails repeatedly becomes a Reflexion note for its Bot (reflexion.js).
+          const botId = rt.selfOf(id)
+          if (rt.botOf(botId) !== undefined) rt.reflexionNote?.(botId, `model:${failure.code}`)
+        }
         if (switched) break
         // A model that writes its tool call as text ends the turn as if it were done,
         // though nothing ran. It gets one more turn on the same trigger, so a waiting

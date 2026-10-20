@@ -29,6 +29,7 @@ import { currentParticipants } from './room-membership.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { splitRef, unquote } from './text.js'
 import { output } from './tools.js'
+import { createReflexionTracker, lessonText } from './reflexion.js'
 
 // Fixed sizes, in characters. Both MEMORY.md files ride in every request of every
 // part, so together they stay near 8,000 characters, a few thousand tokens. A topic is
@@ -418,6 +419,7 @@ export function install(rt) {
   const journalPath = join(root, 'journal.jsonl')
   const dayFormat = new Intl.DateTimeFormat('en-CA', { ...(config.timeZone ? { timeZone: config.timeZone } : {}), year: 'numeric', month: '2-digit', day: '2-digit' })
   const today = () => dayFormat.format(Date.now())
+  const reflexion = createReflexionTracker()
 
   // Ids are Session ids; anything else becomes a hash, so no id can leave the folder.
   const safeId = id => (/^[\w-]{1,128}$/.test(id) ? id : createHash('sha256').update(String(id)).digest('hex').slice(0, 32))
@@ -1401,6 +1403,21 @@ export function install(rt) {
     }, 'ds-bot: memory review')
   }
 
+  // A failure that repeated becomes a lasting note in the Bot's own memory (#TBD). Best
+  // effort: a full MEMORY.md or a Bot that is gone drops the note, and it never throws into
+  // the turn that reported the failure.
+  function reflexionNote(botId, signature) {
+    if (config.reflexion === false) return
+    if (!reflexion.hit(botId, signature)) return
+    const bot = rt.botOf(botId)
+    const text = lessonText(signature)
+    if (bot === undefined || text === undefined) return
+    void addEntry({
+      scope: ownScope(botId), text, meta: { lesson: signature, added: today() },
+      actor: { id: botId, name: bot.name }, label: 'your memory',
+    }).catch(() => { /* the Bot is gone or its MEMORY.md is full: the note is dropped */ })
+  }
+
   async function memoryEndpoint(endpoint, body) {
     if (endpoint === 'memory-view') return memoryView(body)
     if (endpoint === 'memory-ask') return memoryAsk(body)
@@ -1411,5 +1428,6 @@ export function install(rt) {
   Object.assign(rt, {
     memoryEnabled: true, renewMemory, archiveBotMemory, memoryEndpoint, memoryReviews,
     memoryNews: () => Object.fromEntries(news),
+    reflexionNote,
   })
 }

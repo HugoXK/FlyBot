@@ -1152,3 +1152,28 @@ test('a review out of a cross-owner room keeps entries out of the team memory', 
   assert.equal(existsSync(join(home, 'memory', 'team', 'MEMORY.md')), false, 'no team write from another owner\'s room')
   assert.match(readFileSync(join(home, 'memory', 'bots', 'b3', 'MEMORY.md'), 'utf8'), /The launch stays on Friday/)
 })
+
+test('a tool that keeps failing leaves a Reflexion note in the Bot\'s own memory', async (t) => {
+  const { ctx, home, tool, read, stop } = start()
+  t.after(() => stop())
+  await tool('recall', {}, 'b2') // load the team so b2 is a known chat session
+  const fail = () => {
+    ctx.emitArgs('session/event', { id: 'b2' }, { type: 'tool/call', data: { callId: 'c1', name: 'bash', arguments: '{}' } })
+    ctx.emitArgs('session/event', { id: 'b2' }, { type: 'tool/result', data: { callId: 'c1', message: { isError: true } } })
+  }
+  fail(); fail(); fail()
+  const path = join(home, 'memory', 'bots', 'b2', 'MEMORY.md')
+  for (let i = 0; i < 200; i++) {
+    await settle()
+    if (existsSync(path) && read('bots', 'b2', 'MEMORY.md').includes('bash')) break
+  }
+  assert.match(read('bots', 'b2', 'MEMORY.md'), /The tool "bash" has failed several times in a row\./)
+  // A successful call first (no accumulated failures) writes nothing.
+  const cleared = start()
+  t.after(() => cleared.stop())
+  await cleared.tool('recall', {}, 'b2')
+  cleared.ctx.emitArgs('session/event', { id: 'b2' }, { type: 'tool/call', data: { callId: 'c9', name: 'webfetch', arguments: '{}' } })
+  cleared.ctx.emitArgs('session/event', { id: 'b2' }, { type: 'tool/result', data: { callId: 'c9' } })
+  await settle()
+  assert.equal(existsSync(join(cleared.home, 'memory', 'bots', 'b2', 'MEMORY.md')), false, 'a successful call notes nothing')
+})
