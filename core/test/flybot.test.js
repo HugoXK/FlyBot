@@ -785,3 +785,15 @@ test('#295: postHuman marks a friend\'s attested plain line (or @all) as for the
   assert.deepEqual(await said('hello', { attested: true, mentions: ['@chief.bob.home'] }), [false, undefined])
   assert.deepEqual(await said('hello again', { attested: true, mentions: ['@ghost.nowhere'] }), [true, undefined], 'a list this room does not know reads as no list')
 })
+
+test('#450: flybot.memory reads and writes a Bot only for an allow-listed plugin', async (t) => {
+  const { fb, stop } = await start({ flybot: { memoryPlugins: ['probe'] } })
+  t.after(stop)
+  // Not named in config.flybot.memoryPlugins: no read, no write.
+  assert.deepEqual(fb.scope('stranger').memory.read('a'), [])
+  assert.deepEqual(await fb.scope('stranger').memory.append('a', 'x'), { ok: false, code: 'not-allowed' })
+  // Named: a write goes through the ordinary path and a read sees it.
+  const listed = fb.scope('probe')
+  assert.deepEqual(await listed.memory.append('a', 'The user prefers tea'), { ok: true })
+  assert.ok(listed.memory.read('a').some(entry => entry.text === 'The user prefers tea'))
+})

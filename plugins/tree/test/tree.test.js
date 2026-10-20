@@ -1428,3 +1428,19 @@ test('#447: without parent, a new Bot goes only down leads of groups it belongs 
   // Asked from inside FlyBot Lead, its dev group takes a dev Bot.
   assert.equal(f(m, (await child(m, team.team.lead.id, 'Style Checker', 'checks code style')).created.id, 'parent'), quality)
 })
+
+test('#450: a merge carries the archived Bot\'s own memory into the kept Bot', async () => {
+  const DAY = 24 * 60 * 60 * 1000
+  let clock = Date.UTC(2026, 9, 19, 12)
+  const { m, tree, kids } = await fullChief(8, ['Cooking', 'Shopping', 'Grocery', 'Editor', 'Budget'], { now: () => clock })
+  const dup = await m.flybot.bot.create({ name: 'editor' })
+  m.setMemory(dup, [{ text: 'The user drafts in Markdown', meta: { added: '2026-10-01' } }])
+  await tree.tidy() // merge grace
+  clock += 2 * DAY
+  await tree.tidy()
+  assert.equal(f(m, dup, 'archived').reason, 'merged')
+  const kept = m.memories.get(kids.Editor) ?? []
+  const moved = kept.find(entry => entry.text === 'The user drafts in Markdown')
+  assert.ok(moved, JSON.stringify(kept))
+  assert.equal(moved.meta.source, 'merged')
+})

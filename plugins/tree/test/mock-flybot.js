@@ -21,6 +21,7 @@ export function toParameterMap(p) {
 
 export function createMockFlybot() {
   const bots = new Map() // id -> { id, name, systemPrompt, fields: { [plugin]: {...} } }
+  const memories = new Map() // id -> [{ text, meta }]  (the plugin memory seam, #450 item 1)
   const listeners = { 'change': new Set(), 'bot.created': new Set(), 'bot.removed': new Set(), 'bot.grants': new Set(), 'turn.start': new Set(), 'tool.start': new Set() }
   const apis = new Map()
   const middlewares = []
@@ -79,6 +80,12 @@ export function createMockFlybot() {
       scope: build,
       on: onFor(plugin),
       fields,
+      readOnly: () => false,
+      // The plugin memory seam (#450 item 1): reads a Bot's own entries, appends one.
+      memory: {
+        read: id => clone(memories.get(id) ?? []),
+        append: async (id, text, meta) => { memories.set(id, [...(memories.get(id) ?? []), { text: String(text), meta: meta ?? {} }]); return { ok: true } },
+      },
       bot: {
         get: id => view(bots.get(id)),
         list: () => [...bots.values()].map(view),
@@ -109,7 +116,7 @@ setSystemPrompt: (id, text) => { const b = bots.get(id); if (!b) throw new Error
           }
           return view(b)
         },
-        fields,
+      fields,
         send: Object.assign((req, opts) => send({ via: plugin, ...req }, opts), {
           use: m => { if (middlewares.some(x => x.name === m.name)) throw new Error('exists'); middlewares.push(m); return () => { const i = middlewares.indexOf(m); if (i >= 0) middlewares.splice(i, 1) } },
           list: () => order().map(m => ({ name: m.name, priority: prio(m), before: m.before ?? [], after: m.after ?? [] })),
@@ -146,5 +153,6 @@ setSystemPrompt: (id, text) => { const b = bots.get(id); if (!b) throw new Error
   // UI endpoint call (flybot.call in the browser) and an activity feed event, like the host's.
   const api = async (name, payload = {}) => { const fn = apis.get(name); if (!fn) throw new Error(`Unknown FlyBot endpoint ${name}`); return fn(payload) }
   const feed = (ev, payload) => fire(ev, payload)
-  return { flybot, bots, tools, middlewares, scopes, remote, removeBot, addBot, setGrants, call, api, feed }
+  const setMemory = (id, entries) => memories.set(id, clone(entries ?? []))
+  return { flybot, bots, tools, middlewares, scopes, remote, removeBot, addBot, setGrants, call, api, feed, memories, setMemory }
 }

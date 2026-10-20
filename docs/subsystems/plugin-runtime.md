@@ -89,6 +89,12 @@ FlyBot's plugin API surface on top of the patched core: host hooks, client slots
 
 - Classic-script plugins cannot import `src/client/mark.js`. The host client `registry()` therefore also sets `globalThis.__flybot__.BotAvatar`, `BotMark` and `lookOf` to the same components the sidebar / session list / chat header use (configured image / shape / color / emoji, else a stable look from the Bot id or a remote handle). Plugins typically render `BotAvatar` at 24px with `badge: false`; face-to-face tiles pass 48. A stored `color` / `avatar` on the record still wins; a remote Bot without one is seeded by `remoteSeed(handle)`. A face-room `members[]` look overlays the chat record (`lookBotForRemote`).
 
+### A plugin's memory access (#450 item 1)
+
+- `flybot.memory.read(botId)` returns a Bot's own saved entries (`{ text, meta }`, capped), and `flybot.memory.append(botId, text, meta?)` writes one through the ordinary memory path (secret-scanned, size-capped, journaled). It is the seam the tree uses to carry a merged Bot's memory into the one that keeps it.
+- **Off unless named.** The host config `flybot.memoryPlugins` is an allow-list; an unnamed plugin's `read` returns `[]` and its `append` resolves `{ ok: false, code: 'not-allowed' }`. The list is empty by default.
+- Bounded and safe: at most 200 entries are read; an entry with a secret or over the entry size is refused; `append` never throws into the caller (it resolves a short `code`). A read-only host refuses the write. Tests: the `flybot.memory` case in `core/test/flybot.test.js`.
+
 ## Tests
 
 `core/test/flybot.test.js`, `core/test/flybot-client.test.js` via `npm test`.
