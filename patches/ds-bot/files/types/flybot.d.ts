@@ -313,6 +313,18 @@ export interface FlyBotTool {
   execute(args: any, exec: { botId: BotId; agent?: { id: string }; [key: string]: unknown }): unknown | Promise<unknown>
 }
 
+export interface ModelAsk {
+  /** One prompt, up to a host-capped length. */
+  prompt: string
+  /** An optional system line, up to a host-capped length. */
+  system?: string
+  /** Requested output tokens; the host clamps it to its own ceiling. */
+  maxTokens?: number
+  /** A `provider/model` ref; the team default model is used when omitted. */
+  model?: string
+}
+export type ModelAnswer = { ok: true; text: string } | { ok: false; code: string }
+
 export interface FlyBot {
   version: 1
   /** Plugin this handle is scoped to; 'shared' for the unscoped service. */
@@ -323,6 +335,13 @@ export interface FlyBot {
   ready(): Promise<void>
   /** True while another dsh holds the team: no polling, no writes. */
   readOnly(): boolean
+  /**
+   * A sanctioned, capped model call for this plugin (#450). Off unless the host names the
+   * plugin in config.flybot.modelPlugins; text only (no side effect), capped input/output and
+   * per-minute rate, refused on a read-only host. Resolves `{ ok: true, text }` or
+   * `{ ok: false, code }` where `code` is a short token (never provider text).
+   */
+  model: { ask(input: ModelAsk): Promise<ModelAnswer> }
   on: On
   /** Writes a warning to the host diagnostics log (Settings → Feedback). */
   warn(template: string, ...args: unknown[]): void

@@ -18,6 +18,7 @@ import { SOURCE_KIND } from './constants.js'
 import { currentParticipants, isFaceRoom } from './room-membership.js'
 import { faceMentions, mentionedByHandle } from './face-mentions.js'
 import { FEED_EVENTS, installFeed } from './flybot-feed.js'
+import { createPluginModel } from './plugin-model.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const FLYBOT_API_VERSION = 1
@@ -99,6 +100,8 @@ export function install(rt) {
   const { ctx, state, config } = rt
   // config.flybot.bypass: { <middleware that asks>: [<middleware names it may skip>] }
   const bypassGrants = config?.flybot?.bypass ?? {}
+  // A sanctioned, capped model call for a named plugin (#450). Empty allow-list by default.
+  const modelAsk = createPluginModel(rt, { allow: config?.flybot?.modelPlugins ?? [] })
   const warn = (...args) => rt.warn?.(...args)
   const emit = (name, payload) => { try { ctx.emit?.(name, payload) } catch (error) { warn('flybot: %s listener failed: %s', name, error) } }
 
@@ -960,6 +963,9 @@ export function install(rt) {
     fields,
     // True while another dsh holds the team: plugins then only read (no polling, no writes).
     readOnly: () => rt.readOnly() !== undefined,
+    // A sanctioned, capped model call for THIS plugin (#450): allow-listed by config, text only,
+    // no side effect. Resolves `{ ok: true, text }` or `{ ok: false, code }`.
+    model: { ask: input => modelAsk(plugin, input) },
     // True while a FlyBot window on screen reads the team (#497): a plugin that polls a remote inbox
     // reads it at its live cadence then, so what arrives shows in that window within seconds.
     watched: () => rt.watched?.() === true,

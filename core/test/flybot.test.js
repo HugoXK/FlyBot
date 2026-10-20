@@ -785,3 +785,13 @@ test('#295: postHuman marks a friend\'s attested plain line (or @all) as for the
   assert.deepEqual(await said('hello', { attested: true, mentions: ['@chief.bob.home'] }), [false, undefined])
   assert.deepEqual(await said('hello again', { attested: true, mentions: ['@ghost.nowhere'] }), [true, undefined], 'a list this room does not know reads as no list')
 })
+
+test('#450: flybot.model.ask is refused unless the host allow-lists the plugin', async (t) => {
+  const { fb, stop } = await start({ flybot: { modelPlugins: ['probe'] } })
+  t.after(stop)
+  assert.equal(typeof fb.scope('probe').model.ask, 'function')
+  // Not named in config.flybot.modelPlugins: nothing calls a model.
+  assert.deepEqual(await fb.scope('stranger').model.ask({ prompt: 'hi' }), { ok: false, code: 'not-allowed' })
+  // Named, but this host serves no model: the gate opened, the call found none.
+  assert.deepEqual(await fb.scope('probe').model.ask({ prompt: 'hi' }), { ok: false, code: 'no-model' })
+})

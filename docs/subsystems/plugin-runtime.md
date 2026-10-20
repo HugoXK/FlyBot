@@ -2,6 +2,7 @@
 subsystem: plugin-runtime
 owned_paths:
   - core/src/host/hooks.js
+  - core/src/host/plugin-model.js
   - core/src/host/flybot-feed.js
   - core/src/client/flybot-slots.js
   - core/src/client/flybot-registry.js
@@ -89,9 +90,16 @@ FlyBot's plugin API surface on top of the patched core: host hooks, client slots
 
 - Classic-script plugins cannot import `src/client/mark.js`. The host client `registry()` therefore also sets `globalThis.__flybot__.BotAvatar`, `BotMark` and `lookOf` to the same components the sidebar / session list / chat header use (configured image / shape / color / emoji, else a stable look from the Bot id or a remote handle). Plugins typically render `BotAvatar` at 24px with `badge: false`; face-to-face tiles pass 48. A stored `color` / `avatar` on the record still wins; a remote Bot without one is seeded by `remoteSeed(handle)`. A face-room `members[]` look overlays the chat record (`lookBotForRemote`).
 
+### A plugin's sanctioned model call (#450)
+
+- `flybot.model.ask({ prompt, system?, maxTokens?, model? })` is the one pattern for a plugin to make a short model call (a classification, a title, a one-line summary). `src/host/plugin-model.js` builds it; `hooks.js` exposes it per scope as `model.ask`.
+- **Off unless named.** The host config `flybot.modelPlugins` is an allow-list; an unnamed plugin gets `{ ok: false, code: 'not-allowed' }`, and the list is empty by default, so nothing calls a model unless the deployment opts in.
+- **Capped and safe.** Input and system length, output tokens and calls-per-minute are bounded (`MODEL_LIMITS`); the call streams through the host's own model selection and returns `{ ok: true, text }` or `{ ok: false, code }` — a short token, never provider text (a provider may echo a key). It refuses on a read-only host. It answers with text only: it creates or changes no Bot, room or memory, so a plugin's model call has no side effect the owner cannot see.
+- Tests: `core/test/plugin-model.test.js` (limits, allow-list, rate, error mapping) and the `flybot.model` case in `core/test/flybot.test.js`.
+
 ## Tests
 
-`core/test/flybot.test.js`, `core/test/flybot-client.test.js` via `npm test`.
+`core/test/flybot.test.js`, `core/test/flybot-client.test.js`, `core/test/plugin-model.test.js` via `npm test`.
 
 ## Common mistakes
 
