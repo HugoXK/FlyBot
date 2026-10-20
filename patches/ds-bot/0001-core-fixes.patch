@@ -2259,7 +2259,7 @@ diff --git a/src/host/diagnostics.js b/src/host/diagnostics.js
 diff --git a/src/host/memory.js b/src/host/memory.js
 --- a/src/host/memory.js
 +++ b/src/host/memory.js
-@@ -25,6 +25,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSyn
+@@ -25,9 +25,11 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSyn
  import { appendFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
  import { dirname, join } from 'node:path'
  import { BlockAssembler } from '@deepseek-ai/dsh-llm'
@@ -2267,6 +2267,10 @@ diff --git a/src/host/memory.js b/src/host/memory.js
  import { defineTool } from '@deepseek-ai/dsh-tools'
  import { splitRef, unquote } from './text.js'
  import { output } from './tools.js'
++import { botNode, buildGraph, buildIndex, relatedOf, searchIndex, topicNode } from './memory-search.js'
+ 
+ // Fixed sizes, in characters. Both MEMORY.md files ride in every request of every
+ // part, so together they stay near 8,000 characters, a few thousand tokens. A topic is
 @@ -312,7 +312,7 @@ const teamRule = (main, writer) => (main
      ? '- The team memory is shared by every Bot. As a group admin you write it with remember scope "team", for what the whole team needs.'
      : '- The team memory is shared by every Bot. Main Bots and group admins write it; when the whole team should know something, tell a Main Bot with message_bot.')
@@ -2329,6 +2333,64 @@ diff --git a/src/host/memory.js b/src/host/memory.js
        const dir = dirOf(ownScope(botId))
        if (!existsSync(dir)) return
        const name = `${safeId(botId)}-${new Date().toISOString().replace(/[:.]/g, '-')}`
+@@ -837,11 +837,13 @@ export function install(rt) {
+ 
+   ctx.tools.register(defineTool({
+     name: 'recall',
+-    description: 'Search your memory and the team memory, or read one topic whole. It also finds entries saved after this conversation began. With no arguments, lists what is saved where.',
++    description: 'Search your memory and the team memory, or read one topic whole. It also finds entries saved after this conversation began. With semantic: "true" it ranks entries by meaning, so an entry whose wording differs from the query still matches. With related it lists what a topic or Bot links to ([[topic]] references and who wrote it). With no arguments, lists what is saved where.',
+     parameters: {
+       query: { type: 'string', description: 'Words to look for, separated by spaces. An entry must have all of them; when none has, those with the most are shown' },
+       topic: { type: 'string', description: 'A topic to read whole, as listed with [[topic]]' },
+       scope: { type: 'string', description: 'Omit for yours and the team\'s; "own", "team", or a Bot\'s name (Main Bots only)' },
++      semantic: { type: 'string', enum: ['true', 'false'], description: 'Set to "true" to rank entries by meaning instead of exact words, when the query wording may differ from what was saved' },
++      related: { type: 'string', description: 'A topic or Bot name; lists what memory links it to, instead of searching' },
+     },
+     output,
+     async execute(args, exec) {
+@@ -861,6 +861,20 @@ export function install(rt) {
+         const known = loaded.flatMap(({ tag, files }) => files.filter(file => file.topic).map(file => `[[${file.topic}]] (${tag})`))
+         return `No topic [[${String(args.topic).slice(0, 60)}]] there. Topics: ${known.join(', ') || 'none yet'}.`
+       }
++      const related = String(args.related ?? '').trim().slice(0, 60)
++      if (related !== '') {
++        const labels = loaded.map(item => item.label).join(' and ')
++        const graph = buildGraph(loaded.flatMap(({ files }) => files.map(file => ({ topic: file.topic, entries: file.entries }))))
++        const start = graph.has(topicNode(related)) ? topicNode(related) : graph.has(botNode(related)) ? botNode(related) : null
++        if (start === null) return `Nothing in ${labels} links "${related}". Its topics are listed with no arguments.`
++        const show = node => (node.kind === 'bot' ? `Bot ${node.name}` : `[[${node.name}]]`)
++        const { neighbours } = relatedOf(graph, start, { hops: 2 })
++        if (neighbours.length === 0) return `${show(start)} in ${labels} links to nothing else yet.`
++        return [
++          `Near ${show(start)} in ${labels}:`,
++          ...neighbours.map(node => `- ${show(node)} — ${node.via === 'by' ? 'wrote it' : 'linked'}${node.distance > 1 ? ', 2 steps away' : ''}`),
++        ].join('\n')
++      }
+       const where = (tag, file) => `${tag} · ${file.topic === undefined ? MAIN : `[[${file.topic}]]`}`
+       const query = String(args.query ?? '').trim().slice(0, 120)
+       if (query === '') {
+@@ -872,6 +872,21 @@ export function install(rt) {
+           ].join('\n')
+         }).join('\n\n')
+       }
++      const wantsSemantic = /^(1|true|yes|on)$/i.test(String(args.semantic ?? '').trim())
++      if (wantsSemantic) {
++        const labels = loaded.map(item => item.label).join(' and ')
++        const docs = loaded.flatMap(({ tag, label, files }) => allEntries(files).map(entry => ({
++          key: `${tag}|${entry.file.topic ?? 'memory'}|${entry.line}`,
++          ref: `${entry.text} ${entry.file.topic ?? ''}`,
++          entry, tag, label, file: entry.file,
++        })))
++        const hits = searchIndex(buildIndex(docs), query, { k: RECALL_MAX })
++        if (hits.length === 0) return `Nothing in ${labels} is close to "${query}". read_own_chat searches what was said.`
++        return [
++          `Entries closest in meaning to "${query}" in ${labels}:`,
++          ...hits.map(({ doc }) => `[${where(doc.tag, doc.file)}] ${formatEntry(doc.entry.text, doc.entry.meta).slice(2)}`),
++        ].join('\n')
++      }
+       const terms = [...new Set(squash(query).split(' ').filter(Boolean))].slice(0, QUERY_TERMS_MAX)
+       const scored = loaded.flatMap(({ tag, files }) => allEntries(files).map((entry) => {
+         const hay = squash(`${entry.text} ${entry.file.topic ?? ''}`)
 @@ -941,6 +941,8 @@ export function install(rt) {
    // desiredModel only falls back for models that are not served; so a failed call
    // is tried once more on the profile default.
@@ -4185,7 +4247,7 @@ diff --git a/test/memory.test.js b/test/memory.test.js
    const view = (await call('memory-view', { botId: 'b2' })).value
    assert.equal(view.error, null)
    assert.equal(view.summary?.text, 'You like tea.')
-@@ -1076,3 +1076,70 @@ test('a memory call names the current part of the Bot chat', async (t) => {
+@@ -1076,3 +1076,94 @@ test('a memory call names the current part of the Bot chat', async (t) => {
    assert.equal(answer.ok, true)
    assert.equal(requests[0].sessionId, 'b2-part2')
  })
@@ -4255,6 +4317,30 @@ diff --git a/test/memory.test.js b/test/memory.test.js
 +  }
 +  assert.equal(existsSync(join(home, 'memory', 'team', 'MEMORY.md')), false, 'no team write from another owner\'s room')
 +  assert.match(readFileSync(join(home, 'memory', 'bots', 'b3', 'MEMORY.md'), 'utf8'), /The launch stays on Friday/)
++})
++
++test('recall semantic ranks entries by meaning, not only by exact words', async (t) => {
++  const { tool, stop } = start()
++  t.after(() => stop())
++  await tool('remember', { text: 'The user prefers window seats on long flights' }, 'b2')
++  await tool('remember', { text: 'The user ships releases on Friday' }, 'b2')
++  const out = await tool('recall', { query: 'flight seat', semantic: 'true' }, 'b2')
++  assert.match(out, /^Entries closest in meaning to "flight seat" in your memory and the team memory:/)
++  assert.match(out.split('\n')[1], /window seats/, 'the worded-differently entry is the top hit')
++  assert.doesNotMatch(out, /Friday/, 'an entry that shares no meaning is left out')
++  // The default path is unchanged: exact words still drive it.
++  assert.match(await tool('recall', { query: 'window' }, 'b2'), /^Entries with "window"/)
++})
++
++test('recall related lists what a topic links to', async (t) => {
++  const { tool, stop } = start()
++  t.after(() => stop())
++  await tool('remember', { text: 'Trip plan to Hangzhou', topic: 'travel' }, 'b2')
++  await tool('remember', { text: 'See [[travel]] for the whole trip' }, 'b2')
++  const out = await tool('recall', { related: 'travel' }, 'b2')
++  assert.match(out, /^Near \[\[travel\]\] in your memory and the team memory:/)
++  assert.match(out, /- \[\[memory\]\] — linked/)
++  assert.match(await tool('recall', { related: 'nothinghere' }, 'b2'), /Nothing in your memory and the team memory links "nothinghere"/)
 +})
 diff --git a/test/model-menu.test.js b/test/model-menu.test.js
 --- a/test/model-menu.test.js

@@ -67,6 +67,12 @@ external backend or task-specific session mapping; see the
 
 - Context sharing (#53) is specified in [team](team.md), **Context sharing foundation**: the own-chat brief is share-gated (`share-brief` / `briefShared`), a memory review reads only its owner as the user (`isUserLine`) and labels another human as `peer` (not `bot`), and keeps cross-owner entries out of the team scope (`teamAllowedFrom`), `list_bots` lists only the caller's owner's Bots (a granted child: that child's `createdBy` subtree), Bots granted to the same owner, and Bots in the current room — another owner's folder and instructions stay private — and a `dsh-session:` chip in actor-authored `send` / `room-post` / `answer-question` / `schedule-create` text must resolve for the author (`sessionOwnedBy`; `schedule-create` authz keys off `body.target`). Bot-authored group posts and Bot-to-Bot / own-chat followups drop chips so they cannot tunnel a private chat into another Session. Host modules: `src/host/groups.js`, `src/host/memory.js`, `src/host/tools.js`, `src/host/channel.js`, `src/host/room-membership.js`, `src/host/authz.js`. Team mode stays disabled.
 
+### Memory recall: semantic and graph
+
+- `src/host/memory-search.js` derives two recall aids from the memory files that `src/host/memory.js` already reads; both are pure and rebuildable, and the Markdown files stay the only source of truth.
+  - Hybrid ranking: `termsOf`/`buildIndex`/`searchIndex` build a sparse TF-IDF vector per entry over words, word character trigrams (4+ letters, so a shared stem matches across endings) and CJK uni/bi-grams, and rank by cosine. `recall` uses it only when called with `semantic: "true"`; the default exact-word path is unchanged, so an existing call scores and prints exactly as before.
+  - Graph: `buildGraph`/`relatedOf` turn `[[topic]]` references into topic→topic edges and a `by:` metadata value into file→Bot edges; `recall` with `related` walks them (undirected, up to two hops) and lists what is near a topic or Bot. Tests: `core/test/memory-search.test.js` (pure) and the two `recall` cases in `core/test/memory.test.js`.
+
 ### Tasks
 
 The requester may also cancel a `result-ready` task before acceptance (#202).
