@@ -163,3 +163,14 @@ test('a turn end keeps the model it ran on, cleaned; a turn with none stores no 
   assert.deepEqual(records().slice(1).map(record => record.md), ['deepseek/deepseek-v4-pro', undefined, 'evil/script x', undefined])
   assert.equal('md' in records()[2], false)
 })
+
+test('a turn\'s token usage is recorded in short keys, and a turn with none records no key', () => {
+  const { feed, records } = setup()
+  feed('turn.start', { ...base, turnId: 's1#1', turn: 1, time: 4_100 })
+  feed('turn.start', { ...base, turnId: 's1#2', turn: 2, time: 4_200 })
+  feed('turn.end', { ...base, turnId: 's1#1', turn: 1, time: 4_900, outcome: 'completed', tokens: { input: 100, cacheRead: 5, cacheWrite: 0, output: 20 } })
+  feed('turn.end', { ...base, turnId: 's1#2', turn: 2, time: 5_100, outcome: 'completed' })
+  const ends = records().filter(record => record.r === 'te')
+  assert.deepEqual(ends[0].tk, { in: 100, cr: 5, out: 20 })
+  assert.equal(ends[1].tk, undefined)
+})

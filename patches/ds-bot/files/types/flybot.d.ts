@@ -117,6 +117,11 @@ export interface TurnEnded extends FeedPlace {
    * turn that made no model call, for place 'remote', and when DSH logged no header.
    */
   model?: string
+  /**
+   * Token counts the turn's model calls reported (summed over the turn's assistant messages),
+   * each floored and capped. Absent when the adapter reported none. Counts only, never text.
+   */
+  tokens?: { input: number; cacheRead: number; cacheWrite: number; output: number }
 }
 
 export interface ToolStarted extends FeedPlace {

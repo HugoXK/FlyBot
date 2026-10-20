@@ -12,7 +12,7 @@
 //   ke    tool end     { id, tid, ok, ir? }                    ir = the turn ended first
 //   m     delivered    { id, f, to, ro, hop, rt?, room?, n }   f/to = party; rt = replyTo
 // No message text, tool arguments or tool output is ever read from an event.
-import { cleanCode, cleanCount, cleanId, cleanLabel, cleanTime } from './sanitize.js'
+import { cleanCode, cleanCount, cleanId, cleanLabel, cleanTime, cleanTokens } from './sanitize.js'
 
 const PLACES = new Set(['chat', 'group', 'room'])
 const OUTCOMES = new Set(['completed', 'aborted', 'error'])
@@ -97,7 +97,8 @@ export function createRecorder({ adapter, trace, now = Date.now }) {
       if (!id || !t) return
       const o = OUTCOMES.has(event.outcome) ? event.outcome : 'completed'
       const md = typeof event.model === 'string' ? cleanLabel(event.model, 120) : ''
-      write({ r: 'te', t, id, o, ...(o === 'error' ? { ec: cleanCode(event.errorCode) } : {}), ...(md ? { md } : {}) })
+      const tk = cleanTokens(event.tokens)
+      write({ r: 'te', t, id, o, ...(o === 'error' ? { ec: cleanCode(event.errorCode) } : {}), ...(md ? { md } : {}), ...(tk ? { tk } : {}) })
     },
     'tool.start'(event) {
       if (isRemoteChat(event)) return

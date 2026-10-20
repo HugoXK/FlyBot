@@ -22,3 +22,15 @@ export const cleanCount = (value, max = 1e6) => (Number.isInteger(value) && valu
 // An error code is an enumerated value (RATE_LIMIT, AUTH, ...), never free text: upper-case
 // words only, so a message or a key that was put in the field is not kept.
 export const cleanCode = value => (typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,39}$/.test(value) ? value : 'UNKNOWN')
+
+// The token counts a turn spent, kept as short-keyed integers (in/cr/cw/out), each capped; a
+// turn that reported none gives undefined, so the record stays small.
+export const cleanTokens = (value) => {
+  if (value === null || typeof value !== 'object') return undefined
+  const out = {}
+  for (const [from, to] of [['input', 'in'], ['cacheRead', 'cr'], ['cacheWrite', 'cw'], ['output', 'out']]) {
+    const count = value[from]
+    if (Number.isInteger(count) && count > 0) out[to] = Math.min(count, 1_000_000_000)
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}

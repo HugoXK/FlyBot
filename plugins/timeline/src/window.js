@@ -70,7 +70,7 @@ function fold(records) {
         break
       case 'te': {
         const turn = turns.get(record.id)
-        if (turn && turn.t1 === undefined) Object.assign(turn, { t1: Math.max(turn.t0, record.t), outcome: record.o, errorCode: record.ec, model: typeof record.md === 'string' ? cleanLabel(record.md, 120) : undefined })
+        if (turn && turn.t1 === undefined) Object.assign(turn, { t1: Math.max(turn.t0, record.t), outcome: record.o, errorCode: record.ec, model: typeof record.md === 'string' ? cleanLabel(record.md, 120) : undefined, ...(record.tk && typeof record.tk === 'object' ? { tokens: record.tk } : {}) })
         break
       }
       case 'ks':
@@ -253,6 +253,13 @@ export function buildWindow(records, { now = Date.now(), to, windowMs, bots = []
     }
   })
 
+  // ---- token spend per Bot (#357/#401): the model calls a turn reported usage for, summed
+  const usage = lanes.filter(lane => lane.kind === 'bot').map((lane) => {
+    const calls = turnList.filter(turn => turn.bot === lane.id && turn.place !== 'room' && turn.tokens)
+    const sum = key => calls.reduce((total, turn) => total + (turn.tokens[key] ?? 0), 0)
+    return { lane: lane.id, calls: calls.length, input: sum('in'), output: sum('out'), cacheRead: sum('cr'), cacheWrite: sum('cw') }
+  })
+
   // ---- communication map: directed edges, "A waits on B" from request -> reply latencies
   const edgeMap = new Map()
   for (const arrow of exchanges) {
@@ -273,6 +280,6 @@ export function buildWindow(records, { now = Date.now(), to, windowMs, bots = []
     coverage: { oldest: oldest ?? null, newest: last || null, complete: oldest !== undefined && oldest <= lo },
     trace: stats ?? null,
     truncated,
-    lanes, turns: shapedTurns, rounds, exchanges, utilization, edges,
+    lanes, turns: shapedTurns, rounds, exchanges, utilization, edges, usage,
   }
 }

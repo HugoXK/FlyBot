@@ -243,3 +243,18 @@ test('turns name the model they ran on; an old or malformed record has none (#36
   assert.equal('model' in turn('a#2'), false)
   assert.equal(turn('b#2').model, 'x/bbold/b')
 })
+
+test('usage: token spend per Bot (#357/#401)', () => {
+  const recs = [
+    { r: 'ts', t: at(1000), id: 'a#1', pl: 'chat', bot: 'a' },
+    { r: 'te', t: at(2000), id: 'a#1', o: 'completed', tk: { in: 100, out: 20 } },
+    { r: 'ts', t: at(3000), id: 'a#2', pl: 'chat', bot: 'a' },
+    { r: 'te', t: at(4000), id: 'a#2', o: 'completed', tk: { in: 50, cr: 5, out: 10 } },
+    { r: 'ts', t: at(5000), id: 'b#1', pl: 'chat', bot: 'b' },
+    { r: 'te', t: at(6000), id: 'b#1', o: 'completed' },
+  ]
+  const win = buildWindow(recs, { now: at(10_000), bots, rooms })
+  const a = win.usage.find(entry => entry.lane === 'a')
+  assert.deepEqual([a.calls, a.input, a.output, a.cacheRead], [2, 150, 30, 5])
+  assert.equal(win.usage.find(entry => entry.lane === 'b').calls, 0)
+})

@@ -319,3 +319,14 @@ test('negative: a model name is cleaned, and a friend\'s Bot chat never names on
   assert.equal(remote.place, 'remote')
   assert.equal('model' in remote, false)
 })
+
+test('a turn folds the token usage its model calls reported (#357), and never a hostile count', async (t) => {
+  const { feed, emit, stop } = await boot()
+  t.after(stop)
+  emit('a', 'turn/start', { turn: 1 }, 2010)
+  emit('a', 'assistant/message', { usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 5 } }, 2100)
+  emit('a', 'assistant/message', { usage: { inputTokens: 50, outputTokens: 10 } }, 2200)
+  emit('a', 'assistant/message', { usage: { inputTokens: -9, outputTokens: 'lots' } }, 2300)
+  emit('a', 'turn/end', { turn: 1, reason: { kind: 'completed' } }, 3000)
+  assert.deepEqual(only(feed, 'turn.end')[0].tokens, { input: 150, cacheRead: 5, output: 30 })
+})

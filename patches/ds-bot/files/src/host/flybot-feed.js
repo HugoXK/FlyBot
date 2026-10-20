@@ -36,6 +36,24 @@ const textLength = (content) => {
 }
 const omitUndefined = object => Object.fromEntries(Object.entries(object).filter(([, value]) => value !== undefined))
 
+// Token counts a turn spent, when the adapter reports them (an assistant/message usage, the same
+// shape usage.js reads: inputTokens / cacheReadTokens / cacheWriteTokens / outputTokens). Counts
+// only, never text; each is floored and capped, so a hostile number cannot be kept or overflow.
+const TOKEN_FIELDS = Object.freeze([['inputTokens', 'input'], ['cacheReadTokens', 'cacheRead'], ['cacheWriteTokens', 'cacheWrite'], ['outputTokens', 'output']])
+const TOKEN_MAX = 1_000_000_000
+const cleanTokens = (usage) => {
+  const out = {}
+  for (const [from, to] of TOKEN_FIELDS) { const value = usage?.[from]; if (Number.isFinite(value) && value > 0) out[to] = Math.min(TOKEN_MAX, Math.floor(value)) }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+const addTokens = (total, usage) => {
+  const clean = cleanTokens(usage)
+  if (clean === undefined) return total
+  const next = { ...(total ?? {}) }
+  for (const [key, value] of Object.entries(clean)) next[key] = Math.min(TOKEN_MAX, (next[key] ?? 0) + value)
+  return next
+}
+
 // `fire(name, payload)` hands a payload to the service's listeners (hooks.js).
 export function installFeed(rt, fire) {
   const { ctx } = rt
@@ -187,13 +205,19 @@ export function installFeed(rt, fire) {
         // A turn that never ended (a crash) is closed by the next one.
         if (entry.turn !== undefined) {
           closeCalls(id, entry, where, turnId, timeOf(event), true)
-          fire('turn.end', omitUndefined({ ...base, turnId, turn: entry.turn, time: timeOf(event), outcome: 'aborted', interrupted: true, model: turnModel(session, id, entry, where) }))
+          fire('turn.end', omitUndefined({ ...base, turnId, turn: entry.turn, time: timeOf(event), outcome: 'aborted', interrupted: true, model: turnModel(session, id, entry, where), tokens: entry.usage }))
         }
         entry.turn = turn
         entry.stepped = false
+        entry.usage = undefined
         const trigger = triggerOf(entry.pending)
         entry.pending = undefined
         fire('turn.start', omitUndefined({ ...base, turnId: `${id}#${turn}`, turn, time: timeOf(event), seq: seqOf(event), trigger }))
+        return
+      }
+      case 'assistant/message': {
+        // One assistant message is one model call; its usage is summed over the turn's calls.
+        if (entry.turn !== undefined) entry.usage = addTokens(entry.usage, event.data?.usage)
         return
       }
       case 'step/start':
@@ -229,9 +253,10 @@ export function installFeed(rt, fire) {
         const kind = event.data?.reason?.kind
         const outcome = OUTCOMES.has(kind) ? kind : 'completed'
         const errorCode = outcome === 'error' ? cleanCode(event.data?.reason?.error?.code) : undefined
-        fire('turn.end', omitUndefined({ ...base, turnId, turn: entry.turn, time, seq: seqOf(event), outcome, errorCode, model: turnModel(session, id, entry, where) }))
+        fire('turn.end', omitUndefined({ ...base, turnId, turn: entry.turn, time, seq: seqOf(event), outcome, errorCode, model: turnModel(session, id, entry, where), tokens: entry.usage }))
         entry.turn = undefined
         entry.stepped = false
+        entry.usage = undefined
         if (entry.pending === undefined) sessions.delete(id)
         return
       }
