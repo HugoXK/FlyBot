@@ -1428,3 +1428,22 @@ test('#447: without parent, a new Bot goes only down leads of groups it belongs 
   // Asked from inside FlyBot Lead, its dev group takes a dev Bot.
   assert.equal(f(m, (await child(m, team.team.lead.id, 'Style Checker', 'checks code style')).created.id, 'parent'), quality)
 })
+
+test('#TBD: a coordinator plans, a child reports, and the plan shows in the prompt', async () => {
+  const m = await setup()
+  const work = await make(m, m.root, 'Work')
+  const saved = await m.call(m.root, 'set_plan', { goal: 'Ship the launch', parts: ['Research flights', 'Book hotel'] })
+  assert.deepEqual(saved.plan.map(p => p.name), ['Research flights', 'Book hotel'])
+  assert.match(sp(m, m.root), /Your delegation plan for "Ship the launch"/)
+  const report = await m.call(work, 'report_part', { part: 'Book hotel', status: 'done', note: 'booked' })
+  assert.equal(report.part.status, 'done')
+  assert.equal(f(m, m.root, 'plan').parts.find(p => p.name === 'Book hotel').status, 'done')
+  assert.match(sp(m, m.root), /\(1\/2 done\)\)?\. Still open: Research flights \[todo\]/)
+  // A child reads its own (none) and its parent's plan.
+  const read = await m.call(work, 'read_plan', {})
+  assert.equal(read.plan, null)
+  assert.equal(read.parent.goal, 'Ship the launch')
+  // Errors are reported, not thrown.
+  assert.match((await m.call(m.root, 'set_plan', { goal: 'g', parts: [] })).error, /at least one part/)
+  assert.match((await m.call(work, 'report_part', { part: 'nope', status: 'done' })).error, /no part in the plan/)
+})

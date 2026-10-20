@@ -12,6 +12,7 @@ import { systemPrompt, withTreeBlock, hasTreeBlock } from './prompt.js'
 import { forestOf } from './forest.js'
 import { createOrganizer } from './organize.js'
 import { createAllocator } from './allocate.js'
+import { PLAN_KEY, planLine } from './plan.js'
 export { forestOf }
 
 export const TREE_KEYS = new Set(['parent', 'treeRole'])
@@ -38,7 +39,7 @@ export function createTree(fb, { limits, rootName = 'Root', rootBotId, adoptExis
 
   const promptFor = (id, nodes = snapshot()) => {
     const n = nodes[id]
-    return n && systemPrompt({ name: n.name, role: n.role, trace: traceOf(nodes, id), children: childrenOf(nodes, id), root: n.root, notes: notesFor(id, n), limits })
+    return n && systemPrompt({ name: n.name, role: n.role, trace: traceOf(nodes, id), children: childrenOf(nodes, id), root: n.root, notes: [...notesFor(id, n), ...planNotes(id)], limits })
   }
   const stamp = at => { const d = new Date(at); const p = v => String(v).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}` }
   // The Main Bot hears what the last reorganization did (the owner sees it in the tree view); a kept
@@ -55,6 +56,12 @@ export function createTree(fb, { limits, rootName = 'Root', rootBotId, adoptExis
     const merged = fb.getField(id, 'mergedFrom')
     if (Array.isArray(merged) && merged.length) notes.push(`You took over the role of ${merged.map(m => m.name).join(', ')} (merged into you; the old Bot is archived with its own chat history).`)
     return notes
+  }
+  // The delegation plan (#TBD) the Bot set, as one prompt line, so it sees its own split and
+  // the progress its children reported.
+  function planNotes(id) {
+    const line = planLine(fb.getField(id, PLAN_KEY))
+    return line === undefined ? [] : [line]
   }
   // Prompt injection: only the tree's marked block is replaced; other text (e.g. Chief's own) stays.
   const writeBlock = (id, block) => {
@@ -240,5 +247,5 @@ export function createTree(fb, { limits, rootName = 'Root', rootBotId, adoptExis
 
   const { tidy: tidyNow, maybeTidy, undo, dismiss, overview, noteActivity, idle: settled, repairArchiveNames } = organizer
   const { findBots, createChild: allocateChild, createTeam } = allocator
-  return { tidy: tidyNow, maybeTidy, undo, dismiss, overview, noteActivity, settled, repairArchiveNames, limits, forest, adoptUnattached, snapshot, childrenOf, depthOf, traceOf, ensureRoot, adoptChief, findChief, migrateLegacyRoots, promptFor, createChild, allocateChild, createTeam, findBots, isMember, isRoot, rootOf, isTreeEdge, onFieldChange, onBotRemoved, subscribe }
+  return { tidy: tidyNow, maybeTidy, undo, dismiss, overview, noteActivity, settled, repairArchiveNames, limits, forest, adoptUnattached, snapshot, childrenOf, depthOf, traceOf, ensureRoot, adoptChief, findChief, migrateLegacyRoots, promptFor, refreshPrompt, parentOf, createChild, allocateChild, createTeam, findBots, isMember, isRoot, rootOf, isTreeEdge, onFieldChange, onBotRemoved, subscribe }
 }

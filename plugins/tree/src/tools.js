@@ -1,5 +1,6 @@
 import { MAX_NAME_LENGTH } from './limits.js' // = ds-bot roster's 40-character name truncation
 import { MAX_TEAM_LENGTH } from './allocate.js'
+import { PLAN_KEY, makePlan, planLine, reportPart } from './plan.js'
 // Model tools. The caller comes from the tool context ({ botId }), never from arguments. A Bot
 // creates only in its own downstream: `parent` must be the caller or one of its descendants (#447).
 // Visible to every tree member (#16 Option B: not Main/root-only). maxChildren and depth are
@@ -58,6 +59,26 @@ export const CREATE_TEAM_SCHEMA = Object.freeze({
   required: ['team', 'members'],
   additionalProperties: false,
 })
+export const SET_PLAN_SCHEMA = Object.freeze({
+  type: 'object',
+  properties: {
+    goal: { type: 'string', minLength: 1, maxLength: 300, description: 'One line: what the whole task is.' },
+    parts: { type: 'array', items: { type: 'string' }, description: 'The parts you split it into, one short name each, in the wording a child will recognize. At most 12.' },
+  },
+  required: ['goal', 'parts'],
+  additionalProperties: false,
+})
+export const REPORT_PART_SCHEMA = Object.freeze({
+  type: 'object',
+  properties: {
+    part: { type: 'string', minLength: 1, maxLength: 60, description: 'The part you report on: its id (p2) or its name.' },
+    status: { type: 'string', enum: ['todo', 'doing', 'done', 'blocked'], description: 'done when finished; blocked when it cannot go on.' },
+    note: { type: 'string', maxLength: 200, description: 'One short line of result or reason, when it helps.' },
+  },
+  required: ['part', 'status'],
+  additionalProperties: false,
+})
+export const READ_PLAN_SCHEMA = Object.freeze({ type: 'object', properties: {}, additionalProperties: false })
 
 export function registerTreeTools(fb, tree) {
   const inTree = botId => tree.isMember(botId) // visibleTo is sync
@@ -107,6 +128,54 @@ export function registerTreeTools(fb, tree) {
         const bad = validateArgs(CREATE_TEAM_SCHEMA, args)
         if (bad) return fail(bad)
         try { return await tree.createTeam(botId, { team: args.team, members: args.members, parent: args.parent }) } catch (e) { return fail(e) }
+      },
+    }),
+    fb.registerTool({
+      name: 'set_plan',
+      description: 'Record your split of a task into parts before you delegate (a coordinator). Each part gets an id (p1…) so a child can report with report_part. Replaces any earlier plan of yours.',
+      parameters: SET_PLAN_SCHEMA,
+      visibleTo: inTree,
+      async execute(args, { botId }) {
+        const bad = validateArgs(SET_PLAN_SCHEMA, args)
+        if (bad) return fail(bad)
+        const { plan, error } = makePlan({ goal: args.goal, parts: args.parts })
+        if (error) return fail(error)
+        fb.setField(botId, PLAN_KEY, plan)
+        tree.refreshPrompt(botId)
+        return { plan: plan.parts.map(item => ({ id: item.id, name: item.name })), note: `Plan saved (${plan.parts.length} parts). Delegate each part to the child whose scope fits; each reports back with report_part.` }
+      },
+    }),
+    fb.registerTool({
+      name: 'report_part',
+      description: 'Report progress on a plan part. A child reports to the plan of its parent; a coordinator reports on its own plan. status: todo, doing, done or blocked.',
+      parameters: REPORT_PART_SCHEMA,
+      visibleTo: inTree,
+      async execute(args, { botId }) {
+        const bad = validateArgs(REPORT_PART_SCHEMA, args)
+        if (bad) return fail(bad)
+        const own = fb.getField(botId, PLAN_KEY)
+        const parent = tree.parentOf(botId)
+        const targetId = (own !== undefined && own !== null) || !tree.isMember(parent) ? botId : parent
+        const { plan, part, error } = reportPart(fb.getField(targetId, PLAN_KEY), { part: args.part, status: args.status, note: args.note })
+        if (error) return fail(error)
+        fb.setField(targetId, PLAN_KEY, plan)
+        tree.refreshPrompt(targetId)
+        const who = targetId === botId ? 'your plan' : `${tree.snapshot()[targetId]?.name ?? 'your parent'}'s plan`
+        return { part: { id: part.id, name: part.name, status: part.status }, note: `Reported "${part.name}" as ${part.status}, on ${who}.` }
+      },
+    }),
+    fb.registerTool({
+      name: 'read_plan',
+      description: 'Read your own plan, and as a child the plan your parent made, with each part id, name, owner and status.',
+      parameters: READ_PLAN_SCHEMA,
+      visibleTo: inTree,
+      async execute(args, { botId }) {
+        const bad = validateArgs(READ_PLAN_SCHEMA, args ?? {})
+        if (bad) return fail(bad)
+        const own = fb.getField(botId, PLAN_KEY) ?? null
+        const parent = tree.parentOf(botId)
+        const fromParent = tree.isMember(parent) ? (fb.getField(parent, PLAN_KEY) ?? null) : null
+        return { plan: own, parent: fromParent, note: own ? (planLine(own) ?? 'Your plan is empty.') : 'You have no plan. Set one with set_plan before delegating.' }
       },
     }),
   ]
