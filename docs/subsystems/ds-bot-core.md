@@ -40,6 +40,7 @@ holds. Task bookkeeping does not imply runtime execution or tool permission.
 | `ds-bot.pin.json` | Upstream pin. |
 | `patches/ds-bot/` | Ordered patch topics. |
 | `scripts/ds-bot-patches.mjs` | generate / check patches. |
+| `core/dev/eval/` | User-scenario runner (#358): pure rubrics (`rubric.mjs`), canonical journey specs (`specs.mjs`), optional model judge (`judge.mjs`), grader hashing (#398, `guard.mjs`) and a CLI (`run.mjs`). Dev only, not part of `npm test`. |
 | `core/src/host/hooks.js` (approvals) | Held sends bound to their owner — provenance, owner-bound decisions, stale revalidation. Chief replacement invalidates sender-side holds eagerly on `setMain` (not via `staleReason`). The authority contract lives in [team](team.md) (#52). |
 
 ## Entry points
