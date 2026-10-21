@@ -1,0 +1,1 @@
+The Timeline plugin can raise durable alerts. `timeline/alerts` (read-only) folds the current window into an alert set: a Bot that fails most of its turns, a request left unanswered, or a handoff waiting too long opens ONE alert — opened once, not repeated every poll — and the alert resolves when the condition clears, so a panel or a routine sees what is wrong and since when.

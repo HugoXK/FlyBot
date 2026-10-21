@@ -3,9 +3,11 @@ import { createRecorder } from './recorder.js'
 import { openTrace, TraceLocked } from './store.js'
 import { buildWindow, clampWindow } from './window.js'
 import { createExporter, otlpPayload, spansFrom } from './otel.js'
+import { createAlertTracker } from './alerts.js'
 
 export const ENDPOINT = 'timeline/window'
 export const EXPORT_ENDPOINT = 'timeline/export'
+export const ALERTS_ENDPOINT = 'timeline/alerts'
 
 export function createTimeline(adapter, { dir, persist = true, now = Date.now, exporter, ...limits } = {}) {
   let trace
@@ -49,12 +51,18 @@ export function createTimeline(adapter, { dir, persist = true, now = Date.now, e
   // sends another home's names by accident.
   const exportWindow = (body = {}) => otlpPayload(spansFrom(trace.records(), { names: body?.names === true ? trace.names() : {} }), { serviceName: body?.serviceName })
   const offExport = adapter.handle(EXPORT_ENDPOINT, exportWindow)
+  // Durable alerts (#357/#469): each call folds the current window into the alert set, opening a
+  // condition once and resolving it when it clears. Read-only.
+  const alertTracker = createAlertTracker({ now })
+  const alerts = (body = {}) => alertTracker.evaluate(window(body))
+  const offAlerts = adapter.handle(ALERTS_ENDPOINT, alerts)
   return {
-    trace, recorder, window, exportNow, exportWindow,
+    trace, recorder, window, exportNow, exportWindow, alerts,
     dispose() {
       if (exportTimer !== undefined) clearInterval(exportTimer)
       offEndpoint()
       offExport()
+      offAlerts()
       off()
       trace.close()
     },
