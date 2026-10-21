@@ -411,6 +411,23 @@ test('channel: view lists a shared room for both humans and hides a private room
   assert.equal(inject.ok, false)
 })
 
+test('channel: delete-bot answers with the actor\'s scoped view, not the whole team', async (t) => {
+  const { call, rt } = startChannel(t, TEAM)
+  const inviteA = (await call('auth-invite', {})).value
+  const alice = (await call('auth-redeem', { token: inviteA.token, displayName: 'Alice' })).value
+  const inviteB = (await call('auth-invite', {}, alice.sessionToken)).value
+  const bob = (await call('auth-redeem', { token: inviteB.token, displayName: 'Bob' })).value
+  rt.state.members[bob.memberId].designatedChiefId = 'chief-b'
+  rt.state.bots['chief-b'].ownerId = bob.memberId
+  rt.state.bots['spec-b'].ownerId = bob.memberId
+
+  const deleted = await call('delete-bot', { id: 'spec-b' }, bob.sessionToken)
+  assert.equal(deleted.ok, true)
+  assert.equal(deleted.value.bots.some(bot => bot.id === 'spec-b'), false, 'the deleted Bot is gone')
+  assert.ok(deleted.value.bots.some(bot => bot.id === 'chief-b'), 'Bob keeps his own Bot')
+  assert.equal(deleted.value.bots.some(bot => bot.id === 'spec-a'), false, "another owner's private Bot stays out of the answer")
+})
+
 test('channel: a legacy single-owner create-room still works', async (t) => {
   const { call } = startChannel(t, TEAM)
   const invite = (await call('auth-invite', {})).value

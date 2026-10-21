@@ -81,6 +81,12 @@ Decided by the owner (Danyang, GitHub `Birfy`) on 2026-10-18/19. Four scheduled 
 | Repo maintenance | every 2 h, FlyBot and Bot Social separately | The **only** routine that opens fix PRs. Each run: review open PRs against the design rules; triage every open issue (fixed, duplicate or obsolete: close with a comment; still valid: readiness check below); label every open issue and PR; develop only `agent-ready` issues; merge ready PRs through the merge queue within the gates below. Never deploys. Never edits `CHANGELOG.md` or a version number. |
 | Daily release | about 02:00 Asia/Shanghai | Publishes a real semver GitHub release (tag = `core/package.json` version, patch bump per day, skipped when there are no changelog fragments) through a mechanical release PR. It owns `CHANGELOG.md` and the version. The files and the approval are in [Standing approval](#standing-approval-mechanical-release-prs). |
 
+#### A schedule is per session, not per Bot (#628)
+
+`schedule_list` answers for **the session the call runs in**, not for the Bot. A schedule the owner created in another session of the same Bot is simply absent from the answer, and nothing in the response says which session it answered for — so `[]` is indistinguishable from "nothing is scheduled". This cost two wrong conclusions on 2026-10-21: a Bot reported "0 timers" and the team concluded a live schedule had never existed, and another run came close to deleting and recreating a schedule that was running.
+
+**Never infer "this Bot has no scheduled work" from an empty `schedule_list`, and never delete, update or recreate a schedule on the strength of one.** The owner's UI shows the real list; ask the owner instead of the tool when the run depends on it. `schedule_delete` and `schedule_update` share the same scope, so a Bot can otherwise "clean up" a schedule it cannot see. The DSH-side fix is tracked in #628.
+
 ### Issue labels
 
 - **Type** (exactly one): `bug`, `enhancement`, `documentation`, `accessibility`.
@@ -113,6 +119,19 @@ Otherwise label `needs-human` or `needs-info` and name the blocking conflict or 
 - Any new commit voids a PASS. CI green, the merge queue and the no-bypass rule apply to every tier.
 - Agents never bypass a gate and never admin-merge (the routines run as the maintainer account `Birfy`, but use it only for the actions above, never for admin merge, bypass or changing protection rules). The merge queue squashes the PR title and body, so a `Docs-not-needed:` line goes in the PR **body** and also in a branch commit message (`npm run arch-docs` reads only the branch's commits). Run `verify` with `TZ=UTC`.
 
+### Merge gates
+
+Four rules decide whether a pull request may enter the queue. The mechanical one runs where the merge actually happens: [`merge-gate.yml`](.github/workflows/merge-gate.yml) fails the `merge-gate` job on a `merge_group` entry, and [`merge-gate.mjs`](.github/scripts/merge-gate.mjs) does the judging.
+
+1. **`hold` blocks mechanically.** A pull request labelled `hold` fails `merge-gate` on its queue entry. The label is only a marker; the job is the gate. It blocks the queue once `merge-gate` is listed among the required checks of the `main merge queue` ruleset — a ruleset change for the maintainer, never an agent; until then the job reports without blocking.
+2. **Labelling a pull request `hold` means adding a record.** Add the label **and** post a new comment saying **Record only — do not merge / 仅记录、禁止入队**. The pair is what holds it. Add that comment; never edit or delete an earlier PASS report to change what it said — the history is the record, and rewriting it is the thing that reads as an incident afterwards.
+3. **An authorisation is not a queue permit.** The owner or the Chief saying "let it through", "claim it" or "handle it along with the rest" licenses no specific pull request for the queue. Entering the queue is an explicit action on that one pull request, after its own gate passed, while it carries no `hold`. #566 is the case this exists for: "handle it along with the rest" was read as a permit, the tip was PASSed at 09:48:18Z, enqueued at 09:48:28Z and merged at 09:50:40Z as `abaf938b`.
+4. **The newest conclusion at the head being merged decides.** Read the pull request's comments and review bodies, live, for the exact head SHA being merged, and take the newest text that carries `Verdict:` or a `## Review —` heading: INC or REQUEST_CHANGES refuses, PASS allows, no conclusion refuses too. A result from `pull_request` time never stands in — on #610 the tip report ran at 10:31:08Z and the INC landed at 11:24:37Z, 54 minutes later. The gating agent checks this before enqueueing; `merge-gate.yml` checks it again at `merge_group`, and the stricter answer wins.
+
+A review's `state` is not what is read: the account cannot approve its own pull requests, so its reviews stay `COMMENTED` even for an INC, and the INC on #610 was a comment rather than a review.
+
+The standing "file no new issues" rule covers design proposals only: a reproducible code defect is still filed as an issue, with its reproduction.
+
 ### Hard rules for agents
 
 1. The self-test routine files issues only; the maintenance routine opens PRs; the release routine owns `CHANGELOG.md` and the version.
@@ -120,6 +139,7 @@ Otherwise label `needs-human` or `needs-info` and name the blocking conflict or 
 3. A routine PR is merged by the Bot that gated it (owner decision 2026-10-21, [self-gate](#owner-decision-the-bot-gates-and-merges-its-own-prs-2026-10-21-owner-authorized)). A typed chat reply is still not an approval for anything else, and an owner-only decision (scope, security surface, policy) still waits for the owner's word through the normal path (#349).
 4. Connector tools are on by default for the owner's Bots and off by default for other people's, until the owner opts in (#359).
 5. Bot Social has no keyword commitment scan.
+6. A schedule is per session, not per Bot: an empty `schedule_list` is not evidence that a schedule does not exist, and no schedule is deleted, updated or recreated on the strength of one (see [A schedule is per session](#a-schedule-is-per-session-not-per-bot-628)).
 
 ## What this project is
 
@@ -154,6 +174,8 @@ The Bot team:
 **Node 22 or newer is required.** On Node 20 the tests fail with "Could not find test/*.test.js". CI uses Node 24; on the shared box use `PATH=/workspace/tools/node24/bin:$PATH`.
 
 **One command, from the repo root:** `npm run verify` runs what CI runs, in CI's order: core lint (oxlint + `arch-docs`), plugin lint, `build-client.mjs --check`, `ds-bot-patches.mjs check`, the core suite and both plugin suites. It needs the one-time setup below (`npm ci` and `npm run harness` in `core/`). It does not run the pack check, typecheck or actionlint of the CI `package` job, and not the smoke test.
+
+**Sandbox preflight (#607, #615).** A session on `workspace-write` (or `read-only`) on a host without a usable sandbox backend refuses every `bash` call with `SANDBOX_UNAVAILABLE` and looks merely stuck. Run `node .github/scripts/sandbox-preflight.mjs --mode <your file policy>` once at the start: exit 0 usable, **3 proven blocked**, **4 cannot tell**, 2 usage. Pass `--mode` (or set `FLYBOT_SANDBOX_MODE`) - the preflight cannot see the session policy and must not guess it; `danger-full-access` needs no backend at all and is never reported blocked. On **3**, report one line (`blocked: no usable sandbox backend` plus the unlock it prints) and do not retry shell calls. On **4**, do not stop: a `bash` call refused with `SANDBOX_UNAVAILABLE` is the only proof. File tools and the GitHub API still work either way; the tiers are in [docs/sandbox.md](docs/sandbox.md).
 
 The rest of this section runs in `core/`. The unit tests and the linter load the `@deepseek-ai/*` packages from `dev/harness/`, which `npm run harness` installs from npm at the DSH version in `dev/harness/package.json`. `DSH_HARNESS` points them at another install or at a DeepSeek Harness checkout instead. The test bench needs a checkout at `../deepseek-harness` (or `DSH_HARNESS`), at the DSH version in the README.
 

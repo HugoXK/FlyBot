@@ -31,7 +31,11 @@ const SHARED_BLOCKED = new Set([
   'browser-wait', 'browser-result',
   'update-install', 'dsh-update-install',
   'diagnostics-clear', 'diagnostics', 'diagnostics-log', 'set-prefs',
-  'add-agent',
+  // The DSH Agent is one per deployment and carries no owner, so it and its Sessions
+  // (`agent-session` / `agent-adopt` / `agent-archive` / `agent-rename` / `remove-agent`)
+  // are the same shared resource as `add-agent`: free to a signed-in member while alone,
+  // blocked once the team has more than one member.
+  'add-agent', 'agent-session', 'agent-adopt', 'agent-archive', 'agent-rename', 'remove-agent',
 ])
 
 // Endpoints whose body names a Bot (or a resource hanging off one).
@@ -39,7 +43,6 @@ const BOT_TARGETED = new Set([
   'update-bot', 'delete-bot', 'duplicate-bot', 'set-flags', 'bot-capability',
   'memory-view', 'memory-ask', 'memory-forget',
   'schedules', 'schedule-create', 'schedule-update', 'schedule-pause', 'schedule-resume', 'schedule-retry', 'schedule-delete',
-  'agent-session', 'agent-adopt', 'agent-archive', 'agent-rename', 'remove-agent',
   'stop-member-work', 'set-main', 'test-model',
 ])
 
@@ -253,13 +256,17 @@ export function install(rt) {
         if (ep === 'schedule-delete' && typeof body?.id === 'string' && !sessionOwnedBy(actor, body.id) && !sessionOwnedBy(actor, body.sessionId)) return deny('bot/forbidden', 'You do not own that schedule')
         return requireSession(body?.sessionId)
       }
-      if (ep.startsWith('agent-') || ep === 'remove-agent') {
-        // Agent sessions hang off the deployment's one DSH Agent (no owner record of
-        // its own), so the body's Bot decides.
-        return botOwnedBy(actor, body?.botId ?? body?.ownerBotId) ? ALLOW : deny('bot/forbidden', 'You do not own that agent')
-      }
       if (ep === 'usage') return body?.botId === undefined ? ALLOW : requireBot(body.botId)
-      if (ep === 'set-main') return requireBot(body?.id)
+      if (ep === 'set-main') {
+        // `replace` names the Main Bot whose place the target takes, and the Main list is
+        // deployment-wide: checking only `body.id` let a member swap another owner's Main Bot
+        // for their own and demote it (#613).
+        if (typeof body?.replace === 'string' && body.replace !== '' && body.replace !== body?.id) {
+          const replaceGate = requireBot(body.replace)
+          if (!replaceGate.ok) return replaceGate
+        }
+        return requireBot(body?.id)
+      }
       if (ep === 'set-flags') {
         const id = body?.id ?? body?.botId
         if (botOwnedBy(actor, id) || roomOwnedBy(actor, id) || roomMemberOf(actor, id)) return ALLOW

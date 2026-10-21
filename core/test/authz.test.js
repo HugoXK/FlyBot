@@ -125,6 +125,30 @@ test('no actor when enforced', async (t) => {
   assert.equal(rt.authorize(null, 'auth-whoami', {}).ok, true)
 })
 
+test('the one deployment Agent stays usable to a signed-in member while alone, and blocks with two', async (t) => {
+  const { rt } = runtime(t, TEAM)
+  await rt.load()
+  const session = await redeemOwner(rt)
+  const actor = await rt.authenticate(session.sessionToken)
+  assert.equal(rt.authzEnforced(), true)
+  // The browser sends `agentId`, never a Bot id; the Agent is one per deployment and ownerless,
+  // so it follows the shared rule (`add-agent`) instead of a per-Bot owner check.
+  for (const [ep, body] of [
+    ['agent-session', { agentId: 'ag', workspaceId: 'w1' }],
+    ['agent-adopt', { agentId: 'ag', sessionId: 's1' }],
+    ['agent-archive', { agentId: 'ag', sessionId: 's1' }],
+    ['agent-rename', { agentId: 'ag', sessionId: 's1', title: 'T' }],
+    ['remove-agent', { agentId: 'ag' }],
+  ]) {
+    const gate = rt.authorize(actor, ep, body)
+    assert.equal(gate.ok, true, `${ep}: ${gate.code ?? ''} ${gate.message ?? ''}`)
+  }
+  // A second member makes the deployment-wide Agent a shared resource, like `add-agent`.
+  await redeemOwner(rt)
+  assert.equal(rt.authorize(actor, 'agent-session', { agentId: 'ag' }).code, 'bot/blocked-shared')
+  assert.equal(rt.authorize(actor, 'remove-agent', { agentId: 'ag' }).code, 'bot/blocked-shared')
+})
+
 test('forged actorId ignored', async (t) => {
   const { rt } = runtime(t, TEAM)
   await rt.load()
@@ -408,4 +432,29 @@ test('a group\'s question card is its Bot owner\'s to see and answer, not every 
   const full = { bots: Object.values(rt.state.bots), rooms: [], questions: { rx: rt.state.questions.rx } }
   assert.deepEqual(Object.keys(rt.ownedView(full, actorA).questions), ['rx'])
   assert.deepEqual(Object.keys(rt.ownedView(full, actorB).questions), [])
+})
+
+// #613: the Main Bot list is deployment-wide, so `replace` crosses the owner boundary unless the
+// actor owns both the Bot it promotes and the Main Bot whose place it takes.
+test('#613: a member cannot take another owner’s Main Bot’s place', async (t) => {
+  const { rt } = runtime(t, { ...TEAM, mainBotIds: ['m1'] })
+  await rt.load()
+  const sessionA = await redeemOwner(rt)
+  const sessionB = await redeemOwner(rt)
+  assert.equal(sessionB.memberId, 'owner-2')
+  rt.state.bots.a1 = { id: 'a1', sessionId: 'a1', name: 'A', instructions: '', createdAt: 2, ownerId: 'owner-1' }
+  rt.state.bots.b1 = { id: 'b1', sessionId: 'b1', name: 'B', instructions: '', createdAt: 3, ownerId: 'owner-2' }
+  const actorA = await rt.authenticate(sessionA.sessionToken)
+  const actorB = await rt.authenticate(sessionB.sessionToken)
+
+  // Bob's own Bot may not take Alice's Main Bot's place: promoting it that way demotes hers.
+  const escalation = rt.authorize(actorB, 'set-main', { id: 'b1', main: true, replace: 'm1' })
+  assert.equal(escalation.ok, false)
+  assert.equal(escalation.code, 'bot/forbidden')
+  // Demoting hers by naming it as the target must not work either.
+  assert.equal(rt.authorize(actorB, 'set-main', { id: 'm1', main: false }).ok, false)
+  // A swap inside one owner's team stays allowed.
+  assert.equal(rt.authorize(actorA, 'set-main', { id: 'a1', main: true, replace: 'm1' }).ok, true)
+  // And Bob's own Bot keeps the plain promotion the deployment-wide list gives it.
+  assert.equal(rt.authorize(actorB, 'set-main', { id: 'b1', main: true }).ok, true)
 })
