@@ -5,6 +5,7 @@ import { resolveLimits } from './src/limits.js'
 import { createTree } from './src/tree.js'
 import { treeSendMiddleware } from './src/middleware.js'
 import { registerTreeTools } from './src/tools.js'
+import { createModelClassifier } from './src/classify-model.js'
 
 export const name = 'flybot-tree'
 export const inject = ['flybot']
@@ -60,6 +61,27 @@ export function apply(ctx, config = {}) {
     timers.forEach(t => t.unref?.())
     disposers.push(() => timers.forEach(clearTimeout))
     disposers.push(fb.onBotCreated(() => { attempt(); setTimeout(attempt, 0).unref?.() }))
+  }
+  // Model-based clustering (#450 item 2), opt-in: config.modelClassify: true AND the host
+  // allow-lists this plugin in flybot.modelPlugins. It asks the sanctioned model call for a
+  // category for each tree Bot whose role text changed, stores it on the Bot, and the tree's
+  // rules read it at the next reorganization. Without the host seam it asks nothing.
+  if (config.modelClassify === true) {
+    const classifier = createModelClassifier({ fb })
+    const run = async () => {
+      try {
+        for (const id of Object.keys(tree.snapshot())) {
+          if (tree.isRoot(id)) continue
+          await classifier.classifyBot(id)
+        }
+      } catch (error) { warn('flybot-tree: model classification failed:', error?.message ?? error) }
+    }
+    const timers = [3000, 20000].map(ms => setTimeout(() => { void run() }, ms))
+    timers.forEach(t => t.unref?.())
+    const interval = setInterval(() => { void run() }, 30 * 60 * 1000)
+    interval.unref?.()
+    disposers.push(() => { timers.forEach(clearTimeout); clearInterval(interval) })
+    disposers.push(fb.onBotCreated(() => { setTimeout(() => { void run() }, 0).unref?.() }))
   }
   const dispose = () => { for (const d of disposers.splice(0)) d?.() }
   // Cordis-style cleanup: load with ctx.plugin(tree, config); ctx.effect runs the returned

@@ -36,6 +36,8 @@ Recursive bot tree plugin for FlyBot (built on ds-bot / DeepSeek Harness).
       mergeGraceDays: 1   # Bots newer than this are not merged
       pinDays: 14         # after an undo, the tidy leaves restored Bots alone this long
     # classify: (profile) => ({ domain, project })  # programmatic only: a smarter role classifier
+    modelClassify: false # true: ask the model for a category when the words say nothing (#450 item 2)
+                         # needs the host to allow-list this plugin in flybot.modelPlugins
     # client side (browser plugin config): sidebarSection: false  # true: show the separate Tree section
     #                                       reorgNotice: true     # false: hide the reorganization notice
 ```

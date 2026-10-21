@@ -19,7 +19,10 @@ export function toParameterMap(p) {
   return Object.fromEntries(Object.entries(p.properties).map(([k, s]) => [k, { ...keep(s), ...(req.has(k) ? { required: true } : {}) }]))
 }
 
-export function createMockFlybot() {
+export function createMockFlybot({ modelAnswer = 'dev', modelOk = true } = {}) {
+  const modelAsks = []
+  let answer = modelAnswer
+  let ok = modelOk
   const bots = new Map() // id -> { id, name, systemPrompt, fields: { [plugin]: {...} } }
   const memories = new Map() // id -> [{ text, meta }]  (the plugin memory seam, #450 item 1)
   const listeners = { 'change': new Set(), 'bot.created': new Set(), 'bot.removed': new Set(), 'bot.grants': new Set(), 'turn.start': new Set(), 'turn.end': new Set(), 'tool.start': new Set() }
@@ -86,6 +89,8 @@ export function createMockFlybot() {
         read: id => clone(memories.get(id) ?? []),
         append: async (id, text, meta) => { memories.set(id, [...(memories.get(id) ?? []), { text: String(text), meta: meta ?? {} }]); return { ok: true } },
       },
+      // The sanctioned plugin model call (#450): records each ask; the answer is configurable.
+      model: { ask: async (input) => { modelAsks.push(input); return ok ? { ok: true, text: answer } : { ok: false, code: 'not-allowed' } } },
       bot: {
         get: id => view(bots.get(id)),
         list: () => [...bots.values()].map(view),
@@ -154,5 +159,5 @@ setSystemPrompt: (id, text) => { const b = bots.get(id); if (!b) throw new Error
   const api = async (name, payload = {}) => { const fn = apis.get(name); if (!fn) throw new Error(`Unknown FlyBot endpoint ${name}`); return fn(payload) }
   const feed = (ev, payload) => fire(ev, payload)
   const setMemory = (id, entries) => memories.set(id, clone(entries ?? []))
-  return { flybot, bots, tools, middlewares, scopes, remote, removeBot, addBot, setGrants, call, api, feed, memories, setMemory }
+  return { flybot, bots, tools, middlewares, scopes, remote, removeBot, addBot, setGrants, call, api, feed, memories, setMemory, modelAsks, setModelAnswer: (text, good = true) => { answer = text; ok = good } }
 }

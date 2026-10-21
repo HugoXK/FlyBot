@@ -1,8 +1,11 @@
 // Role profiles and role similarity for the tree's self-organization (#446). Deterministic: a Bot's
 // role is read from its name, role label, tree role (description), its own prompt text and the
-// tools it used recently, and matched against a small domain vocabulary. No model call: the
-// codebase has no pattern for plugins to call the Bot's model, so `config.classify` is the hook
-// for a smarter classifier (it may return { domain, project } for a profile; see README).
+// tools it used recently, and matched against a small domain vocabulary. `config.classify` is the
+// synchronous hook for a smarter classifier (it may return { domain, project } for a profile).
+// A MODEL classifier is separate and opt-in (src/classify-model.js, #450 item 2): it stores a
+// `modelDomain` on the Bot through the sanctioned plugin model call (#518), and `profileOf` reads
+// that field here. Rules still run first; a stored model domain wins for a Bot the vocabulary
+// cannot place, so grouping follows meaning, not only keywords.
 //
 // Group keys, most specific first (a lead is found or made for one key):
 //   project:<word>  a name word two Bots at one level share that is not a domain or generic word
@@ -41,7 +44,8 @@ const domainOfWord = word => DOMAINS.find(d => vocabHit(word, d))
 /**
  * The role profile of a Bot: { id, name, words (name words), text (all role text), domain, area,
  * leadWord }. `info` = { id, name, role (label), treeRole, prompt (own text, no tree block),
- * tools (recent tool names) }. `classify(profile)` may override { domain, project }.
+ * tools (recent tool names), modelDomain? (a category id from the model classifier) }.
+ * `classify(profile)` may override { domain, project }.
  */
 export function profileOf(info, classify) {
   const name = String(info.name ?? '')
@@ -59,6 +63,9 @@ export function profileOf(info, classify) {
   }
   let domain = null, best = 0
   for (const d of DOMAINS) { const s = score.get(d.id) ?? 0; if (s > best) { best = s; domain = d.id } }
+  // A model category (#450 item 2) wins when the vocabulary placed nothing; it never overrides a
+  // category the rules found, so the deterministic grouping stays the primary signal.
+  if (domain === null && typeof info.modelDomain === 'string' && BY_ID.has(info.modelDomain)) domain = info.modelDomain
   const lowerName = norm(name)
   const leadWord = wordsOf(name).some(w => LEAD_WORDS.has(w)) || LEAD_CJK.some(c => name.includes(c))
   // Project words: name words that are not domain words (e.g. "flybot" in "FlyBot Dev"); CJK names keep whole.

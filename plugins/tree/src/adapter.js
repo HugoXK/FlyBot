@@ -47,6 +47,9 @@ export function createAdapter(flybot) {
     getField: (id, key) => fields.get(id, key),
     setField: (id, key, value) => fields.set(id, key, value),
     onFieldChange: fn => fb.on('change', fn),
+    // A sanctioned model call (#450/#518). Absent on a core older than the flybot model seam or
+    // on a host that does not allow-list this plugin: the caller falls back to the rules.
+    askModel: input => (typeof fb.model?.ask === 'function' ? fb.model.ask(input) : Promise.resolve({ ok: false, code: 'no-api' })),
     // A Bot's own memory (#450 item 1). Absent on a core older than the seam or a host that does
     // not allow-list this plugin: the reader returns [], the writer resolves no-api.
     memoryRead: id => (typeof fb.memory?.read === 'function' ? fb.memory.read(id) : []),

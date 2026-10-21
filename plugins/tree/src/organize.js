@@ -64,7 +64,7 @@ export function createOrganizer({ fb, limits, snapshot, childrenOf, depthOf, war
     const lead = get(id, 'lead')
     // A lead's role text lists its members; its group label says what it is.
     const treeRole = lead?.label ? `${lead.label} lead` : nodes[id] && !nodes[id].root ? nodes[id].role : (extra.treeRole ?? '')
-    return { id, name: nodes[id]?.name ?? bot.name ?? extra.name, role: bot.role, treeRole, prompt: lead ? '' : ownText(bot.systemPrompt), tools: get(id, 'activity')?.tools ?? [] }
+    return { id, name: nodes[id]?.name ?? bot.name ?? extra.name, role: bot.role, treeRole, prompt: lead ? '' : ownText(bot.systemPrompt), tools: get(id, 'activity')?.tools ?? [], modelDomain: get(id, 'modelDomain')?.domain }
   }
   const profile = (nodes, id, extra) => {
     const p = profileOf(infoOf(nodes, id, extra), classify)
