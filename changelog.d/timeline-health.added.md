@@ -1,0 +1,1 @@
+The Timeline plugin can now report team health: `timeline/health` reads the same window and returns, per Bot, its turns, error rate, how busy it was, how many of its requests are unanswered, and short flags (`errors`, `busy`, `idle`, `waiting`), plus a single `ok` for the team. It is read-only and needs no configuration.
