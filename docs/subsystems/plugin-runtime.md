@@ -34,7 +34,7 @@ FlyBot's plugin API surface on top of the patched core: host hooks, client slots
 
 | File | Role |
 | --- | --- |
-| `core/src/host/hooks.js` | Host hook points: send middleware, transports, grants, the owner-bound held-send approvals (#52), task hold/decide/delete seams (#54), and `bot.update({ name?, hidden? })` for plugin rename/hide (#452). |
+| `core/src/host/hooks.js` | Host hook points: send middleware, transports, grants, the owner-bound held-send approvals (#52), task hold/decide/delete seams (#54), and `bot.update({ name?, hidden? })` for plugin rename/hide (#452). It also exposes `flybot.approvals.stats()` — per-Bot, per-status counts of held sends, read-only (#396/#57 direction). |
 | `core/src/host/flybot-feed.js` | Activity feed: folds a Bot Session's `session/event`s into `flybot.on('turn.start' \| 'turn.end' \| 'tool.start' \| 'tool.end' \| 'exchange.delivered')` (#241). `turn.end` also carries the turn's token counts (summed from its `assistant/message` usage, floored and capped, counts only) under `tokens` (#357). |
 | `core/src/client/flybot-slots.js` | Client slots, including the approval card queue (`flybot.approvals`, `flybot/decide`) and `flybot.sidebar.structure` (`parentOf`, optional `include`, `menuItems`, `nodeActions`). |
 | `core/src/client/flybot-registry.js` | Registry. |

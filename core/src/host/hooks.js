@@ -519,6 +519,27 @@ export function install(rt) {
         .map(a => ({ ...clone(a), ownerId: ownerOfRequest(a.request) ?? undefined, senderName: nameOf(a.request?.from), targetName: nameOf(a.request?.to) }))
     },
     get: id => clone(store()[id]),
+    // Governance read: how many of each Bot's sends were held, approved, rejected or went stale.
+    // A signed-in member sees only their own Bots' holds, the same rule as list(). Read-only.
+    stats: ({ actor } = {}) => {
+      const enforced = rt.authzEnforced()
+      const byStatus = { pending: 0, approved: 0, rejected: 0, stale: 0 }
+      const byBot = {}
+      let total = 0
+      for (const approval of Object.values(store())) {
+        if (enforced && actor !== undefined) {
+          const owner = ownerOfRequest(approval.request)
+          if (owner === null || owner !== actor.memberId) continue
+        }
+        total += 1
+        if (byStatus[approval.status] !== undefined) byStatus[approval.status] += 1
+        const from = typeof approval.request?.from === 'string' ? approval.request.from : undefined
+        if (from === undefined) continue
+        const entry = byBot[from] ?? (byBot[from] = { name: rt.botOf(from)?.name, pending: 0, approved: 0, rejected: 0, stale: 0 })
+        if (entry[approval.status] !== undefined) entry[approval.status] += 1
+      }
+      return { total, byStatus, byBot }
+    },
     // Owner only: the decision is bound to the session of the member who owns the sender
     // Bot, resolved from the member-session header — a body actorId grants nothing.
     // Without member sessions the single-human host decides as before (#52).
