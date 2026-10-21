@@ -37,6 +37,22 @@ test('health: an idle Bot is flagged but does not make the team unhealthy', () =
   assert.deepEqual(health.unhealthy, [])
 })
 
+test('health: a long turn that began before the window is busy, not idle', () => {
+  const health = buildHealth(make({ utilization: [{ lane: 'a', windowMs: 1000, busyMs: 1000, turns: 0, errors: 0, running: true }] }))
+  const a = health.bots.find(bot => bot.id === 'a')
+  // `turns` counts turns that began in the window, but the Bot is busy the whole window and running.
+  assert.deepEqual(a.flags.map(flag => flag.code), ['busy'])
+  assert.equal(a.running, true)
+  assert.equal(a.busyShare, 1)
+})
+
+test('health: a failed turn that began before the window never reads more than the turns', () => {
+  const health = buildHealth(make({ utilization: [{ lane: 'a', windowMs: 1000, busyMs: 500, turns: 1, errors: 3, running: false }] }))
+  const a = health.bots.find(bot => bot.id === 'a')
+  assert.equal(a.errorRate, 1)
+  assert.equal(a.flags.find(flag => flag.code === 'errors').detail, '3 of 3 turns failed')
+})
+
 test('health: an empty window is ok and has no Bots', () => {
   assert.deepEqual(buildHealth({}), { version: 1, now: null, windowMs: null, live: false, bots: [], unhealthy: [], ok: true })
 })

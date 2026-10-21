@@ -26,13 +26,20 @@ export function buildHealth(window = {}) {
   }
   const bots = (window.utilization ?? []).map((use) => {
     const lane = lanes.get(use.lane)
-    const errorRate = share(use.errors, use.turns)
+    // `turns` counts turns that began in the window, while `errors` counts every turn that
+    // overlapped it: a failed turn that began before the window would otherwise read "3 of 2
+    // turns failed". Count against the larger of the two.
+    const counted = Math.max(use.turns, use.errors)
+    const errorRate = share(use.errors, counted)
     const busyShare = share(use.busyMs, use.windowMs)
+    const idle = use.turns === 0 && (use.busyMs ?? 0) === 0 && use.running !== true
     const waiting = waitingOn.get(use.lane) ?? 0
     const flags = []
-    if (use.turns >= ERROR_TURNS_MIN && errorRate >= ERROR_RATE_MIN) flags.push({ code: 'errors', detail: `${use.errors} of ${use.turns} turns failed` })
-    if (use.turns > 0 && busyShare >= BUSY_SHARE) flags.push({ code: 'busy', detail: `busy ${Math.round(busyShare * 100)}% of the window` })
-    if (use.turns === 0) flags.push({ code: 'idle', detail: 'no turns in the window' })
+    if (counted >= ERROR_TURNS_MIN && errorRate >= ERROR_RATE_MIN) flags.push({ code: 'errors', detail: `${use.errors} of ${counted} turns failed` })
+    if (busyShare >= BUSY_SHARE) flags.push({ code: 'busy', detail: `busy ${Math.round(busyShare * 100)}% of the window` })
+    // `idle` is "no running turn" (timeline.md invariant 5): a Bot in one long turn that began
+    // before the window is busy for the whole window, not idle.
+    if (idle) flags.push({ code: 'idle', detail: 'no turns in the window' })
     if (waiting > 0) flags.push({ code: 'waiting', detail: `${waiting} request(s) unanswered` })
     return {
       id: use.lane,
