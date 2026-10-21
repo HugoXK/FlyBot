@@ -737,10 +737,28 @@ export function install(rt) {
   // Bot that joins (or leaves) a plugin's scope gets (or loses) the tool next turn.
   const gatedTools = new Map()
   const masks = new WeakMap()
+  // Every Agent seen so far, so a mask can be recomputed when a Bot joins or leaves a plugin's
+  // scope without a new Agent (the tree adopts a Main Bot created after the server started, #594).
+  const trackedAgents = []
+  const tracked = new WeakSet()
+  const trackAgent = (agent) => {
+    if (agent === null || typeof agent !== 'object' || tracked.has(agent)) return
+    tracked.add(agent)
+    trackedAgents.push(new WeakRef(agent))
+  }
+  // Visit the tracked Agents; dead ones are dropped as found.
+  const eachAgent = (visit) => {
+    for (let i = trackedAgents.length - 1; i >= 0; i -= 1) {
+      const agent = trackedAgents[i].deref()
+      if (agent === undefined) trackedAgents.splice(i, 1)
+      else visit(agent)
+    }
+  }
   // The names of plugin tools a mask may take away (tree's create_child_bot, …): the client hides
   // their "Tool added" / "Tool removed" context rows, which say nothing a person needs (#419).
   rt.pluginToolNames = () => [...gatedTools.keys()].sort()
   function hidePluginTools(agent) {
+    trackAgent(agent)
     if (agent === undefined || typeof agent.ctx?.tools?.restrict !== 'function') return
     const bot = rt.botOf(rt.selfOf(agent.session?.id ?? agent.id))
     if (bot === undefined) return
@@ -762,6 +780,15 @@ export function install(rt) {
     }
   }
   ctx.on('agent/created', ({ agent }) => { void rt.load().then(() => hidePluginTools(agent)).catch(() => {}) })
+  // A turn began in a Session: the Bot's plugin scope may have changed while the server ran (a Main
+  // Bot the tree adopts after startup, #594), so recompute the mask before the model sees the
+  // message. An unchanged mask is left alone, as on a resolve (#276).
+  ctx.on('session/event', (session, event) => {
+    if (event?.type !== 'turn/start') return
+    const id = session?.id
+    if (id === undefined) return
+    eachAgent(agent => { if ((agent.session?.id ?? agent.id) === id) hidePluginTools(agent) })
+  })
 
   // ---------------------------------------------------------------- remote members
   // Remote Bots a plugin can reach (social: friends' Bots). They are chat members the

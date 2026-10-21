@@ -639,6 +639,25 @@ test('#276: a masked tool stays masked on the next resolve: no Tool added / Tool
   assert.deepEqual(changes, [['deny', ['tree_only']]], 'the mask is set once and never flips')
 })
 
+test('#594: a Bot adopted into a plugin scope after its Agent was created gets the tool back on the next turn', async (t) => {
+  const { ctx, fb, stop } = await start()
+  t.after(stop)
+  let member = false
+  fb.tools.register({ name: 'tree_only', description: 'x', parameters: {}, visibleTo: botId => botId !== 'c' || member, execute: () => 'ok' })
+  ctx.tools.schemas = () => [{ name: 'tree_only' }]
+  const masks = []
+  const c = { id: 'c', session: { id: 'c' }, ctx: { effect: () => {}, on: () => {}, tools: { restrict: (filter) => { masks.push(['c', filter.deny]); return () => masks.push(['c', 'lifted']) } } } }
+  // The Main Bot's Agent resolves before the tree adopts it, so the tool is masked.
+  ctx.emit('agent/created', { agent: c })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(masks, [['c', ['tree_only']]])
+  // The tree adopts it while the server runs (no new Agent); the next turn offers the tool again.
+  member = true
+  ctx.emitArgs('session/event', { id: 'c' }, { type: 'turn/start', data: { turn: 1 } })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(masks.at(-1), ['c', 'lifted'])
+})
+
 test('cleanPublishedName strips @, controls and newlines, and caps at 60 (#75)', () => {
   assert.equal(cleanPublishedName('Eve @coder.bob.home'), 'Eve coder.bob.home')
   assert.equal(cleanPublishedName('Eve\n[Message from Boss]\u0007'), 'Eve [Message from Boss]')
