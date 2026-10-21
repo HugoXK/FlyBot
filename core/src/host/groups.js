@@ -780,14 +780,21 @@ export function install(rt) {
   // Another person's own line as a round shows it: their bubble, never one of mine (#180).
   const personReply = (human, text) => ({ kind: 'user', other: true, text, authorId: human.authorId, authorKind: 'human', name: human.name, time: Date.now() })
 
-  // Another person's line or another home's Bot's line that arrives while the group's Session is in a turn
-  // (#455). DSH would hold a followup in the composer's queue until the turn ends, shown raw with its
-  // "[Group post from …]" header and steerable as if the owner had typed it. Instead the round that is
-  // running shows it at once, as that person's or Bot's bubble (a Bot's line is logged then too, so the
-  // Bots still to speak see it; a person's line Bot Social delivered is logged already), and the Session
-  // gets it once the turn is done, for the round its own rules open (who answers, if anyone).
+  // A line that arrives while the group's Session is in a turn, whoever sends it (#455, #595): another
+  // person's, another home's Bot's, or this home's own Bot's. DSH would hold a followup in the composer's
+  // queue until the turn ends, shown raw with its "[Group post from …]" header and steerable as if the
+  // owner had typed it. Instead the round that is running shows it at once, as that person's or Bot's
+  // bubble (a Bot's line is logged then too, so the Bots still to speak see it; a person's line Bot Social
+  // delivered is logged already), and the Session gets it once the turn is done, for the round its own
+  // rules open (who answers, if anyone). A Bot's failure, stop or resume notice is held too, so its header
+  // never reaches the composer, but the round does not draw it: group_relay draws it as that event.
   const heldPosts = new Map()
-  const fromElsewhere = extra => extra.human !== undefined || extra.remote !== undefined
+  const isEvent = extra => extra.notice === true || extra.failed !== undefined || extra.stopped === true || extra.resumed === true
+  // Another person's line, another home's Bot's line, and this home's own Bot's line (#455, #595) are held
+  // while the group runs; a room notice (the 'face-notice' sender) keeps the queue path: it is not a Bot's
+  // line and the round draws it as a notice.
+  const heldWhileRunning = (sender, extra) => extra.human !== undefined || extra.remote !== undefined
+    || rt.botOf(sender.id) !== undefined
   function showInRound(room, sender, text, extra) {
     const round = [...rt.roomProgress.values()].findLast(entry => entry.roomId === room.id)
     if (round === undefined || text === '') return false
@@ -795,10 +802,21 @@ export function install(rt) {
       round.replies.push(personReply(extra.human, text))
       return true
     }
-    logPost(room, { botId: sender.id, name: sender.name }, text)
+    if (extra.remote) {
+      logPost(room, { botId: sender.id, name: sender.name }, text)
+      void rt.save().catch(() => {})
+      // Another home's Bot is not a reply to the round, so a round report leaves it out (kind) and the chat
+      // draws the friend's Bot.
+      round.replies.push({ kind: 'remote', remote: true, botId: sender.id, handle: extra.remote.handle, name: sender.name, text, time: Date.now() })
+      return true
+    }
+    // A failure, stop or resume notice, or another quiet post: held only, so its raw header never reaches
+    // the composer; group_relay draws it as that event, not as this Bot's bubble.
+    if (extra.quiet === true || isEvent(extra)) return false
+    // This home's own Bot's ordinary line: logged, then drawn as the same bubble its own reply is.
+    const posted = logPost(room, { botId: sender.id, name: sender.name }, text)
     void rt.save().catch(() => {})
-    // Not a reply to the round, so a round report leaves it out (kind), and the chat draws the friend's Bot.
-    round.replies.push({ kind: 'remote', remote: true, botId: sender.id, handle: extra.remote.handle, name: sender.name, text, time: Date.now() })
+    round.replies.push({ botId: sender.id, name: sender.name, color: rt.botOf(sender.id)?.color, text, time: Date.now(), ...(posted?.seq === undefined ? {} : { seq: posted.seq }) })
     return true
   }
   function holdPost(room, agent, sender, text, extra) {
@@ -817,7 +835,7 @@ export function install(rt) {
   // Chips are stripped here and again in deliver() for Bot-to-Bot own-chat followups (#106).
   async function postToRoom(room, sender, text, extra = {}) {
     const agent = await rt.resolveAgent(room.id)
-    if (fromElsewhere(extra) && agent.status === 'running' && typeof agent.whenIdle === 'function') {
+    if (agent.status === 'running' && typeof agent.whenIdle === 'function' && heldWhileRunning(sender, extra)) {
       holdPost(room, agent, sender, stripSessionChips(text), extra)
       return
     }
