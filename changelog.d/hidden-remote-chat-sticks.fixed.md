@@ -1,0 +1,1 @@
+Hiding a friend's Bot chat from the sidebar ("Hide from sidebar") now sticks: the remote-chat sync no longer clears that hide on the next publish of the friends' list, while a chat whose Bot left still disappears and a returning Bot still reappears.

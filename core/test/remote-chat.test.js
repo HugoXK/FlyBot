@@ -62,6 +62,24 @@ test('sync hides gone and home-level remotes without deleting the chat', async (
   assert.equal(state.bots.c.hidden, true)
 })
 
+test('sync keeps a chat the user hid while the Bot is still published', async () => {
+  const state = {
+    bots: {
+      a: { id: 'a', name: 'Chief', remote: { handle: '@chief.hsliu.home', home: '@hsliu.home', plugin: 'social' } },
+      b: { id: 'b', name: '助手', hidden: true, remote: { handle: '@assistant.friend.home', home: '@friend.home', plugin: 'social' } },
+    },
+  }
+  const rt = { state, load: async () => {}, save: async () => {}, warn() {}, ctx: {} }
+  install(rt)
+  await rt.remoteChats.sync('social', [
+    { handle: '@chief.hsliu.home', name: 'Chief', home: '@hsliu.home' },
+    { handle: '@assistant.friend.home', name: '助手', home: '@friend.home' },
+  ])
+  // A friend's chat hidden from the sidebar stays hidden; only leaving the published list does (#hide).
+  assert.equal(state.bots.b.remote.gone, undefined)
+  assert.equal(state.bots.b.hidden, true)
+})
+
 test('roster and model guards keep a friend\'s Bot on its relay route', async () => {
     const { readFileSync } = await import('node:fs')
     const src = f => readFileSync(new URL('../src/host/' + f, import.meta.url), 'utf8')
