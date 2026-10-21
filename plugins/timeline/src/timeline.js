@@ -3,9 +3,11 @@ import { createRecorder } from './recorder.js'
 import { openTrace, TraceLocked } from './store.js'
 import { buildWindow, clampWindow } from './window.js'
 import { createExporter, otlpPayload, spansFrom } from './otel.js'
+import { buildDigest } from './digest.js'
 
 export const ENDPOINT = 'timeline/window'
 export const EXPORT_ENDPOINT = 'timeline/export'
+export const DIGEST_ENDPOINT = 'timeline/digest'
 
 export function createTimeline(adapter, { dir, persist = true, now = Date.now, exporter, ...limits } = {}) {
   let trace
@@ -49,12 +51,16 @@ export function createTimeline(adapter, { dir, persist = true, now = Date.now, e
   // sends another home's names by accident.
   const exportWindow = (body = {}) => otlpPayload(spansFrom(trace.records(), { names: body?.names === true ? trace.names() : {} }), { serviceName: body?.serviceName })
   const offExport = adapter.handle(EXPORT_ENDPOINT, exportWindow)
+  // A team run report (#357/#401): the window as a short Markdown digest. Read-only.
+  const digest = (body = {}) => buildDigest(window(body), { ...(typeof body?.title === 'string' && body.title.trim() ? { title: body.title.trim().slice(0, 80) } : {}), now: now() })
+  const offDigest = adapter.handle(DIGEST_ENDPOINT, digest)
   return {
-    trace, recorder, window, exportNow, exportWindow,
+    trace, recorder, window, exportNow, exportWindow, digest,
     dispose() {
       if (exportTimer !== undefined) clearInterval(exportTimer)
       offEndpoint()
       offExport()
+      offDigest()
       off()
       trace.close()
     },

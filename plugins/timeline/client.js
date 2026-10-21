@@ -17,6 +17,7 @@ window.__ModuleLoader__.load({
   factory: (require) => {
     const { createElement: h, useEffect, useState, useCallback } = require('react')
     const ENDPOINT = 'timeline/window'
+    const DIGEST_ENDPOINT = 'timeline/digest'
     const VERSION = 1
     const POLL_MS = 2000
     const MAX_BACKOFF_MS = 30_000
@@ -122,6 +123,12 @@ window.__ModuleLoader__.load({
           restart()
         },
         refresh: restart,
+        // A team run report for the open window (#401): the Markdown digest, for copying or posting.
+        async digest() {
+          const asked = { windowMs: state.windowMs, ...(state.to === undefined ? {} : { to: state.to }) }
+          const value = await flybot.call(DIGEST_ENDPOINT, asked)
+          return typeof value?.markdown === 'string' ? value.markdown : ''
+        },
         dispose() { disposed = true; timers.clearTimeout(timer); stopWatching?.(); stopWatching = undefined; listeners.clear() },
       }
     }
@@ -608,6 +615,12 @@ window.__ModuleLoader__.load({
         return () => document.removeEventListener('keydown', onKey)
       }, [onClose])
       const win = snap.window
+      // Copy a Markdown run report of the window to the clipboard (#401). A refused write is quiet.
+      const copyDigest = useCallback(async () => {
+        const text = await api.digest().catch(() => '')
+        if (typeof text !== 'string' || text === '') return
+        try { await navigator.clipboard.writeText(text) } catch { /* the clipboard write can be refused */ }
+      }, [api])
       const empty = win && win.turns.length === 0 && win.exchanges.length === 0
       const body = !win ? h('p', { className: 'tl-note' }, snap.status === 'error' ? 'Waiting for the host.' : 'Loading…')
         : empty ? h('p', { className: 'tl-note' }, 'No Bot activity in this window.')
@@ -623,6 +636,7 @@ window.__ModuleLoader__.load({
               ...WINDOWS.map(([label, ms]) => h('option', { key: ms, value: String(ms) }, `Last ${label}`))),
             h('button', { className: 'tl-btn', onClick: () => api.setWindow({ windowMs: snap.windowMs, to: (win ? win.to : Date.now()) - snap.windowMs / 2 }) }, 'Earlier'),
             h('button', { className: 'tl-btn live', 'aria-pressed': snap.to === undefined, title: snap.to === undefined ? 'Following the latest activity' : 'Back to the latest activity', onClick: () => { if (snap.to !== undefined) api.setWindow({ windowMs: snap.windowMs }) } }, h('i', { className: 'tl-dot', 'aria-hidden': 'true' }), 'Live'),
+            h('button', { className: 'tl-btn', title: 'Copy a run report of this window', onClick: () => { void copyDigest() } }, 'Copy report'),
             h('button', { className: 'tl-btn', 'aria-label': 'Close', onClick: onClose }, '✕')),
           win && h('div', { className: 'tl-range', 'data-flybot': 'timeline-range' },
             h('span', { className: 'tl-range-text' }, fmtRange(win.from, win.to)),
@@ -673,7 +687,7 @@ window.__ModuleLoader__.load({
       return off
     }
     return {
-      name: 'flybot-timeline', inject, apply, createStore, checkWindow, ENDPOINT, VERSION, POLL_MS, WINDOWS, CSS,
+      name: 'flybot-timeline', inject, apply, createStore, checkWindow, ENDPOINT, DIGEST_ENDPOINT, VERSION, POLL_MS, WINDOWS, CSS,
       safe, fmtDur, fmtClock, fmtRange, makeScale, niceTicks, layoutSwimlanes, layoutMap, waitRows, utilizationRows, createPanelState,
       Swimlanes, CommMap, Utilization, TimelinePanel, makeSection, notesOf,
     }

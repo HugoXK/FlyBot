@@ -1,0 +1,1 @@
+The Timeline panel can now produce a run report: its **Copy report** button (and the read-only `timeline/digest` endpoint) turns the open window into a short Markdown digest — each Bot's turns and failures, how busy it was, its tokens, its top tools and unanswered requests, then the team rollup and the longest wait — ready to paste into a chat or a standup.
