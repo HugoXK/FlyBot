@@ -380,6 +380,36 @@ test("#497: while a FlyBot window is on screen the inbox is read at the live cad
   assert.equal(reads(), watched)
 })
 
+test('a face poll in flight when the plugin is disposed does not re-arm its timer', async (t) => {
+  const { ctx, home, stop } = await team()
+  t.after(stop)
+  const server = mockServer()
+  const settingsPath = join(home, 'settings-dispose.json')
+  writeFileSync(settingsPath, JSON.stringify({ faceRooms: { fr1: {} } }))
+  // A live face room keeps the poll at the fast cadence; closing it changes the cadence, which is
+  // what a late armSocialPoll would use to install a new timer after dispose.
+  let faceOpen = true
+  const scope = ctx.flybot.scope.bind(ctx.flybot)
+  ctx.flybot.scope = (name) => {
+    const scoped = scope(name)
+    scoped.rooms = { ...scoped.rooms, ofFace: () => (faceOpen ? { id: 'fr1', face: { status: 'open' } } : undefined) }
+    return scoped
+  }
+  let releaseList
+  const faceApi = { list: () => new Promise(resolve => { releaseList = resolve }) }
+  const timers = []
+  const social = createSocial(ctx.flybot, { autoAccept: false, inboxPollMs: 15_000, facePollMs: 4_000, settingsPath }, {
+    client: createMcpClient({ server: 'https://s', token: 'owner-token', fetch: server.fetch }), home: { id: 'h1', handle: '@danyang.home' },
+    faceApi, setInterval: (fn, ms) => { const timer = { fn, ms }; timers.push(timer); return timer }, clearInterval: (timer) => { const at = timers.indexOf(timer); if (at >= 0) timers.splice(at, 1) },
+  })
+  assert.ok(timers.some(timer => timer.ms === 4_000), 'the live face room arms the fast poll')
+  faceOpen = false // the face room closes while the first face poll is still in flight
+  social.dispose()
+  releaseList([]) // the in-flight face poll resolves now and calls armSocialPoll on the disposed instance
+  await settle()
+  assert.deepEqual(timers, [], 'a disposed instance never re-arms its poll')
+})
+
 test('friends\' remote Bots are chat members: in the roster, @-mentioned through social approval, and shown as their own bubbles', async (t) => {
   const { ctx, call, received, stop } = await team()
   t.after(stop)

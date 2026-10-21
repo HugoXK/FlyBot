@@ -1755,7 +1755,12 @@ export function createSocial(service, config = {}, { client: given, api: givenAp
   const pollInboxNow = () => { inboxAt = now(); return pollInbox() }
   let pollTimer
   let lastPollMs
+  // A face poll already in flight when dispose() runs can finish afterwards and call armSocialPoll;
+  // without the flag it would install a new interval on the discarded instance, which would keep
+  // polling the server it was built for (a server switch leaves the old one reachable).
+  let disposed = false
   function armSocialPoll() {
+    if (disposed) return
     const ms = socialPollMs()
     if (ms === lastPollMs && pollTimer) return
     if (pollTimer) { clear(pollTimer); pollTimer = undefined }
@@ -1767,7 +1772,7 @@ export function createSocial(service, config = {}, { client: given, api: givenAp
       if (now() - fetchedAt >= REMOTE_TTL_MS) void remoteBots({ fresh: true }).catch(() => {})
     }, ms)
   }
-  disposers.push(() => { if (pollTimer) clear(pollTimer) })
+  disposers.push(() => { if (pollTimer) clear(pollTimer); pollTimer = undefined })
   armSocialPoll()
   // While a FlyBot window is on screen (#497, `flybot.watched`), the inbox is also read at the live
   // cadence: a friend's first line, the held reply's approval card and the Inbox count reach the open
@@ -3407,6 +3412,7 @@ export function createSocial(service, config = {}, { client: given, api: givenAp
     sendChat,
     setAutoAccept,
     dispose() {
+      disposed = true
       flybot.roomApprovals?.setProvider?.(undefined)
       flybot.chatApprovals?.setProvider?.(undefined)
       for (const dispose of disposers.splice(0).reverse()) dispose?.()
