@@ -253,14 +253,14 @@ export function install(rt) {
         case 'delete-bot':
           await rt.load()
           await rt.deleteBot(body.id)
-          return ok(view())
+          return ok(view(actor))
         case 'set-main':
           await rt.load()
           await rt.setMain(body.id, body.main !== false, {
             primary: body.primary === true,
             replace: typeof body.replace === 'string' ? body.replace : undefined,
           })
-          return ok(view())
+          return ok(view(actor))
         case 'create-room': {
           await rt.load()
           const room = await rt.createRoom({
@@ -330,14 +330,14 @@ export function install(rt) {
         case 'remove-agent':
           await rt.load()
           await rt.removeAgent(body.agentId)
-          return ok(view())
+          return ok(view(actor))
         case 'set-flags':
           await rt.load()
           return ok(await rt.setFlags(body.id, body))
         case 'delete-room':
           await rt.load()
           await rt.deleteRoom(body.id)
-          return ok(view())
+          return ok(view(actor))
         case 'approval-answer':
           await rt.answerApproval(body.id, body.choice)
           return ok(true)

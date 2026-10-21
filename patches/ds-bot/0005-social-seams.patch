@@ -458,8 +458,20 @@ diff --git a/src/host/channel.js b/src/host/channel.js
            return ok(bot)
          }
          case 'update-bot':
-@@ -160,7 +160,13 @@ export function install(rt) {
-           return ok(view())
+@@ -150,17 +150,23 @@ export function install(rt) {
+         case 'delete-bot':
+           await rt.load()
+           await rt.deleteBot(body.id)
+-          return ok(view())
++          return ok(view(actor))
+         case 'set-main':
+           await rt.load()
+           await rt.setMain(body.id, body.main !== false, {
+             primary: body.primary === true,
+             replace: typeof body.replace === 'string' ? body.replace : undefined,
+           })
+-          return ok(view())
++          return ok(view(actor))
          case 'create-room': {
            await rt.load()
 -          const room = await rt.createRoom({ members: Array.isArray(body.members) ? body.members : [], name: body.name, ...(typeof body.admin === 'string' ? { admin: body.admin } : {}) })
@@ -502,9 +514,20 @@ diff --git a/src/host/channel.js b/src/host/channel.js
          }
          case 'folders':
          case 'folder-pick':
-@@ -212,8 +212,10 @@ export function install(rt) {
+@@ -203,17 +203,19 @@ export function install(rt) {
+         case 'remove-agent':
+           await rt.load()
+           await rt.removeAgent(body.agentId)
+-          return ok(view())
++          return ok(view(actor))
+         case 'set-flags':
+           await rt.load()
+           return ok(await rt.setFlags(body.id, body))
+         case 'delete-room':
+           await rt.load()
            await rt.deleteRoom(body.id)
-           return ok(view())
+-          return ok(view())
++          return ok(view(actor))
          case 'approval-answer':
 -          rt.answerApproval(body.id, body.choice)
 +          await rt.answerApproval(body.id, body.choice)

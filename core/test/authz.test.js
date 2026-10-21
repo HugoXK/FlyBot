@@ -125,6 +125,30 @@ test('no actor when enforced', async (t) => {
   assert.equal(rt.authorize(null, 'auth-whoami', {}).ok, true)
 })
 
+test('the one deployment Agent stays usable to a signed-in member while alone, and blocks with two', async (t) => {
+  const { rt } = runtime(t, TEAM)
+  await rt.load()
+  const session = await redeemOwner(rt)
+  const actor = await rt.authenticate(session.sessionToken)
+  assert.equal(rt.authzEnforced(), true)
+  // The browser sends `agentId`, never a Bot id; the Agent is one per deployment and ownerless,
+  // so it follows the shared rule (`add-agent`) instead of a per-Bot owner check.
+  for (const [ep, body] of [
+    ['agent-session', { agentId: 'ag', workspaceId: 'w1' }],
+    ['agent-adopt', { agentId: 'ag', sessionId: 's1' }],
+    ['agent-archive', { agentId: 'ag', sessionId: 's1' }],
+    ['agent-rename', { agentId: 'ag', sessionId: 's1', title: 'T' }],
+    ['remove-agent', { agentId: 'ag' }],
+  ]) {
+    const gate = rt.authorize(actor, ep, body)
+    assert.equal(gate.ok, true, `${ep}: ${gate.code ?? ''} ${gate.message ?? ''}`)
+  }
+  // A second member makes the deployment-wide Agent a shared resource, like `add-agent`.
+  await redeemOwner(rt)
+  assert.equal(rt.authorize(actor, 'agent-session', { agentId: 'ag' }).code, 'bot/blocked-shared')
+  assert.equal(rt.authorize(actor, 'remove-agent', { agentId: 'ag' }).code, 'bot/blocked-shared')
+})
+
 test('forged actorId ignored', async (t) => {
   const { rt } = runtime(t, TEAM)
   await rt.load()
