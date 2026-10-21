@@ -6,19 +6,20 @@ import { OWNER, OTHER, SCHEDULED } from './turn-origin.js'
 
 // Text from outside the team, marked so the Bot treats it as data. Marker fragments are
 // removed until none is left, so a nested "</untrusted-</untrusted-message>message>"
-// cannot rebuild a closing tag.
+// cannot rebuild a closing tag. Whitespace inside the tag (< / untrusted-message>) is
+// stripped too: a parser that ignores it would read the same marker.
 export const stripMarkers = (text, tag = 'untrusted-message') => {
   let out = String(text)
-  const pattern = new RegExp(`<\\/?\\s*${tag}`, 'gi')
+  const pattern = new RegExp(`<\\s*\\/?\\s*${tag}`, 'gi')
   for (let previous; previous !== out;) { previous = out; out = out.replace(pattern, '') }
   return out
 }
 // Both untrusted tags in one fixed-point pass: stripping one tag can let fragments
 // the other pass joined back survive it, so a closing fence must never be reachable
-// by any order (#98 review).
+// by any order (#98 review). Whitespace inside the tag is part of the class.
 export const stripUntrusted = text => {
   let out = String(text)
-  const pattern = /<\/?\s*(?:untrusted-message|untrusted-file)/gi
+  const pattern = /<\s*\/?\s*(?:untrusted-message|untrusted-file)/gi
   for (let previous; previous !== out;) { previous = out; out = out.replace(pattern, '') }
   return out
 }
