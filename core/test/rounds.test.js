@@ -1408,3 +1408,37 @@ test('#595: this home\'s own Bot\'s ordinary line mid-turn shows in the running 
   const done = JSON.parse(await running)
   assert.equal(done.replies.filter(reply => reply.name === 'Writer' && reply.text === line).length, 1, 'no second bubble')
 })
+
+test('#595: a Bot\'s failure notice mid-round is held too, never raw in the Session queue', async (t) => {
+  const env = start()
+  const { emit, userMessage, relay, answer, stop, sent, rt, ctx } = env
+  t.after(stop)
+  const { hosted, writer } = await routedRoom(env, 'fail595')
+  const queued = []
+  let busy = true
+  let markIdle
+  const idle = new Promise(resolve => { markIdle = resolve })
+  const resolve = ctx.sessionController.resolveAgent
+  ctx.sessionController.resolveAgent = async sessionId => sessionId !== hosted.id ? resolve(sessionId) : ({
+    agent: { session: { id: sessionId }, get status() { return busy ? 'running' : 'idle' }, whenIdle: () => idle, followup: message => queued.push(message) },
+  })
+  sent.length = 0
+  await emit(hosted.id, userMessage('Draft the release notes, please.'))
+  const running = relay(hosted.id, 'r595fail')
+  const turn = await turnFor(sent)
+  assert.ok(turn, 'a member answers the line')
+
+  // Writer's model call fails while the round runs: the notice must not wait raw in the composer queue.
+  await rt.postToRoom(hosted, { id: writer, name: 'Writer' }, 'Could not finish: This Bot could not answer right now.', { late: true, quiet: true, failed: { code: 'MODEL' } })
+  assert.equal(queued.length, 0, 'the failure notice does not wait raw in the composer queue')
+  const live = structuredClone([...rt.roomProgress.values()].find(entry => entry.roomId === hosted.id)?.replies ?? [])
+  assert.equal(live.some(reply => reply.botId === writer), false, 'the notice is not drawn as Writer\'s bubble')
+
+  busy = false
+  markIdle()
+  await waitFor(() => (queued.length === 1 ? true : undefined))
+  assert.deepEqual(queued.map(message => [message.source.role, message.source.failed?.code]), [['post', 'MODEL']], 'delivered once idle, still the failure event')
+
+  await answer(turn.sessionId, turn.message.source.exchangeId, 'Thanks.', 1)
+  await running
+})
