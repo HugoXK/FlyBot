@@ -258,3 +258,19 @@ test('usage: token spend per Bot (#357/#401)', () => {
   assert.deepEqual([a.calls, a.input, a.output, a.cacheRead], [2, 150, 30, 5])
   assert.equal(win.usage.find(entry => entry.lane === 'b').calls, 0)
 })
+
+test('outcomes: per-Bot turn endings and the recent failures (#357/#471)', () => {
+  const recs = [
+    { r: 'ts', t: at(1000), id: 'a#1', pl: 'chat', bot: 'a' },
+    { r: 'te', t: at(2000), id: 'a#1', o: 'completed' },
+    { r: 'ts', t: at(3000), id: 'a#2', pl: 'chat', bot: 'a' },
+    { r: 'te', t: at(4000), id: 'a#2', o: 'error', ec: 'RATE_LIMIT' },
+    { r: 'ts', t: at(5000), id: 'b#1', pl: 'chat', bot: 'b' },
+    { r: 'te', t: at(6000), id: 'b#1', o: 'aborted' },
+  ]
+  const win = buildWindow(recs, { now: at(10_000), bots, rooms })
+  const a = win.outcomes.find(entry => entry.lane === 'a')
+  assert.deepEqual([a.completed, a.error, a.aborted, a.lost], [1, 1, 0, 0])
+  assert.deepEqual(win.outcomes.find(entry => entry.lane === 'b').aborted, 1)
+  assert.deepEqual(win.failures.map(f => [f.id, f.bot, f.outcome, f.code]), [['b#1', 'b', 'aborted', undefined], ['a#2', 'a', 'error', 'RATE_LIMIT']])
+})

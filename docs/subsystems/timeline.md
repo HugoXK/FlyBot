@@ -26,7 +26,7 @@ Everything in `plugins/timeline/`: the recorder, the trace file, the read model 
 | `plugins/timeline/src/adapter.js` | The only file that knows the `ctx.flybot` shape. |
 | `plugins/timeline/src/recorder.js` | Feed events to compact trace records; rebuilds every field from a strict alphabet. |
 | `plugins/timeline/src/store.js` | The trace: single writer, write-tmp + fsync + rename, capped segments. |
-| `plugins/timeline/src/window.js` | Pure read model: records to lanes, turns, tools, arrows, edges, utilization, and the token spend per Bot (#357). |
+| `plugins/timeline/src/window.js` | Pure read model: records to lanes, turns, tools, arrows, edges, utilization, the token spend per Bot (#357) and per-Bot outcomes and recent failures (#471). |
 | `plugins/timeline/client.js` | Browser entry (`@flybot/timeline`): the 2 s poller exposed as `ctx.flybot.timeline`, the geometry functions (`layoutSwimlanes`, `layoutMap`, `waitRows`, `utilizationRows`) and the panel (swimlanes, who waits on whom, utilization), opened from its `flybot.sidebar.section` row, the only entry (not in the + menu, #269). |
 | `plugins/timeline/src/sanitize.js` | The cleaners for ids, labels, codes, times, counts. |
 | `plugins/timeline/src/otel.js` | OTLP export: maps trace records to OpenTelemetry GenAI spans (`spansFrom`, `otlpPayload`) and a cursor exporter (`createExporter`). Off unless `config.exporter` is set. |

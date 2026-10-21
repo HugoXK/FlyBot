@@ -274,12 +274,25 @@ export function buildWindow(records, { now = Date.now(), to, windowMs, bots = []
   }
   const edges = [...edgeMap.values()].map(({ waits, ...edge }) => ({ ...edge, ...(waits.length ? { medianMs: median(waits), maxMs: Math.max(...waits), totalWaitMs: waits.reduce((sum, value) => sum + value, 0) } : {}) }))
 
+  // ---- how each Bot's turns ended, and its recent failures (#357 quality / #471 failed turns)
+  const FAILED_KEPT = 20
+  const outcomes = lanes.filter(lane => lane.kind === 'bot').map((lane) => {
+    const own = turnList.filter(turn => turn.bot === lane.id && turn.place !== 'room')
+    const count = kind => own.filter(turn => (turn.lost === true ? 'lost' : turn.outcome) === kind).length
+    return { lane: lane.id, completed: count('completed'), aborted: count('aborted'), error: count('error'), lost: count('lost') }
+  })
+  const failures = turnList
+    .filter(turn => turn.place !== 'room' && typeof turn.bot === 'string' && turn.t1 !== undefined && (turn.outcome === 'error' || turn.outcome === 'aborted'))
+    .sort((a, b) => b.t1 - a.t1)
+    .slice(0, FAILED_KEPT)
+    .map(turn => ({ id: turn.id, bot: turn.bot, at: turn.t1, outcome: turn.outcome, ...(turn.errorCode ? { code: cleanCode(turn.errorCode) } : {}) }))
+
   return {
     version: 1,
     now, from: lo, to: hi, windowMs: windowMsActual, live,
     coverage: { oldest: oldest ?? null, newest: last || null, complete: oldest !== undefined && oldest <= lo },
     trace: stats ?? null,
     truncated,
-    lanes, turns: shapedTurns, rounds, exchanges, utilization, edges, usage,
+    lanes, turns: shapedTurns, rounds, exchanges, utilization, edges, usage, outcomes, failures,
   }
 }
