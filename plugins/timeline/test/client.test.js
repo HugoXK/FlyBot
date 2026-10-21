@@ -102,6 +102,23 @@ test('a hidden page loads once, then does not poll; showing it again refreshes a
   assert.equal(calls.length, 2)
 })
 
+test('a superseded request does not drop the in-flight guard of the one that replaced it', async () => {
+  const { store, calls, pending, tick, watchers } = rig()
+  const close = store.open()
+  store.refresh() // a new request replaces the one in flight; the old one is still pending
+  assert.equal(calls.length, 2)
+  // The superseded answer lands after the replacement started: it must not clear `inFlight`.
+  pending[0].resolve(good({ now: 'stale' }))
+  await tick()
+  for (const fn of [...watchers]) fn() // coming back to the tab
+  await tick()
+  assert.equal(calls.length, 2, 'no third request while the replacement is still in flight')
+  pending[1].resolve(good({ now: 'fresh' }))
+  await tick()
+  assert.equal(store.state.window.now, 'fresh')
+  close()
+})
+
 test('closing the last panel stops watching visibility', async () => {
   const { store, watchers, tick } = rig()
   const close = store.open()

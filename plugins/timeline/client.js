@@ -83,7 +83,9 @@ window.__ModuleLoader__.load({
           if (mine !== generation) return
           set({ status: 'error', error: String(error?.message ?? error).slice(0, 200), failures: state.failures + 1 })
         } finally {
-          inFlight = false
+          // Only the current request owns the flag: a superseded one (the window changed meanwhile)
+          // must not clear it while the request that replaced it is still in flight (#_).
+          if (mine === generation) inFlight = false
         }
         if (mine === generation) schedule(state.failures === 0 ? POLL_MS : Math.min(MAX_BACKOFF_MS, POLL_MS * 2 ** state.failures))
       }
