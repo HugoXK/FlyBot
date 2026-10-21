@@ -1,0 +1,1 @@
+A host can set a default model for a plugin's `flybot.model.ask` calls with `flybot.modelFor` (`{ <plugin>: <provider/model> }`), so a plugin's short calls — a classification, a title — run on the model the host chose (for example a cheaper one) unless the call names another.

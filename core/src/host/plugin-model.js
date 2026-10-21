@@ -31,9 +31,12 @@ const clamp = (value, low, high, fallback) => (Number.isFinite(value) ? Math.min
  * Builds the `ask(plugin, input)` the host exposes as `flybot.model.ask`.
  * `allow` is the allow-list from config; an empty list refuses every plugin.
  */
-export function createPluginModel(rt, { allow = [], now = Date.now, limits = {} } = {}) {
+export function createPluginModel(rt, { allow = [], models = {}, now = Date.now, limits = {} } = {}) {
   const caps = { ...MODEL_LIMITS, ...limits }
   const allowed = new Set(Array.isArray(allow) ? allow : [])
+  // A model the host picked for a plugin (config.flybot.modelFor): its calls use that model unless
+  // the call names one. A cheap model for a classification, say.
+  const perPlugin = new Map(Object.entries(models && typeof models === 'object' ? models : {}))
   /** @type {Map<string, number[]>} recent call times per plugin */
   const calls = new Map()
 
@@ -54,7 +57,7 @@ export function createPluginModel(rt, { allow = [], now = Date.now, limits = {} 
     if (prompt.length > caps.maxPromptChars) return { ok: false, code: 'prompt-too-long' }
     const system = input?.system === undefined ? undefined : String(input.system).slice(0, caps.maxSystemChars)
     const maxTokens = clamp(input?.maxTokens, 1, caps.maxTokens, caps.defaultTokens)
-    const route = splitRef(input?.model ?? (await rt.defaultModel()))
+    const route = splitRef(input?.model ?? perPlugin.get(plugin) ?? (await rt.defaultModel()))
     if (route === undefined) return { ok: false, code: 'no-model' }
     if (!withinRate(plugin)) return { ok: false, code: 'rate-limited' }
     const messages = [{ role: 'user', content: [{ type: 'text', text: prompt }] }]

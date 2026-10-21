@@ -359,7 +359,7 @@ export interface FlyBot {
   }
   /**
    * A sanctioned, capped model call for this plugin (#450). Off unless the host names the
-   * plugin in config.flybot.modelPlugins; text only (no side effect), capped input/output and
+   * plugin in config.flybot.modelPlugins; text only (no side effect), capped input/output and a per-plugin default model in config.flybot.modelFor (a call may still name one); text only, capped input/output and
    * per-minute rate, refused on a read-only host. Resolves `{ ok: true, text }` or
    * `{ ok: false, code }` where `code` is a short token (never provider text).
    */

@@ -103,7 +103,7 @@ export function install(rt) {
   // Plugins the host allows to read and write a Bot's own memory (#450 item 1). Empty by default.
   const memoryPlugins = new Set(config?.flybot?.memoryPlugins ?? [])
   // A sanctioned, capped model call for a named plugin (#450). Empty allow-list by default.
-  const modelAsk = createPluginModel(rt, { allow: config?.flybot?.modelPlugins ?? [] })
+  const modelAsk = createPluginModel(rt, { allow: config?.flybot?.modelPlugins ?? [], models: config?.flybot?.modelFor ?? {} })
   const warn = (...args) => rt.warn?.(...args)
   const emit = (name, payload) => { try { ctx.emit?.(name, payload) } catch (error) { warn('flybot: %s listener failed: %s', name, error) } }
 

@@ -77,3 +77,15 @@ test('a stream that ends with an error finish maps to a short code', async () =>
   const { rt } = fakeRt({ reply: '', finish: { kind: 'error', failure: { code: 'RATE_LIMIT' } } })
   assert.deepEqual(await createPluginModel(rt, { allow: ['p'] })('p', { prompt: 'hi' }), { ok: false, code: 'RATE_LIMIT' })
 })
+
+test('a model the host set for a plugin is used unless the call names one', async () => {
+  const { rt, requests } = fakeRt({ reply: 'ok' })
+  const ask = createPluginModel(rt, { allow: ['p'], models: { p: 'cheap/mini' } })
+  await ask('p', { prompt: 'hi' })
+  assert.deepEqual([requests[0].provider, requests[0].model], ['cheap', 'mini'])
+  await ask('p', { prompt: 'hi', model: 'deepseek/v4' })
+  assert.deepEqual([requests[1].provider, requests[1].model], ['deepseek', 'v4'])
+  const plain = fakeRt({ reply: 'ok' })
+  await createPluginModel(plain.rt, { allow: ['p'] })('p', { prompt: 'hi' })
+  assert.deepEqual([plain.requests[0].provider, plain.requests[0].model], ['deepseek', 'v4'])
+})
