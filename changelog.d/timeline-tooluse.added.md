@@ -1,0 +1,1 @@
+The Timeline window now shows which tools each Bot used, with how many times and how many of those failed, so a flaky tool or connector is visible where the run is drawn. Read-only, part of the existing `timeline/window` answer, tool names cleaned and capped.

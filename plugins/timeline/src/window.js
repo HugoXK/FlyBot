@@ -260,6 +260,23 @@ export function buildWindow(records, { now = Date.now(), to, windowMs, bots = []
     return { lane: lane.id, calls: calls.length, input: sum('in'), output: sum('out'), cacheRead: sum('cr'), cacheWrite: sum('cw') }
   })
 
+  // ---- which tools each Bot used, and how often they failed (#357/#359 connectors)
+  const toolUse = lanes.filter(lane => lane.kind === 'bot').map((lane) => {
+    const counts = new Map()
+    for (const turn of turnList) {
+      if (turn.bot !== lane.id || turn.place === 'room') continue
+      for (const tool of toolsOf.get(turn.id) ?? []) {
+        const name = cleanLabel(tool.name, 60) || 'tool'
+        const entry = counts.get(name) ?? { name, calls: 0, failed: 0 }
+        entry.calls += 1
+        if (tool.ok === false) entry.failed += 1
+        counts.set(name, entry)
+      }
+    }
+    const tools = [...counts.values()].sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name)).slice(0, 20)
+    return { lane: lane.id, tools }
+  })
+
   // ---- communication map: directed edges, "A waits on B" from request -> reply latencies
   const edgeMap = new Map()
   for (const arrow of exchanges) {
@@ -293,6 +310,6 @@ export function buildWindow(records, { now = Date.now(), to, windowMs, bots = []
     coverage: { oldest: oldest ?? null, newest: last || null, complete: oldest !== undefined && oldest <= lo },
     trace: stats ?? null,
     truncated,
-    lanes, turns: shapedTurns, rounds, exchanges, utilization, edges, usage, outcomes, failures,
+    lanes, turns: shapedTurns, rounds, exchanges, utilization, edges, usage, outcomes, failures, toolUse,
   }
 }
