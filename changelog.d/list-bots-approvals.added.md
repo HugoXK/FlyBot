@@ -1,0 +1,1 @@
+`list_bots` now marks a Bot whose outbound message is waiting for your approval, with a count (for example `Chief (…, 1 to approve)`), so a Main Bot coordinating the team can see which Bot is blocked on a decision. It shows only how many, never the held message.

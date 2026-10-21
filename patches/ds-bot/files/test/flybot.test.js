@@ -807,3 +807,14 @@ test('#450: flybot.memory reads and writes a Bot only for an allow-listed plugin
   assert.deepEqual(await listed.memory.append('a', 'The user prefers tea'), { ok: true })
   assert.ok(listed.memory.read('a').some(entry => entry.text === 'The user prefers tea'))
 })
+
+test('#52 follow-up: list_bots marks a Bot whose send waits for approval, by count only', async (t) => {
+  const { fb, tool, stop } = await start()
+  t.after(stop)
+  fb.bot.send.use({ name: 'gate', handle: async msg => (msg.meta?.hold ? { action: 'hold', reason: 'held by test' } : undefined) })
+  const held = await fb.bot.send({ from: 'a', to: 'b', text: 'a secret line', meta: { hold: true } })
+  assert.equal(held.action, 'hold', JSON.stringify(held))
+  const listed = await tool('list_bots', {}, 'a')
+  assert.match(listed, /- Chief \(Boss, 1 to approve, Main Bot, you\)/)
+  assert.doesNotMatch(listed, /a secret line/)
+})

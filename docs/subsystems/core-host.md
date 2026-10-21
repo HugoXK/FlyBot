@@ -81,6 +81,10 @@ external backend or task-specific session mapping; see the
 
 - `memory.js` exposes `rt.botMemoryRead(botId)` (a Bot's own entries, capped at 200) and `rt.botMemoryAppend(botId, text, meta)` (one entry through the ordinary path — secret-scanned, size-capped, journaled). `hooks.js` gates them as `flybot.memory` for a plugin the host names in `flybot.memoryPlugins` (empty by default). The tree uses it to carry a merged Bot's memory into the kept Bot. Tests: the `flybot.memory` case in `core/test/flybot.test.js`.
 
+### Held sends in list_bots (#52)
+
+- `list_bots` marks a Bot that has a send held for the owner's approval with a count (`1 to approve`) so a coordinator knows who is blocked on a decision; it is a count only, never the held text. Test: the `list_bots` approval case in `core/test/flybot.test.js`.
+
 ### Tasks
 
 The requester may also cancel a `result-ready` task before acceptance (#202).

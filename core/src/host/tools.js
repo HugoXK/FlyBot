@@ -112,9 +112,18 @@ export function install(rt) {
         if (subtreeOnly && !inSubtree(self, bot.id)) return true
         return false
       }
+      // A Bot with a send held for the owner's approval is marked, so a coordinator knows who is
+      // blocked on a decision (#52). The tag is a count only: never the held content.
+      const pendingBy = new Map()
+      for (const approval of Object.values(state.flybot?.approvals ?? {})) {
+        if (approval?.status !== 'pending') continue
+        const from = typeof approval?.request?.from === 'string' ? approval.request.from : undefined
+        if (from !== undefined) pendingBy.set(from, (pendingBy.get(from) ?? 0) + 1)
+      }
       const lines = Object.values(state.bots).filter(listed).map(bot => {
         const model = bot.appliedModel ?? bot.model
-        const tags = [bot.role, model ? `model ${model}` : '', !foreign(bot) && bot.workDir ? `works in ${bot.workDir}` : '', rt.isMain(bot.id) ? 'Main Bot' : '', bot.id === self ? 'you' : ''].filter(Boolean).join(', ')
+        const pending = pendingBy.get(bot.id) ?? 0
+        const tags = [bot.role, model ? `model ${model}` : '', !foreign(bot) && bot.workDir ? `works in ${bot.workDir}` : '', pending > 0 ? `${pending} to approve` : '', rt.isMain(bot.id) ? 'Main Bot' : '', bot.id === self ? 'you' : ''].filter(Boolean).join(', ')
         const job = !foreign(bot) && bot.instructions ? ` — ${bot.instructions.split('\n')[0].slice(0, 120)}` : ''
         return `- ${bot.name}${tags ? ` (${tags})` : ''}${job}`
       })

@@ -719,7 +719,7 @@ diff --git a/src/host/tools.js b/src/host/tools.js
  
  export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
  export const GROUP_REF = { type: 'string', required: true, description: 'Exact group chat name from list_bots' }
-@@ -27,39 +27,102 @@ export function install(rt) {
+@@ -27,39 +27,111 @@ export function install(rt) {
    const roomLine = (room, self) => {
      const members = room.members.map(rt.botOf).filter(Boolean)
        .map(bot => `${bot.name}${bot.id === room.admin ? ' (admin)' : ''}${bot.id === self ? ' (you)' : ''}`)
@@ -808,11 +808,20 @@ diff --git a/src/host/tools.js b/src/host/tools.js
 +        if (subtreeOnly && !inSubtree(self, bot.id)) return true
 +        return false
 +      }
++      // A Bot with a send held for the owner's approval is marked, so a coordinator knows who is
++      // blocked on a decision (#52). The tag is a count only: never the held content.
++      const pendingBy = new Map()
++      for (const approval of Object.values(state.flybot?.approvals ?? {})) {
++        if (approval?.status !== 'pending') continue
++        const from = typeof approval?.request?.from === 'string' ? approval.request.from : undefined
++        if (from !== undefined) pendingBy.set(from, (pendingBy.get(from) ?? 0) + 1)
++      }
 +      const lines = Object.values(state.bots).filter(listed).map(bot => {
          const model = bot.appliedModel ?? bot.model
 -        const tags = [bot.role, model ? `model ${model}` : '', bot.workDir ? `works in ${bot.workDir}` : '', rt.isMain(bot.id) ? 'Main Bot' : '', bot.id === self ? 'you' : ''].filter(Boolean).join(', ')
 -        const job = bot.instructions ? ` — ${bot.instructions.split('\n')[0].slice(0, 120)}` : ''
-+        const tags = [bot.role, model ? `model ${model}` : '', !foreign(bot) && bot.workDir ? `works in ${bot.workDir}` : '', rt.isMain(bot.id) ? 'Main Bot' : '', bot.id === self ? 'you' : ''].filter(Boolean).join(', ')
++        const pending = pendingBy.get(bot.id) ?? 0
++        const tags = [bot.role, model ? `model ${model}` : '', !foreign(bot) && bot.workDir ? `works in ${bot.workDir}` : '', pending > 0 ? `${pending} to approve` : '', rt.isMain(bot.id) ? 'Main Bot' : '', bot.id === self ? 'you' : ''].filter(Boolean).join(', ')
 +        const job = !foreign(bot) && bot.instructions ? ` — ${bot.instructions.split('\n')[0].slice(0, 120)}` : ''
          return `- ${bot.name}${tags ? ` (${tags})` : ''}${job}`
        })
