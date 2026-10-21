@@ -81,6 +81,11 @@ external backend or task-specific session mapping; see the
 
 - `memory.js` exposes `rt.botMemoryRead(botId)` (a Bot's own entries, capped at 200) and `rt.botMemoryAppend(botId, text, meta)` (one entry through the ordinary path — secret-scanned, size-capped, journaled). `hooks.js` gates them as `flybot.memory` for a plugin the host names in `flybot.memoryPlugins` (empty by default). The tree uses it to carry a merged Bot's memory into the kept Bot. Tests: the `flybot.memory` case in `core/test/flybot.test.js`.
 
+### Decisions a Bot records (#396)
+
+- `src/host/decisions.js` gives a Bot one small tool, `record_decision({ option, choice, why })` (`choice` is `used` or `rejected`), so a "considered and rejected" choice a reviewer cannot otherwise see is written down. The host appends one JSON line per decision to `<home>/decisions.jsonl` (capped at 2000 lines, one at a time; a write failure is a warning, never a turn failure) and fires the entry on the activity feed as `decision`. A Bot has no tool to edit or delete a past entry.
+- **Opt-in** (`config.decisions`): with the flag off the tool is not registered, nothing is written and no event is fired, so a default install is unchanged. A key, token or password in the text is refused (`looksSecret`), so the log needs no secret. Tests: `core/test/decisions.test.js`.
+
 ### Tasks
 
 The requester may also cancel a `result-ready` task before acceptance (#202).

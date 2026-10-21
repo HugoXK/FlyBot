@@ -19,6 +19,7 @@ import * as agents from './src/host/agents.js'
 import * as prompt from './src/host/prompt.js'
 import * as timeContext from './src/host/time-context.js'
 import * as tools from './src/host/tools.js'
+import * as decisions from './src/host/decisions.js'
 import * as chatIndex from './src/host/chat-index.js'
 import * as groups from './src/host/groups.js'
 import * as approvals from './src/host/approvals.js'
@@ -49,7 +50,7 @@ export const inject = ['llm', 'tools', 'systemPrompt', 'sessionController', 'ses
 // the functions other modules call; they call them through `rt` at run time, never during
 // install. Listeners run and tools are listed in registration order, so this order holds:
 // usage meters model requests after every listener that rewrites them.
-const MODULES = [diagnostics, store, memberAuth, authz, models, permissions, turns, delivery, roster, folders, agents, prompt, timeContext, tools, chatIndex, groups, roomMembership, reach, tasks, approvals, resume, memory, parts, images, secrets, connectors, connectorAccess, capabilities, schedules, automationDefault, browser, usage, update, dshUpdate, hooks, remoteChat, channel]
+const MODULES = [diagnostics, store, memberAuth, authz, models, permissions, turns, delivery, roster, folders, agents, prompt, timeContext, tools, decisions, chatIndex, groups, roomMembership, reach, tasks, approvals, resume, memory, parts, images, secrets, connectors, connectorAccess, capabilities, schedules, automationDefault, browser, usage, update, dshUpdate, hooks, remoteChat, channel]
 
 export function apply(ctx, config = {}) {
   const rt = createRuntime(ctx, config)

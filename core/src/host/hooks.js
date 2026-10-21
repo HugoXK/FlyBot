@@ -134,6 +134,8 @@ export function install(rt) {
 
   // Turns, tool calls and deliveries (flybot-feed.js): metadata folded from session events.
   installFeed(rt, fire)
+  // Host modules of their own (e.g. decisions.js, #396) may fire a feed event on the same channel.
+  rt.fireFeed = fire
 
   // ---------------------------------------------------------------- bots
   // The team: every Bot but friends' Bots, which are chats of their own (remote-chat.js).

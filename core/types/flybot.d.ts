@@ -186,6 +186,23 @@ export interface FlyBotEvents {
   'tool.start': ToolStarted
   'tool.end': ToolEnded
   'exchange.delivered': ExchangeDelivered
+  /** A decision a Bot recorded through record_decision (#396): one option, used or rejected. */
+  'decision': DecisionMade
+}
+
+/**
+ * A decision a Bot recorded (#396): an option it considered, whether it used or rejected it, and
+ * why. Sanitized to one line; fired only when the host enables the decision log (config.decisions).
+ */
+export interface DecisionMade {
+  botId: BotId
+  /** What the Bot considered, one short line. */
+  option: string
+  choice: 'used' | 'rejected'
+  /** Why, one short line, when given. */
+  why?: string
+  /** Epoch ms. */
+  time: number
 }
 export type On = <K extends keyof FlyBotEvents>(event: K, listener: (payload: FlyBotEvents[K]) => void, options?: { all?: boolean }) => () => void
 

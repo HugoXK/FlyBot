@@ -10,7 +10,7 @@
 import { SOURCE_KIND } from './constants.js'
 import { normRemoteHandle, remoteBotTitle } from '../shared/remote-label.js'
 
-export const FEED_EVENTS = Object.freeze(['turn.start', 'turn.end', 'tool.start', 'tool.end', 'exchange.delivered'])
+export const FEED_EVENTS = Object.freeze(['turn.start', 'turn.end', 'tool.start', 'tool.end', 'exchange.delivered', 'decision'])
 
 // Relay roles a consumer can show. Retry, resume and secret-card nudges are the host
 // talking to itself, not the team talking to each other.
