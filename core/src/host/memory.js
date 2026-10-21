@@ -177,6 +177,19 @@ export function matchEntries(entries, wanted) {
   return entries.filter(entry => squash(entry.text).includes(key))
 }
 
+// How close two entries must be (cosine on the semantic index, #478) to read as the same fact
+// worded differently: high enough that only a near-identical wording matches.
+export const NEAR_DUPLICATE = 0.8
+// The nearest existing entry to `text` when it is close enough to be that fact, so `remember`
+// can point at it (and the model can use replace) instead of saving a near-duplicate. An exact
+// match is handled before this, so the answer is never the text being saved.
+export function nearDuplicate(entries, text) {
+  if (entries.length === 0) return undefined
+  const docs = entries.map((entry, at) => ({ key: String(at), ref: entry.text, entry }))
+  const [hit] = searchIndex(buildIndex(docs), text, { k: 1 })
+  return hit !== undefined && hit.score >= NEAR_DUPLICATE && squash(hit.doc.entry.text) !== squash(text) ? hit.doc.entry : undefined
+}
+
 const KEY_PATTERNS = [
   /\bsk-[A-Za-z0-9_-]{16,}/,
   /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/,
@@ -566,6 +579,7 @@ export function install(rt) {
       const files = loadScope(scope)
       const [same] = matchEntries(allEntries(files), text).filter(entry => squash(entry.text) === squash(text))
       if (same !== undefined) return { changed: false, file: same.file, message: `Already in ${label} (${fileName(same.file)}): "${same.text}". Nothing changed.` }
+      const near = nearDuplicate(allEntries(files), text)
       const main = files[0]
       let target = topic === undefined ? main : files.find(file => file.topic === topic)
       const fresh = target === undefined
@@ -587,7 +601,8 @@ export function install(rt) {
       await journal({ op: 'add', scope: scopeKey(scope), file: target.file, ...actorOf(actor), after: line })
       noteNews(scope, actor, 'add', line)
       const where = topic === undefined ? MAIN : fresh ? `the new topic [[${topic}]], linked from MEMORY.md` : `topic [[${topic}]]`
-      return { changed: true, file: target, message: `Saved to ${label}, in ${where} (${sizeNote(target, next.length)}).` }
+      const hint = near === undefined ? '' : ` It reads much like an existing entry (${fileName(near.file)}): "${near.text}" — use remember with replace if they are the same fact.`
+      return { changed: true, file: target, message: `Saved to ${label}, in ${where} (${sizeNote(target, next.length)}).${hint}` }
     })
   }
 

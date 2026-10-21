@@ -76,6 +76,7 @@ external backend or task-specific session mapping; see the
 - `src/host/memory-search.js` derives two recall aids from the memory files that `src/host/memory.js` already reads; both are pure and rebuildable, and the Markdown files stay the only source of truth.
   - Hybrid ranking: `termsOf`/`buildIndex`/`searchIndex` build a sparse TF-IDF vector per entry over words, word character trigrams (4+ letters, so a shared stem matches across endings) and CJK uni/bi-grams, and rank by cosine. `recall` uses it only when called with `semantic: "true"`; the default exact-word path is unchanged, so an existing call scores and prints exactly as before.
   - Graph: `buildGraph`/`relatedOf` turn `[[topic]]` references into topic→topic edges and a `by:` metadata value into file→Bot edges; `recall` with `related` walks them (undirected, up to two hops) and lists what is near a topic or Bot. Tests: `core/test/memory-search.test.js` (pure) and the two `recall` cases in `core/test/memory.test.js`.
+  - Write hint: `remember` scores the new entry against the scope with the same index and, when an existing entry is close (`nearDuplicate`, cosine ≥ 0.8), names it in the reply so the model can use `replace`; it only advises, the entry is still saved, and the exact-duplicate path is unchanged. Test: `core/test/memory.test.js`.
 
 ### Plugin memory seam (#450 item 1)
 

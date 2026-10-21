@@ -1176,3 +1176,14 @@ test('recall related lists what a topic links to', async (t) => {
   assert.match(out, /- \[\[memory\]\] — linked/)
   assert.match(await tool('recall', { related: 'nothinghere' }, 'b2'), /Nothing in your memory and the team memory links "nothinghere"/)
 })
+
+test('remember points at a near-duplicate it is close to, but not at an unrelated entry', async (t) => {
+  const { tool, stop } = start()
+  t.after(() => stop())
+  await tool('remember', { text: 'The user prefers window seats on long flights' }, 'b2')
+  const near = await tool('remember', { text: 'The user prefers window seats on long-haul flights' }, 'b2')
+  assert.match(near, /It reads much like an existing entry/)
+  assert.match(near, /window seats on long flights/)
+  const far = await tool('remember', { text: 'The user ships releases on Friday' }, 'b2')
+  assert.doesNotMatch(far, /It reads much like/)
+})

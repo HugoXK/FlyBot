@@ -1,0 +1,1 @@
+Saving a memory now tells you when it reads much like one you already have: `remember` names the close entry (scored with the same semantic index as `recall`), so you can use `replace` instead of keeping two near-duplicates. It only advises — the entry is still saved — and the exact-duplicate check is unchanged.
