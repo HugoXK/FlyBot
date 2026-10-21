@@ -1,0 +1,1 @@
+The Timeline window now lists the requests that have been waiting longest — the open handoffs, worst first, with how long each has waited — so a stuck Bot-to-Bot request can be spotted instead of only counted. Read-only, part of the existing `timeline/window` answer.

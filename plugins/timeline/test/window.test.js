@@ -274,3 +274,11 @@ test('outcomes: per-Bot turn endings and the recent failures (#357/#471)', () =>
   assert.deepEqual(win.outcomes.find(entry => entry.lane === 'b').aborted, 1)
   assert.deepEqual(win.failures.map(f => [f.id, f.bot, f.outcome, f.code]), [['b#1', 'b', 'aborted', undefined], ['a#2', 'a', 'error', 'RATE_LIMIT']])
 })
+
+test('stuck: open requests are listed worst-first (#469)', () => {
+  const win = build()
+  assert.ok(win.stuck.length >= 1)
+  assert.ok(win.stuck.some(entry => entry.id === 'x3'), JSON.stringify(win.stuck))
+  assert.ok(win.stuck.every(entry => entry.waitedMs >= 0))
+  for (let i = 1; i < win.stuck.length; i += 1) assert.ok(win.stuck[i - 1].waitedMs >= win.stuck[i].waitedMs)
+})

@@ -287,12 +287,20 @@ export function buildWindow(records, { now = Date.now(), to, windowMs, bots = []
     .slice(0, FAILED_KEPT)
     .map(turn => ({ id: turn.id, bot: turn.bot, at: turn.t1, outcome: turn.outcome, ...(turn.errorCode ? { code: cleanCode(turn.errorCode) } : {}) }))
 
+  // ---- waiting too long (#469): the open requests, worst first, so a stuck handoff surfaces
+  const STUCK_KEPT = 20
+  const stuck = exchanges
+    .filter(arrow => arrow.waiting === true && Number.isFinite(arrow.t))
+    .map(arrow => ({ id: arrow.id, from: arrow.from, to: arrow.to, role: arrow.role, waitedMs: Math.max(0, now - arrow.t) }))
+    .sort((a, b) => b.waitedMs - a.waitedMs)
+    .slice(0, STUCK_KEPT)
+
   return {
     version: 1,
     now, from: lo, to: hi, windowMs: windowMsActual, live,
     coverage: { oldest: oldest ?? null, newest: last || null, complete: oldest !== undefined && oldest <= lo },
     trace: stats ?? null,
     truncated,
-    lanes, turns: shapedTurns, rounds, exchanges, utilization, edges, usage, outcomes, failures,
+    lanes, turns: shapedTurns, rounds, exchanges, utilization, edges, usage, outcomes, failures, stuck,
   }
 }
