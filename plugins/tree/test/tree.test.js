@@ -1296,7 +1296,7 @@ test('#447: create_child_bot reuses a Bot with the same role at depth 3 instead 
   // find_bots: the root sees the whole tree; a match at depth 3 comes first.
   const found = await m.call(m.root, 'find_bots', { query: 'tester' })
   assert.equal(found.scope, 'the whole tree')
-  assert.deepEqual({ ...found.bots[0], role: undefined }, { id: tester, name: 'Tester', role: undefined, depth: 3, path: 'Chief → Engineering → Tester', parent: 'Engineering', children: 0, via: 'Engineering', match: 'same role' })
+  assert.deepEqual({ ...found.bots[0], role: undefined }, { id: tester, name: 'Tester', role: undefined, depth: 3, path: 'Chief → Engineering → Tester', parent: 'Engineering', children: 0, load: 0, via: 'Engineering', match: 'same role' })
   assert.equal(found.bots[0].role, 'Runs the test suite and reports failures')
   assert.ok((await m.call(m.root, 'find_bots', { query: 'test' })).bots.some(b => b.id === tester), 'a stem of a role word matches')
   const all = await m.call(m.root, 'find_bots', {})
@@ -1457,4 +1457,16 @@ test('#450: a merge carries the archived Bot\'s own memory into the kept Bot', a
   const moved = kept.find(entry => entry.text === 'The user drafts in Markdown')
   assert.ok(moved, JSON.stringify(kept))
   assert.equal(moved.meta.source, 'merged')
+})
+
+test('#508 follow-up: find_bots reports each Bot\'s runtime load', async () => {
+  const m = await setup()
+  const work = await make(m, m.root, 'Work')
+  m.feed('turn.start', { botId: work, place: 'chat', sessionId: 's', turnId: 't1', turn: 1, time: 1 })
+  m.feed('turn.start', { botId: work, place: 'chat', sessionId: 's', turnId: 't2', turn: 2, time: 2 })
+  const found = await m.call(m.root, 'find_bots', {})
+  assert.equal(found.bots.find(bot => bot.name === 'Work').load, 2)
+  // A search result carries the same field.
+  const one = await m.call(m.root, 'find_bots', { query: 'Work' })
+  assert.equal(one.bots.find(bot => bot.name === 'Work').load, 2)
 })

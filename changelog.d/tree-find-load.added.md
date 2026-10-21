@@ -1,0 +1,1 @@
+The tree's `find_bots` now reports each Bot's live runtime load (how many turns it is running), the same number `list_children` shows, so a coordinator can pick a free Bot when it searches the branch.

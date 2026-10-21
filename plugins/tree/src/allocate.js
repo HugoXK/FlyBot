@@ -20,7 +20,7 @@ export const MAX_TEAM_LENGTH = MAX_NAME_LENGTH - LEAD_SUFFIX.length
 const MAX_FOUND = 30
 const MAX_OVERVIEW = 100
 
-export function createAllocator({ fb, limits, snapshot, childrenOf, depthOf, traceOf, shared, createUnder, withParentLock, refreshAll, classify }) {
+export function createAllocator({ fb, limits, snapshot, childrenOf, depthOf, traceOf, shared, createUnder, withParentLock, refreshAll, classify, loadOf = () => 0 }) {
   const { profile, subtreeOf, heightOf, fits, homesFor, createLead, markLead, move, begin, commit, exclusive } = shared
   const get = (id, key) => fb.getField(id, key)
   const profileFor = (name, role) => profileOf({ name, treeRole: role }, classify)
@@ -53,7 +53,7 @@ export function createAllocator({ fb, limits, snapshot, childrenOf, depthOf, tra
     const lead = get(id, 'lead')
     return {
       id, name: n.name, role: n.role, depth: depthOf(nodes, id), path: traceOf(nodes, id),
-      parent: nodes[n.parent]?.name ?? null, children: childrenOf(nodes, id).length,
+      parent: nodes[n.parent]?.name ?? null, children: childrenOf(nodes, id).length, load: loadOf(id),
       ...(lead?.label ? { lead: lead.label } : {}), ...(via && via.id !== id ? { via: via.name } : {}),
     }
   }
