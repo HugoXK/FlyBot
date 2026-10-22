@@ -27,9 +27,13 @@ const seed = () => ({
 // One DS Bot host on `home`; a second start on the same home is a restart.
 // Hosts by home: a home is removed only after its hosts stopped and their writes landed.
 const started = new Map()
+// The durable Session log per home (what DSH keeps across a plugin reload or a restart).
+const durable = new Map()
 
 async function start(home) {
   const ctx = fakeContext()
+  const log = durable.get(home) ?? []
+  durable.set(home, log)
   const agents = new Map()
   const agentOf = (sessionId) => {
     if (!agents.has(sessionId)) {
@@ -43,7 +47,13 @@ async function start(home) {
   Object.assign(ctx, {
     llm: { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}) },
     workspaceRegistry: { get: () => undefined, resolveByPath: async () => undefined, create: async path => ({ id: 'w1', path }), archiveSession: async () => {} },
-    sessionController: { create: async () => ({ sessionId: 's1' }), resolveAgent: async sessionId => ({ agent: agentOf(sessionId) }), selectModel: async () => {} },
+    sessionController: {
+      create: async () => ({ sessionId: 's1' }),
+      resolveAgent: async sessionId => ({ agent: agentOf(sessionId) }),
+      selectModel: async () => {},
+      // What the durable log holds for a Session (newest page; the test keeps all of it).
+      page: async ({ address } = {}) => ({ records: log.filter(entry => entry.id === address?.sessionId).map(entry => ({ event: entry.event })), hasMore: false }),
+    },
     sessionTitle: { rename: async () => {} },
     sessions: { flush: async () => {} },
   })
@@ -53,15 +63,19 @@ async function start(home) {
   apply(ctx, { home })
   let seq = 0
   const emit = (id, type, data) => {
+    const event = { type, seq: ++seq, data }
+    log.push({ id, event })
     for (const listener of ctx.listeners.get('session/event') ?? []) {
-      if (listener.length >= 2) listener({ id }, { type, seq: ++seq, data })
+      if (listener.length >= 2) listener({ id }, event)
     }
   }
+  // Durable only: an event DSH wrote while no FlyBot host was listening.
+  const record = (id, type, data) => { log.push({ id, event: { type, seq: ++seq, data } }) }
   const tool = (name, args, sessionId, exec = {}) => ctx.registeredTools.get(name).execute(args, { agent: { id: sessionId }, ...exec })
   const askApproval = sessionId => ctx.listeners.get('approval/request')[0]({ agent: { session: { id: sessionId } }, toolName: 'pwsh', reason: 'escalate sandbox' }, () => 'from-dsh')
   const call = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/bot', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))).json()
   await tool('list_bots', {}, 'a')
-  const host = { ctx, agentOf, emit, tool, call, askApproval, stop: () => ctx.dispose() }
+  const host = { ctx, agentOf, emit, record, tool, call, askApproval, stop: () => ctx.dispose() }
   started.set(home, [...(started.get(home) ?? []), host])
   return host
 }
@@ -72,6 +86,7 @@ const freshHome = (t) => {
   t.after(async () => {
     await Promise.all((started.get(home) ?? []).map(host => host.stop()))
     started.delete(home)
+    durable.delete(home)
     rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
   })
   return home
@@ -193,6 +208,63 @@ test('when only DS Bot restarts, a turn still running or finished meanwhile is n
   t.mock.timers.tick(3000)
   await settle(() => third.agentOf('b').calls.length === 1)
   assert.deepEqual([third.agentOf('b').calls[0].source.exchangeId, third.agentOf('a').calls.length], ['x1', 0])
+})
+
+test('a turn that finished while the plugin was not listening is not picked up', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const home = freshHome(t)
+  const first = await start(home)
+  run(first, 'a', 1, { content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } })
+  await settle(() => inflight(home).a !== undefined)
+  // The turn ends while no FlyBot host is listening (a plugin reload, or a crash after DSH
+  // appended the end). Only the durable log knows; the note stays in inflight.json.
+  first.record('a', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await first.stop()
+  const second = await start(home)
+  t.mock.timers.tick(3000)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(second.agentOf('a').calls.length, 0, 'the finished turn is not repeated')
+})
+
+test('a turn the restart truly cut (interrupted in the durable log) is still picked up', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const home = freshHome(t)
+  const first = await start(home)
+  run(first, 'a', 1, { content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } })
+  await settle(() => inflight(home).a !== undefined)
+  first.record('a', 'turn/end', { turn: 1, reason: { kind: 'interrupted' } })
+  await first.stop()
+  const second = await start(home)
+  t.mock.timers.tick(3000)
+  await settle(() => second.agentOf('a').calls.length === 1)
+  assert.match(text(second.agentOf('a').calls[0]), /restarted while you were working/)
+})
+
+test('a pickup that fails keeps its note for the next start', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const home = freshHome(t)
+  const first = await start(home)
+  run(first, 'a', 1, { content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } })
+  await settle(() => inflight(home).a !== undefined)
+  await first.stop()
+
+  // The second start cannot open the Session: the note must survive, not be cleared first.
+  const second = await start(home)
+  const resolve = second.ctx.sessionController.resolveAgent
+  second.ctx.sessionController.resolveAgent = async id => {
+    if (id === 'a') throw new Error('the Session is not ready yet')
+    return resolve(id)
+  }
+  t.mock.timers.tick(3000)
+  await settle(() => inflight(home).a !== undefined)
+  assert.ok(inflight(home).a, 'the failed pickup is still noted')
+  await second.stop()
+
+  // The third start picks it up.
+  const third = await start(home)
+  t.mock.timers.tick(3000)
+  await settle(() => third.agentOf('a').calls.length === 1)
+  assert.match(text(third.agentOf('a').calls[0]), /restarted while you were working/)
 })
 
 test('a finished turn leaves nothing to pick up', async (t) => {
