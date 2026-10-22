@@ -81,6 +81,18 @@ test('removing a former root re-attaches its children to the current root', asyn
   assert.deepEqual((await m.call(chief2, 'list_children')).children.map(c => c.name).sort(), ['Life', 'Work'])
 })
 
+test('a new Main Bot takes the root on the next turn, and the old root is demoted', async () => {
+  const m = await setup()
+  await make(m, m.root, 'Work')
+  const chief2 = m.addBot({ name: 'Chief2', isMain: true })
+  m.bots.get(m.root).isMain = false
+  m.feed('turn.start', { botId: chief2, place: 'chat', sessionId: 's', turnId: 't', turn: 1, time: 1 })
+  const roots = [...m.bots.values()].filter(bot => bot.fields['flybot-tree']?.treeRole === 'root')
+  assert.deepEqual(roots.map(bot => bot.name), ['Chief2'], 'exactly one root, the current Main')
+  assert.notEqual(f(m, m.root, 'treeRole'), 'root')
+  assert.equal(m.tree.isRoot(m.root), false, 'the previous root is placed like any other Bot')
+})
+
 test('tools: configurable limits and hidden from non-tree bots', async () => {
   const m = await setup({ maxDepth: 2, maxChildren: 1 })
   const a = await make(m, m.root, 'A')

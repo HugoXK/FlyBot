@@ -1,0 +1,1 @@
+Handing the Main role to another Bot now moves the tree's root with it on the next turn: exactly one root remains, the previous Chief is demoted and placed in the tree, and the new Main gets the tree tools instead of waiting for a restart ([#748](https://github.com/ThinkFlowLab/FlyBot/issues/748)).

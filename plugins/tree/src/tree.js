@@ -119,6 +119,16 @@ export function createTree(fb, { limits, rootName = 'Root', rootBotId, adoptExis
   function adoptChief() {
     const chief = findChief()
     if (!chief) return undefined
+    // The Main role can move (roster.setMain): the tree marks the root it adopted, so exactly that
+    // one is demoted when the Main changes (a second root another flow created is left alone) and
+    // adoption places it like any other Bot instead of leaving two roots.
+    for (const bot of fb.listBots()) {
+      if (bot.id === chief.id || fb.getField(bot.id, 'adoptedRoot') !== true) continue
+      fb.setField(bot.id, 'adoptedRoot', undefined)
+      fb.setField(bot.id, 'treeRole', undefined)
+      fb.setField(bot.id, 'parent', undefined)
+    }
+    if (fb.getField(chief.id, 'adoptedRoot') !== true) fb.setField(chief.id, 'adoptedRoot', true)
     if (fb.getField(chief.id, 'parent') !== undefined) fb.setField(chief.id, 'parent', null)
     if (fb.getField(chief.id, 'treeRole') !== ROOT_ROLE) fb.setField(chief.id, 'treeRole', ROOT_ROLE)
     migrateLegacyRoots(chief.id)

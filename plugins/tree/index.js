@@ -22,6 +22,18 @@ export function apply(ctx, config = {}) {
     const parent = tree.parentOf(id)
     if (typeof parent === 'string' && tree.isMember(parent)) tree.refreshPrompt(parent)
   }
+  // A Main Bot change (roster.setMain) fires no event this plugin sees: when the current Main is not
+  // the root, adopt it before the turn's prompts are written, so a coordinator never works under an
+  // old root and the tree never has two.
+  const reconcileRoot = () => {
+    try {
+      const chief = tree.findChief()
+      if (chief === undefined || tree.snapshot()[chief.id]?.root === true) return
+      void tree.ensureRoot().catch(error => warn('flybot-tree: root not updated after a Main Bot change:', error?.message ?? error))
+    } catch (error) {
+      warn('flybot-tree: root not updated after a Main Bot change:', error?.message ?? error)
+    }
+  }
   const disposers = [
     fb.useSend('tree', treeSendMiddleware(tree, { bypassSocial: config.bypassSocial === true, isRemote: fb.isRemote, hasAnyGrant: fb.hasAnyGrant })),
     ...registerTreeTools(fb, tree),
@@ -35,8 +47,8 @@ export function apply(ctx, config = {}) {
     // reads stays current (writeBlock only rewrites the block when the line really changed).
     // The feed names the turn it is about (turnId); dropping it made an end close whichever turn was
     // oldest, so with two open and the later one ending first, openFor reported the newer age (#696).
-    fb.onFeed('turn.start', e => { tree.noteTurnStart(e?.botId, e?.turnId); refreshParentPrompt(e?.botId) }),
-    fb.onFeed('turn.end', e => { tree.noteTurnEnd(e?.botId, e?.turnId); refreshParentPrompt(e?.botId) }),
+    fb.onFeed('turn.start', e => { tree.noteTurnStart(e?.botId, e?.turnId); reconcileRoot(); refreshParentPrompt(e?.botId) }),
+    fb.onFeed('turn.end', e => { tree.noteTurnEnd(e?.botId, e?.turnId); reconcileRoot(); refreshParentPrompt(e?.botId) }),
     // The tree view: what the last reorganization did, one-click undo, dismiss.
     fb.handleApi('tree/reorg', () => tree.overview(), { read: true }),
     fb.handleApi('tree/undo', payload => tree.undo(typeof payload?.runId === 'string' ? payload.runId : undefined)),
