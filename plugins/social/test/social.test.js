@@ -8543,6 +8543,31 @@ test('#500: createSocialApi grantBotToFriend prefers MCP and falls back to REST 
   }
 })
 
+test('#500: share-friends registers a Bot that has not been shared yet', async (t) => {
+  const { ctx, home, call, stop } = await team()
+  t.after(stop)
+  const server = mockServer()
+  server.tools.list_friends = () => ({
+    friends: [{ relationship_id: 'r-bob', status: 'active', peer: { bot_id: 'pb-bob', handle: '@bob.home', display_name: 'BobHome', owner_display_name: 'Bob' } }],
+    pending_incoming: [], pending_outgoing: [],
+  })
+  server.tools.list_bot_grants = () => ({ grants: [] })
+  const social = await startSocial(ctx.flybot, {
+    server: 'https://social.test', credentialsPath: join(home, 'flybot-social.json'),
+    fetch: server.fetch, inboxPollMs: 0,
+  })
+  t.after(() => social.dispose())
+  await settle()
+  const chief = ctx.flybot.bot.list().find(bot => bot.isMain) || ctx.flybot.bot.list()[0]
+  assert.equal(ctx.flybot.scope('social').fields.get(chief.id, 'member'), undefined, 'the Bot has no Bot Social identity yet')
+  // Sharing → Share with a friend opens this list for a Bot that was never invited or shared.
+  const listing = (await call('flybot/social/share-friends', { botId: chief.id })).value
+  assert.deepEqual(listing.friends.map(friend => friend.home), ['@bob.home'])
+  const member = ctx.flybot.scope('social').fields.get(chief.id, 'member')
+  assert.ok(member?.bot_id, 'the Bot was registered on demand')
+  assert.ok(server.calls.some(entry => entry.name === 'add_home_member'), 'its identity was minted on Bot Social')
+})
+
 test('#500: social/share-friends lists friends without this Bot; share-with-friend grants and refreshes access', async (t) => {
   const { ctx, home, call, stop } = await team()
   t.after(stop)

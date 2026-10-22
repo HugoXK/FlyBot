@@ -2285,7 +2285,10 @@ export function createSocial(service, config = {}, { client: given, api: givenAp
     if (!home) throw new Error('Bot Social is not connected: there is no FlyBot home yet')
     const bot = typeof botId === 'string' && botId ? flybot.bot.get(botId) : undefined
     if (!bot) throw new Error('Choose one of your Bots to share')
-    const member = activeMember(bot.id)
+    // Sharing with an existing friend is the first time this Bot needs a Bot Social identity,
+    // exactly like an invite; mint it here instead of refusing to list the friends (#500).
+    let member = activeMember(bot.id)
+    if (!member) member = await register(bot, { forInvite: true })
     if (!member) throw new Error(`${bot.name} has no Bot Social identity yet`)
     await syncOutgoingGrants({ only: bot.id }).catch(error => warn('grants not synced for share list', error))
     const listed = typeof api.listGrants === 'function'
