@@ -6846,6 +6846,30 @@ diff --git a/test/tool-node.test.js b/test/tool-node.test.js
 diff --git a/test/work-dir.test.js b/test/work-dir.test.js
 --- a/test/work-dir.test.js
 +++ b/test/work-dir.test.js
+@@ -219,6 +219,23 @@ test('an idle Bot\'s own chat moves to its new folder at once, and back', async
+   assert.match(handoffOf(agentOf('s2')), new RegExp(`because your working folder changed to ${escapeRegExp(team)}\\.`))
+ })
+ 
++test('a part move that fails before the handoff keeps the old part current', async (t) => {
++  const { ctx, call, state, project, created, stop } = await start()
++  t.after(stop)
++  // Writing the handoff package to the fresh Session fails: the move must leave the old part
++  // where it was instead of recording an empty part with no package (the old code flipped the
++  // Bot's pointer first).
++  let fail = true
++  ctx.sessions.flush = async (session) => {
++    if (fail && String(session?.id ?? '').startsWith('s')) { fail = false; throw new Error('the handoff package was not written') }
++  }
++  await call('update-bot', { id: 'b', workDir: project })
++  await until(() => created.length > 0) // the move created its fresh Session
++  await settle()
++  assert.equal(state().bots.b.sessionId, 'b', 'the old part stays current')
++  assert.equal((state().bots.b.segments ?? []).length, 0, 'no empty fresh part was recorded')
++})
++
+ test('a running Bot moves at its next step and carries that step\'s input along', async (t) => {
+   const { requests, services } = approvalServices('allowed-once')
+   const { tool, preStep, agentOf, created, project, state, stop } = await start({ services })
 @@ -241,6 +241,42 @@ test('a running Bot moves at its next step and carries that step\'s input along'
    assert.equal(await preStep('s1'), 'next')
  })
