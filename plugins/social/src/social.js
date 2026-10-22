@@ -2438,7 +2438,16 @@ export function createSocial(service, config = {}, { client: given, api: givenAp
   }
   async function syncApprovalNotices(items) {
     settings.approvalNotices ??= {}
+    // The ledger keeps one waiting notice per hold and nothing else: a hold that is no longer
+    // pending (decided, rejected, gone) drops its entry, so the persisted map stays as small as
+    // the pending queue instead of growing for the life of the install.
+    const pending = new Set((items ?? []).map(item => item?.id).filter(Boolean))
     let changed = false
+    for (const id of Object.keys(settings.approvalNotices)) {
+      if (pending.has(id)) continue
+      delete settings.approvalNotices[id]
+      changed = true
+    }
     for (const item of items ?? []) {
       if (settings.approvalNotices[item.id]) continue
       // The owner of a held room line sees its Approve card, never "waiting for the owner" (#179).

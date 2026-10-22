@@ -1417,6 +1417,25 @@ test('decide-approval (#69): owner click approves or rejects via Bot Social', as
   assert.equal(server.calls.some(c => c.name === 'set_auto_approve'), false)
 })
 
+test('the waiting-notice ledger drops a hold once it is no longer pending', async (t) => {
+  const { ctx, home, stop } = await team()
+  t.after(stop)
+  const server = mockServer()
+  let queue = [heldOutbound]
+  server.tools.list_approvals = () => ({ approvals: queue })
+  const settingsPath = join(home, 'settings-notices.json')
+  const social = createSocial(ctx.flybot, { autoAccept: false, inboxPollMs: 0, settingsPath }, { client: createMcpClient({ server: 'https://s', token: 'owner-token', fetch: server.fetch }), home: { id: 'h1', handle: '@danyang.home' } })
+  t.after(() => social.dispose())
+  await grantTeam(ctx.flybot)
+  await social.registerAll()
+  const notices = () => JSON.parse(readFileSync(settingsPath, 'utf8')).approvalNotices ?? {}
+  await social.pendingApprovals({ fresh: true })
+  assert.deepEqual(Object.keys(notices()), ['apr-hold-1'], 'one entry per pending hold')
+  queue = []
+  await social.pendingApprovals({ fresh: true })
+  assert.deepEqual(notices(), {}, 'a hold that left the pending queue leaves no ledger entry behind')
+})
+
 test('#417: Auto-send from now on turns on Auto-send for that pair only: my Bot → that person', async (t) => {
   const { ctx, call, stop } = await team()
   t.after(stop)
