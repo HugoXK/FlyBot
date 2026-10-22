@@ -173,10 +173,21 @@ export function createExporter({ send, serviceName = 'flybot', serviceVersion = 
   }
   return {
     async push(records, nameTables = {}) {
-      const fresh = records.filter(record => record && Number.isFinite(record.t) && record.t > lastT)
+      // `>=`, not `>`: a record can share the millisecond the previous batch ended on (a tool's
+      // `ke` landing at the same ms as its `ks`, or a `te` at the last record's time). With `>` it
+      // would never be picked up again — it is not an open record to carry — and its span was lost.
+      // Records at `lastT` are re-read each push; `emitted` keeps their spans from being sent twice.
+      const fresh = records.filter(record => record && Number.isFinite(record.t) && record.t >= lastT)
       if (fresh.length < minRecords) return 0
       const batch = [...carried, ...fresh]
-      const spans = spansFrom(batch, { names: exportNames ? nameTables : {} }).filter(span => !emitted.has(span.spanId))
+      // A record at `lastT` may already be in `carried`, so a batch can repeat it; one span per id.
+      const spans = []
+      const seen = new Set()
+      for (const span of spansFrom(batch, { names: exportNames ? nameTables : {} })) {
+        if (emitted.has(span.spanId) || seen.has(span.spanId)) continue
+        seen.add(span.spanId)
+        spans.push(span)
+      }
       const nextCarried = pendingRecords(batch)
       const nextT = Math.max(lastT, ...fresh.map(record => record.t))
       if (spans.length === 0) { carried = nextCarried; lastT = nextT; return 0 }

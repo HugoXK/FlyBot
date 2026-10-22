@@ -69,6 +69,20 @@ test('createExporter holds an open turn, sends it once it closes, and never twic
   assert.deepEqual(spanNames.sort(), ['execute_tool web_search', 'invoke_agent'])
 })
 
+test('createExporter does not lose a record that shares the timestamp of the previous batch', async () => {
+  const sent = []
+  const exporter = createExporter({ send: async (payload, info) => sent.push({ payload, info }) })
+  const first = [{ r: 'ts', t: 1_000, id: 'a#1', pl: 'chat', bot: 'a' }, { r: 'ks', t: 1_100, id: 'c1', tid: 'a#1', nm: 'web_search', bot: 'a' }]
+  assert.equal(await exporter.push(first), 0, 'nothing closed yet; the batch ends on the 1_100 ms tool start')
+  // The tool ends at the same 1_100 ms the previous batch ended on; it must still be exported.
+  const withKe = [...first, { r: 'ke', t: 1_100, id: 'c1', tid: 'a#1', ok: true }]
+  assert.equal(await exporter.push(withKe), 1, 'the tool span is exported')
+  const withTe = [...withKe, { r: 'te', t: 1_200, id: 'a#1', o: 'completed' }]
+  assert.equal(await exporter.push(withTe), 1, 'the turn span is exported')
+  const spanNames = sent.flatMap(item => item.payload.resourceSpans[0].scopeSpans[0].spans.map(span => span.name))
+  assert.deepEqual(spanNames.sort(), ['execute_tool web_search', 'invoke_agent'])
+})
+
 test('createExporter retries the same closed spans after a failed send', async () => {
   let fail = true
   const exporter = createExporter({ send: async () => { if (fail) throw new Error('nope') }, warn: () => {} })
