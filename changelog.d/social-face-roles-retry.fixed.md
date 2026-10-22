@@ -1,0 +1,1 @@
+A Bot's role label for a face-to-face room is retried when the room refuses it (a dropped request or a server error) instead of being counted as sent and never synced; a room that is forgotten clears its per-seat role marks.

@@ -8303,6 +8303,34 @@ test('#476: the room creator picks the lead with the button; my Bots\' roles go 
   assert.equal(server.calls.filter(c => c.name === 'REST POST /lead').length, 1)
 })
 
+test('#476: a role the room refused to take is sent again on the next poll', async (t) => {
+  const server = leadFaceServer(['typed_by_owner', 'room_lead', 'member_roles'])
+  const inner = server.fetch
+  let failing = true
+  server.fetch = async (url, init) => {
+    const hit = String(url).match(/\/v1\/face-rooms\/([^/?]+)\/roles$/)
+    if (!hit) return inner(url, init)
+    const body = JSON.parse(init.body)
+    server.calls.push({ url, name: 'REST PUT /roles', args: body })
+    if (failing) return new Response('nope', { status: 500 })
+    const room = server.face.rooms.get(hit[1])
+    for (const [handle, role] of Object.entries(body.roles)) Object.assign(room.members.find(member => member.handle === handle) ?? {}, { role })
+    return new Response(JSON.stringify(room), { status: 200 })
+  }
+  const { call } = await faceFixture(t, server)
+  const body = server.face.rooms.get('frm_123456')
+  const mine = body.members[0].handle
+  Object.assign(body, { created_by_me: true, lead_bot_handle: null, effective_lead_bot_handle: mine })
+  const roleCalls = () => server.calls.filter(c => c.name === 'REST PUT /roles')
+  await call('flybot/social/face-rooms', { poll: true })
+  const afterFail = roleCalls().length
+  assert.ok(afterFail >= 1, 'the role was published')
+  failing = false
+  await call('flybot/social/face-rooms', { poll: true })
+  assert.ok(roleCalls().length > afterFail, 'a role the server refused to take is sent again, not counted as sent')
+  assert.equal(roleCalls().at(-1).args.roles[mine], 'Boss')
+})
+
 test('#476: a server without the room lead: the first member leads on every home, nobody can pick, no roles are sent', async (t) => {
   const server = leadFaceServer(['typed_by_owner'])
   const { call, ctx, room } = await faceFixture(t, server)

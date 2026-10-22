@@ -3057,6 +3057,11 @@ export function createSocial(service, config = {}, { client: given, api: givenAp
   // Each home tells the room its own Bots' role labels (#476), so the lead sees who does what. Sent only
   // on a server that stores them, when a label differs from what the room shows, once per value.
   const sentRoles = new Map()
+  // A room that is forgotten leaves no per-seat role marks behind.
+  const forgetSentRoles = (roomId) => {
+    const prefix = `${roomId} `
+    for (const key of [...sentRoles.keys()]) if (key.startsWith(prefix)) sentRoles.delete(key)
+  }
   function publishFaceRoles(snapshot) {
     if (!typed.roles || !faceApi?.setRoles || !Array.isArray(snapshot?.members) || flybot.readOnly?.()) return
     const wanted = {}
@@ -3067,10 +3072,14 @@ export function createSocial(service, config = {}, { client: given, api: givenAp
       const role = cleanFaceRole(bot.role ?? '')
       const key = `${snapshot.roomId} ${handle}`
       if ((seat.role ?? '') === role || sentRoles.get(key) === role) continue
-      sentRoles.set(key, role)
       wanted[handle] = role || null
     }
-    if (Object.keys(wanted).length > 0) void faceApi.setRoles(snapshot.roomId, wanted).catch(error => warn('face-room role labels', error))
+    if (Object.keys(wanted).length === 0) return
+    // Record a value only once the room took it: a failed call (a dropped request, a 5xx) must be
+    // retried on the next snapshot instead of counting as sent.
+    void faceApi.setRoles(snapshot.roomId, wanted)
+      .then(() => { for (const [handle, role] of Object.entries(wanted)) sentRoles.set(`${snapshot.roomId} ${handle}`, role || '') })
+      .catch(error => warn('face-room role labels', error))
   }
   // The room creator's pick of the room lead (#476), from the room's Room lead button only.
   async function setFaceLead({ roomId, faceRoomId, bot } = {}) {
@@ -3131,6 +3140,7 @@ export function createSocial(service, config = {}, { client: given, api: givenAp
             || { faceRoomId: serverId, roomId: meta?.localRoomId, name: faceRoomTitle({}, { code: meta?.joinCode, room: hosted }), status: 'closed', members: [], joinCode: meta?.joinCode })
           delete settings.faceRooms[serverId]
           dropRoomRemotes(serverId)
+          forgetSentRoles(serverId)
           for (const handle of asBotsOf(meta)) {
             const left = botByHandle(handle)
             if (left) await releaseRoomOnlyIdentity(left.id)
@@ -3243,6 +3253,7 @@ export function createSocial(service, config = {}, { client: given, api: givenAp
     }
     delete settings.faceRooms[id]
     dropRoomRemotes(id)
+    forgetSentRoles(id)
     for (const handle of asBotsOf(meta)) {
       const left = botByHandle(handle)
       if (left) await releaseRoomOnlyIdentity(left.id)
