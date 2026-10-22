@@ -292,8 +292,27 @@ export function createTree(fb, { limits, rootName = 'Root', rootBotId, adoptExis
    */
   function onBotRemoved({ botId, parent }) {
     if (parent === undefined) return // not a tree bot
-    const up = parent ?? null
-    for (const child of childrenOf(snapshot(), botId)) fb.setField(child.id, 'parent', up)
+    const kids = childrenOf(snapshot(), botId)
+    // Removing a root must not leave its children with `parent: null`, which isRoot reads as a
+    // root: the team flattened into a forest, its list_children was empty, and a restart did not
+    // repair it. Hand them to the team's current Main instead, adopted as the root now.
+    let up = parent ?? null
+    if (parent === null) {
+      const chief = findChief()
+      if (chief) { up = chief.id; adoptChief() }
+    }
+    for (const child of kids) fb.setField(child.id, 'parent', up)
+    if (parent === null && up === null && kids.length > 0) {
+      // No Main to adopt (the core keeps at least one, so this is an imported/edge state):
+      // create a Root and move the children under it once it exists.
+      for (const child of kids) fb.setField(child.id, 'parent', undefined)
+      void ensureRoot().then((root) => {
+        if (typeof root !== 'string') return
+        for (const child of kids) fb.setField(child.id, 'parent', root)
+        organizer.repair()
+        refreshAll()
+      }).catch(error => warn('flybot-tree: could not re-root after %s was removed: %s', botId, error?.message ?? error))
+    }
     organizer.repair()
     refreshAll()
     emit({ botId, key: 'removed' })

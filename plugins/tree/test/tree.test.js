@@ -65,6 +65,22 @@ test('tools: create under caller only, list, duplicates, depth 5, 8 children', a
   assert.match(sp(m, work), /COORDINATOR[\s\S]*- Dev: Dev stuff/)
 })
 
+test('removing a former root re-attaches its children to the current root', async () => {
+  const m = await setup()
+  const work = await make(m, m.root, 'Work')
+  const life = await make(m, m.root, 'Life')
+  // A second Main takes over; the old Chief is demoted and then deleted (the UI allows both).
+  const chief2 = m.addBot({ name: 'Chief2', isMain: true })
+  m.bots.get(m.root).isMain = false
+  m.removeBot(m.root)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(f(m, work, 'parent'), chief2)
+  assert.equal(f(m, life, 'parent'), chief2)
+  const parentless = [...m.bots.values()].filter(bot => bot.fields['flybot-tree']?.parent == null)
+  assert.deepEqual(parentless.map(bot => bot.name), ['Chief2'], 'one root, not a forest')
+  assert.deepEqual((await m.call(chief2, 'list_children')).children.map(c => c.name).sort(), ['Life', 'Work'])
+})
+
 test('tools: configurable limits and hidden from non-tree bots', async () => {
   const m = await setup({ maxDepth: 2, maxChildren: 1 })
   const a = await make(m, m.root, 'A')
