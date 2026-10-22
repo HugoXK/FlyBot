@@ -3330,6 +3330,37 @@ test('#371: a local Bot\'s hold shows in its own chat when the friend\'s chat is
   assert.equal(fresh().holdReasonLine([], undefined), '')
 })
 
+test('#260: Approve all approves Bot Social holds too, not only local ones', async () => {
+  const calls = []
+  const { walk, pluginOf } = loadSocialClient(async (endpoint, payload) => { calls.push([endpoint, payload]); return {} })
+  const friend = { id: 'r1', name: 'Coder', remote: { handle: '@coder.bob.home' } }
+  const roster = { bots: [friend] }
+  const item = id => ({ id, kind: 'outbound_message', status: 'pending', from: 'Chief', to: '@coder.bob.home', toName: 'Bob', text: id })
+  const tree = walk(pluginOf([[item('s1'), item('s2')], [], '']).ChatApprovalDock({ bot: friend, roster }))
+  const all = tree.find(node => node.props['data-flybot'] === 'approve-all')
+  assert.ok(all, 'Approve all is offered for Bot Social holds (they carry status: pending)')
+  await all.props.onClick()
+  const decided = calls.filter(([endpoint]) => endpoint === 'social/decide-approval').map(([, payload]) => payload.approvalId)
+  assert.deepEqual(decided.sort(), ['s1', 's2'])
+})
+
+test('#52: a failed local hold reads Not sent with its error and offers Retry', async () => {
+  const calls = []
+  const { walk, pluginOf } = loadSocialClient(async (endpoint, payload) => { calls.push([endpoint, payload]); return {} })
+  const friend = { id: 'r1', name: 'Coder', remote: { handle: '@coder.bob.home' } }
+  const roster = { bots: [friend] }
+  const hold = { id: 'f1', kind: 'outbound_message', source: 'local', status: 'failed', error: 'file changed after approval', from: 'Chief', to: '@coder.bob.home', toName: 'Bob', text: 'x' }
+  const tree = walk(pluginOf([[], [hold], '']).ChatApprovalDock({ bot: friend, roster }))
+  const card = tree.find(node => node.props['data-flybot'] === 'chat-approval')
+  assert.equal(card?.props['data-state'], 'failed')
+  assert.ok(tree.some(node => node.props['data-flybot'] === 'hold-error' && node.children.includes('file changed after approval')))
+  assert.equal(tree.some(node => node.props.className === 'fs-btn fs-btn-sm fs-btn-primary' && node.children.includes('Approve')), false, 'no Approve on a failed hold')
+  const retry = tree.find(node => node.props['data-flybot'] === 'hold-retry')
+  assert.ok(retry, 'Retry is offered')
+  await retry.props.onClick()
+  assert.deepEqual(calls.filter(([endpoint]) => endpoint === 'decide').map(([, payload]) => [payload.id, payload.decision]), [['f1', 'retry']])
+})
+
 test('#126: a face-room hold shows in that chat with a readable name', () => {
   const { walk, pluginOf } = loadSocialClient(async () => ({}))
   const plugin = pluginOf([
