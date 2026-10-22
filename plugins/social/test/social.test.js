@@ -7449,6 +7449,8 @@ test('Settings server: status, check and switch with the old credentials kept, t
   await flybot.grants.set('a', [{ id: 'g1', grantee: '@bob.home', name: 'Bob' }])
   flybot.fields.set('a', 'autoApprove', { '@bob.home': true })
   await ctx.flybot.scope('social').fields.set('a', 'member', { bot_id: 'm1', handle: '@chief.danyang.home' })
+  // A face-to-face room hosted on server A: the new server cannot reach it, so it must not stay open.
+  await ctx.flybot.rooms.upsertFace({ roomId: 'frm_old', localId: 'g-old', status: 'open', name: 'Old room' })
 
   // Check: nothing is saved, the platform's features are shown; refused addresses never reach the network.
   const before = servers.seen.length
@@ -7475,6 +7477,7 @@ test('Settings server: status, check and switch with the old credentials kept, t
 
   const switched = await call('flybot/social/server-set', { server: 'https://b.test', displayName: 'Danyang B', confirm: true })
   assert.equal(switched.ok, true, JSON.stringify(switched))
+  assert.equal(ctx.flybot.rooms.ofFace('frm_old').face.status, 'left', "the previous server's face room is not left open")
   status = switched.value
   assert.equal(status.server, 'https://b.test')
   assert.equal(status.source, 'settings')
