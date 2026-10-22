@@ -1,0 +1,1 @@
+A part switch now saves the new segment before the handoff turn starts, so an immediate failure can no longer start a second switch against an uncommitted part and lose the previous part's handoff note; a failed handoff still rolls back to the old part and keeps its input ([#751](https://github.com/ThinkFlowLab/FlyBot/issues/751)).
