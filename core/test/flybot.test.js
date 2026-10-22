@@ -8,6 +8,10 @@ import { apply } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 import { cleanPublishedName, orderMiddleware, SEND_PRIORITY } from '../src/host/hooks.js'
 
+const emptyTeam = () => ({
+  version: 1, mainBotIds: [], bots: {}, rooms: {}, agents: {}, exchanges: [], exchangeTurns: {}, questions: {}, prefs: {}, revision: 0,
+})
+
 const team = () => ({
   version: 1,
   mainBotIds: ['a'],
@@ -21,9 +25,9 @@ const team = () => ({
 
 async function start(config = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-flybot-'))
-  const state = team()
+  const state = config.empty === true ? emptyTeam() : team()
   Object.assign(state.rooms, config.rooms ?? {})
-  const { rooms, ...applyConfig } = config
+  const { rooms, empty, ...applyConfig } = config
   writeFileSync(join(home, 'state.json'), JSON.stringify(state))
   const ctx = fakeContext()
   const agents = new Map()
@@ -54,7 +58,7 @@ async function start(config = {}) {
   apply(ctx, { home, ...applyConfig })
   const tool = (name, args, sessionId) => ctx.registeredTools.get(name).execute(args, { agent: { id: sessionId } })
   const call = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/bot', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))).json()
-  await tool('list_bots', {}, 'a')
+  if (empty !== true) await tool('list_bots', {}, 'a')
   const stop = async () => {
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
@@ -825,4 +829,25 @@ test('#450: flybot.memory reads and writes a Bot only for an allow-listed plugin
   const listed = fb.scope('probe')
   assert.deepEqual(await listed.memory.append('a', 'The user prefers tea'), { ok: true })
   assert.ok(listed.memory.read('a').some(entry => entry.text === 'The user prefers tea'))
+})
+
+test('onboarding announces the first Main Bot to plugins', async (t) => {
+  const { fb, call, stop } = await start({ empty: true })
+  t.after(stop)
+  const created = []
+  fb.on('bot.created', bot => created.push(bot.name))
+  const result = await call('state', {})
+  assert.equal(result.ok, true)
+  // A plugin (the tree) adopts Chief only through this event; without it the root is missed.
+  assert.deepEqual(created, ['Chief'])
+})
+
+test('a duplicated Bot is announced to plugins like any new Bot', async (t) => {
+  const { fb, call, stop } = await start()
+  t.after(stop)
+  const created = []
+  fb.on('bot.created', bot => created.push(bot.name))
+  const copy = (await call('duplicate-bot', { id: 'b' })).value
+  assert.ok(copy?.id)
+  assert.deepEqual(created, [copy.name])
 })

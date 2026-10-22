@@ -153,7 +153,8 @@ export function install(rt) {
     const bot = rt.botOf(id)
     if (bot === undefined) throw new Error('Unknown Bot')
     const served = (await rt.catalog()).some(entry => entry.ref === bot.model)
-    return createBot({
+    // Through rt.createBot so a copy is placed by plugins like any new Bot.
+    return rt.createBot({
       name: freshName(`${bot.name} copy`),
       role: bot.role,
       instructions: bot.instructions,
@@ -544,7 +545,9 @@ export function install(rt) {
     if (state.mainBotIds.some(id => rt.botOf(id))) return
     // Only the team's first Main Bot is stored as the DeepSeek whale; other Bots get a
     // look from their id, and a Bot made Main Bot later keeps its own.
-    bootstrapping ??= createBot({ name: defaults.mainName, role: defaults.mainRole, main: true, color: 'deepseek', avatar: { shape: 'whale' }, pickModel: true })
+    // Through rt.createBot (the plugin wrapper), not the module-local one, so plugins hear
+    // `bot.created` for the first Main Bot exactly as for any other new Bot (the tree adopts it).
+    bootstrapping ??= rt.createBot({ name: defaults.mainName, role: defaults.mainRole, main: true, color: 'deepseek', avatar: { shape: 'whale' }, pickModel: true })
       .finally(() => { bootstrapping = null })
     await bootstrapping
   }

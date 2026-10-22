@@ -251,7 +251,7 @@ diff --git a/src/host/roster.js b/src/host/roster.js
        // A save that another change queued meanwhile still carries this Bot; a later
        // one writes the team without it.
        void rt.save().catch(() => {})
-@@ -128,19 +128,6 @@ export function install(rt) {
+@@ -128,24 +128,12 @@ export function install(rt) {
      }
    }
  
@@ -271,6 +271,13 @@ diff --git a/src/host/roster.js b/src/host/roster.js
    async function duplicateBot(id) {
      const bot = rt.botOf(id)
      if (bot === undefined) throw new Error('Unknown Bot')
+     const served = (await rt.catalog()).some(entry => entry.ref === bot.model)
+-    return createBot({
++    // Through rt.createBot so a copy is placed by plugins like any new Bot.
++    return rt.createBot({
+       name: freshName(`${bot.name} copy`),
+       role: bot.role,
+       instructions: bot.instructions,
 @@ -155,7 +155,6 @@ export function install(rt) {
        effort: served ? bot.effort : undefined,
        // A folder that went away since leaves the copy in the team workspace.
@@ -491,6 +498,17 @@ diff --git a/src/host/roster.js b/src/host/roster.js
      const failed = await saveForDelete()
      // Same as deleteRoom: stopActivity removes the Session's armed scheduled tasks.
      // Past parts are archived too: a part move can leave tasks on the old Session,
+@@ -481,7 +481,9 @@ export function install(rt) {
+     if (state.mainBotIds.some(id => rt.botOf(id))) return
+     // Only the team's first Main Bot is stored as the DeepSeek whale; other Bots get a
+     // look from their id, and a Bot made Main Bot later keeps its own.
+-    bootstrapping ??= createBot({ name: defaults.mainName, role: defaults.mainRole, main: true, color: 'deepseek', avatar: { shape: 'whale' }, pickModel: true })
++    // Through rt.createBot (the plugin wrapper), not the module-local one, so plugins hear
++    // `bot.created` for the first Main Bot exactly as for any other new Bot (the tree adopts it).
++    bootstrapping ??= rt.createBot({ name: defaults.mainName, role: defaults.mainRole, main: true, color: 'deepseek', avatar: { shape: 'whale' }, pickModel: true })
+       .finally(() => { bootstrapping = null })
+     await bootstrapping
+   }
 @@ -489,6 +489,6 @@ export function install(rt) {
    Object.assign(rt, {
      ensureWorkspace, createSession, createBot, duplicateBot, updateBot, setFlags,
