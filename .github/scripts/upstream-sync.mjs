@@ -75,8 +75,10 @@ async function load({ fetchImpl = globalThis.fetch, env = process.env } = {}) {
 
   // A comparison needs both commits to exist; a fork descendant of upstream always does.
   let aheadBy = 'unknown', behindBy = 'unknown', status = 'unknown', commits = null
-  const cmp = await get(`/repos/${upstream}/compare/${upstreamSha}...${forkSha}`)
-  if (cmp.status === 200 && cmp.json) {
+  const compareUrl = `/repos/${upstream}/compare/${upstreamSha}...${forkSha}`
+  const cmp = await get(compareUrl)
+  const compareOk = cmp.status === 200 && cmp.json !== null
+  if (compareOk) {
     aheadBy = cmp.json.ahead_by ?? 'unknown'
     behindBy = cmp.json.behind_by ?? 'unknown'
     status = cmp.json.status ?? 'unknown'
@@ -93,7 +95,7 @@ async function load({ fetchImpl = globalThis.fetch, env = process.env } = {}) {
       }
     : { readFailed: true, httpStatus: r.status }
 
-  return { code: null, upstreamSha, forkSha, aheadBy, behindBy, status, commits, ruleset, rulesetId }
+  return { code: null, upstreamSha, forkSha, aheadBy, behindBy, status, commits, compareOk, compareStatus: cmp.status, compareUrl, ruleset, rulesetId }
 }
 
 export async function check({ fetchImpl = globalThis.fetch, env = process.env, log = console.log, argv = [] } = {}) {
@@ -111,6 +113,12 @@ export async function check({ fetchImpl = globalThis.fetch, env = process.env, l
   log(`ahead_by: ${s.aheadBy}  behind_by: ${s.behindBy}  status: ${s.status}`)
 
   const problems = []
+  // An unreadable comparison is not an absent problem: when the two mains are already equal it is the
+  // exactly wrong moment to report a clean finish without having asked how far apart they are (#826).
+  if (!s.compareOk) {
+    log(`comparison ${short(s.upstreamSha)}...${short(s.forkSha)}: unreadable (HTTP ${s.compareStatus})`)
+    problems.push(`the comparison ${short(s.upstreamSha)}...${short(s.forkSha)} could not be read: HTTP ${s.compareStatus} from ${s.compareUrl}`)
+  }
   if (s.ruleset.readFailed) {
     log(`ruleset ${s.rulesetId}: unreadable (HTTP ${s.ruleset.httpStatus})`)
     problems.push(`ruleset ${s.rulesetId} cannot be read: HTTP ${s.ruleset.httpStatus}`)

@@ -1,0 +1,1 @@
+`upstream-sync.mjs --check` now fails, naming the read and the HTTP status, when it cannot ask how far apart the two `main` refs are, instead of reporting `CHECK ok` on equal SHAs ([#826](https://github.com/ThinkFlowLab/FlyBot/issues/826)).

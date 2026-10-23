@@ -16,7 +16,7 @@ const PUSHED = [
 
 // A transport that answers the four reads this script makes and refuses anything else — including a
 // non-GET on a URL it knows, so a future write reddens every case instead of one.
-function transport({ upstreamSha = UP, forkSha = FORK, aheadBy = 0, behindBy = 0, status = 'identical', ruleset = RULESET, rulesetStatus = 200, commits: list = [] } = {}) {
+function transport({ upstreamSha = UP, forkSha = FORK, aheadBy = 0, behindBy = 0, status = 'identical', ruleset = RULESET, rulesetStatus = 200, compareStatus = 200, commits: list = [] } = {}) {
   const seen = []
   const json = (body) => ({ status: 200, text: async () => JSON.stringify(body) })
   const fetchImpl = async (url, init = {}) => {
@@ -25,7 +25,10 @@ function transport({ upstreamSha = UP, forkSha = FORK, aheadBy = 0, behindBy = 0
     if (method !== 'GET') throw new Error(`refused a ${method}: this check never writes (${url})`)
     if (url.endsWith(`/repos/${DEFAULTS.upstream}/git/ref/heads/main`)) return json({ object: { sha: upstreamSha } })
     if (url.endsWith(`/repos/${DEFAULTS.fork}/git/ref/heads/main`)) return json({ object: { sha: forkSha } })
-    if (url.includes(`/repos/${DEFAULTS.upstream}/compare/`)) return json({ ahead_by: aheadBy, behind_by: behindBy, status, commits: list })
+    if (url.includes(`/repos/${DEFAULTS.upstream}/compare/`)) {
+      if (compareStatus !== 200) return { status: compareStatus, text: async () => JSON.stringify({ message: 'Bad Gateway' }) }
+      return json({ ahead_by: aheadBy, behind_by: behindBy, status, commits: list })
+    }
     if (url.endsWith(`/repos/${DEFAULTS.upstream}/rulesets/${DEFAULTS.rulesetId}`)) {
       if (rulesetStatus !== 200) return { status: rulesetStatus, text: async () => JSON.stringify({ message: 'Not Found' }) }
       return json({ id: Number(DEFAULTS.rulesetId), ...ruleset })
@@ -54,6 +57,35 @@ test('equal mains and an active ruleset with no bypass actor: exit 0', async () 
   assert.match(out, new RegExp(`upstream main : ${UP}`))
   assert.match(out, new RegExp(`fork main     : ${UP}`))
   assert.match(out, /CHECK ok/)
+})
+
+test('a comparison that cannot be read fails the check, and the numbers still print', async () => {
+  // #826 acceptance 1: an unreadable read is not an absent problem. The post-check runs right after
+  // the two mains became the same commit, so a 5xx there must not read as a clean finish.
+  const { code, out } = await run({ forkSha: UP, compareStatus: 502 })
+  assert.equal(code, 1)
+  assert.match(out, new RegExp(`upstream main : ${UP}`))
+  assert.match(out, new RegExp(`fork main     : ${UP}`))
+  assert.match(out, /ahead_by: unknown {2}behind_by: unknown {2}status: unknown/)
+  assert.match(out, /CHECK FAILED — the comparison .*could not be read: HTTP 502/)
+  assert.equal((out.match(/CHECK FAILED —/g) || []).length, 1)
+})
+
+test('a readable identical comparison keeps the equal-mains path green', async () => {
+  // #826 acceptance 2: the negative control against "fail whenever status is unknown".
+  const { code, out } = await run({ forkSha: UP, aheadBy: 0, behindBy: 0, status: 'identical' })
+  assert.equal(code, 0)
+  assert.match(out, /ahead_by: 0 {2}behind_by: 0 {2}status: identical/)
+  assert.match(out, /CHECK ok/)
+})
+
+test('--commits exits 2 on a comparison it could not read, and --check fails the same fake', async () => {
+  // #826 acceptance 3: the two commands keep their 0/1/2 contract on one and the same failure.
+  const c = await runCommits({ forkSha: UP, compareStatus: 502 })
+  assert.equal(c.code, 2)
+  assert.match(c.out, /the comparison .*could not be read/)
+  const k = await run({ forkSha: UP, compareStatus: 502 })
+  assert.equal(k.code, 1)
 })
 
 test('the numbers are printed, not only the verdict', async () => {
