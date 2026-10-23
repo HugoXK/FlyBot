@@ -3610,6 +3610,31 @@ test('#847: a room-share hold card says what the envelope does, never the envelo
   assert.equal(draft(card(packed)), 'the group says FLYBOT-ROOM-SHARE is a marker')
 })
 
+test('#855: an envelope body with a brace or an escaped quote is read whole', () => {
+  const { walk, pluginOf } = loadSocialClient(async () => ({}))
+  const plugin = pluginOf([[], [], ''])
+  const card = (text) => walk(plugin.ChatApproval({
+    item: { id: 'apr-room', kind: 'outbound_message', from: 'Chief', toName: 'Chief (SelfTest B2)', text, summary: text },
+    canDecide: true,
+  }))
+  const draft = (tree) => tree.find(n => n.props.className === 'fs-draft')?.children.join('')
+  const to = 'Chief (SelfTest B2)'
+  const line = (text) => `FLYBOT-ROOM-SHARE\n${JSON.stringify({ v: 1, op: 'line', roomId: 'session-e2439f82', text, seq: 3 })}`
+
+  // A brace inside a string is literal, not the end of the tail, so the line keeps its text.
+  assert.equal(draft(card(line('a } b'))), `Group message to ${to}: a } b`)
+
+  // An escaped quote does not close the string, so the brace after it is still inside it.
+  assert.equal(draft(card(line('a " } b'))), `Group message to ${to}: a " } b`)
+
+  // Absent, truncated and unparsable tails still answer the generic sentence and never throw.
+  assert.equal(draft(card('FLYBOT-ROOM-SHARE\n')), `Group update for ${to} in a group chat`)
+  assert.equal(draft(card('FLYBOT-ROOM-SHARE\n{"v":1,"op":"line"')), `Group update for ${to} in a group chat`)
+
+  // A malformed face tail keeps its words and drops the "to the room:" prefix, like the parsed path.
+  assert.equal(draft(card('To the room: hello FLYBOT-FACE-HUMAN\n{not json')), 'hello')
+})
+
 test('#159: a face-room hold never shows the FLYBOT-FACE-HUMAN envelope', () => {
   const packed = encodeFaceHuman({ who: 'BoxA', text: 'hello from the owner' })
   const { walk, pluginOf } = loadSocialClient(async () => ({}))
