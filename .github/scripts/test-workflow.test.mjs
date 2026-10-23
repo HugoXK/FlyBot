@@ -165,7 +165,7 @@ export const withoutYamlComments = block => {
       if (line.trim() === '' || indent > scalar) { kept.push(line); continue }
       scalar = -1
     }
-    if (/^\s*[\w.-]+:\s*[|>][-+]?\d*(?:\s+#.*)?\s*$/.test(line)) { scalar = indent; kept.push(line); continue }
+    if (/^\s*[\w.-]+:\s*[|>](?:[1-9][-+]?|[-+]?[1-9]?)?(?:\s+#.*)?\s*$/.test(line)) { scalar = indent; kept.push(line); continue }
     if (line.trim().startsWith('#')) continue
     const start = scalarStart(line)
     if (start >= 0) {
@@ -363,6 +363,25 @@ test('#850: a block scalar with no expression stays out of the carrier list', ()
   const step = probeStep('        run: |2\n          # plain comment\n')
   assert.equal(step.mapsSecret, false, 'a |2 whose body names no expression is not a carrier')
 })
+
+// #850 round two: YAML lets the chomping indicator and the indentation indicator appear in either
+// order, so `|2-` and `|-2` are the same scalar. The header test accepted only chomping-first, and the
+// body's `#` line was dropped for every `|2-` shape.
+const indicatorShapes = {
+  'chomping after the indicator (|2-)': '        run: |2-\n          # ${{ secrets.DEEPSEEK_API_KEY }}\n',
+  'keep chomping after the indicator (|2+)': '        run: |2+\n          # ${{ secrets.DEEPSEEK_API_KEY }}\n',
+  'folded, chomping after the indicator (>2-)': '        run: >2-\n          # ${{ secrets.DEEPSEEK_API_KEY }}\n',
+  'chomping after the indicator with a header comment (|2- # note)': '        run: |2- # note\n          # ${{ secrets.DEEPSEEK_API_KEY }}\n',
+  'block form under with: (script: |2-)': '        with:\n          script: |2-\n            # ${{ secrets.DEEPSEEK_API_KEY }}\n',
+}
+
+for (const [label, body] of Object.entries(indicatorShapes)) {
+  test(`#850: a block scalar with ${label} is a carrier`, () => {
+    const step = probeStep(body)
+    assert.equal(step.mapsSecret, true, 'the body line is inside the scalar, so it is a carrier')
+    assert.equal(step.gate, '', 'the probe carries no gate, so the #811 rule has something to catch')
+  })
+}
 
 test('#813: the secret reaches exactly three steps, and the preflight alone stays ungated', () => {
   const carriers = liveSteps.filter(step => step.mapsSecret)
