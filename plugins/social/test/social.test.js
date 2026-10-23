@@ -9220,6 +9220,26 @@ test('#798: a pasted link shows the room before any Bot joins, and the card is w
   assert.ok(dialog.has('face-wait'), 'the join moved on to the waiting pane it always had')
 })
 
+test('#859: a preview with no room name says what the room is, not what is missing', async () => {
+  // Bot Social has no name for a room FlyBot created, so its answer carries `name: null` (the host
+  // maps that to `''`). The card must name the kind of room; the lead line and the count are what
+  // identify it, and neither is missing.
+  for (const name of ['', null]) {
+    const dialog = dialogWithState(async (endpoint) => {
+      if (endpoint === 'social/face-invite-preview') {
+        return { roomId: 'frm_9', name, lead: 'Chief', members: 2, maxMembers: 8, expiresAt: '2099-01-01T00:00:00.000Z' }
+      }
+      return {}
+    })
+    dialog.find('face-link-join-go').props.onClick()
+    await dialog.settle()
+    dialog.render()
+    assert.equal(dialog.text(dialog.find('face-link-preview-name')), 'Face-to-face room', `name ${JSON.stringify(name)} titles the card by the room kind`)
+    assert.equal(dialog.text(dialog.find('face-link-preview-lead')), 'Lead: Chief')
+    assert.equal(dialog.text(dialog.find('face-link-preview-members')), '2 / 8 in the room')
+  }
+})
+
 test('#824: pressing Join with link over the card on screen asks for nothing and keeps the card', async () => {
   let previews = 0
   const calls = []

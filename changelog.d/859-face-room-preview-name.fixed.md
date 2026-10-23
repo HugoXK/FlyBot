@@ -1,0 +1,1 @@
+A face-room invite preview now titles a room FlyBot created as `Face-to-face room` instead of `A room with no name`: Bot Social has no name for those rooms, so the card names the kind of room and leaves the lead line and the member count to identify it ([#859](https://github.com/ThinkFlowLab/FlyBot/issues/859)).
