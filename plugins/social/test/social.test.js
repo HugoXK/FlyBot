@@ -1295,6 +1295,56 @@ test('#847: a room envelope held with a finding of its own keeps its card', asyn
   assert.equal(pending[0].text.startsWith('FLYBOT-ROOM-SHARE'), true, 'the card still carries the envelope for the host to read')
 })
 
+test('#882: a room envelope held for a finding of its own keeps its card, whatever the finding', async () => {
+  // Only the blanket rule is the host's to clear (#865, docs/subsystems/social.md invariant 9): every other
+  // hold_reason is a finding, so the host must not decide it. The field wins when it and `reasons` disagree.
+  for (const [holdReason, via] of [['attachment', 'room-share'], ['policy', 'room'], ['risk', 'room-share']]) {
+    const { ctx, call, stop } = await team()
+    const server = holdingServer({ holdReason })
+    const social = createSocial(ctx.flybot, { autoAccept: false, inboxPollMs: 0 }, { client: createMcpClient({ server: 'https://s', token: 'owner-token', fetch: server.fetch }), home: { id: 'h1', handle: '@danyang.home' } })
+    try {
+      await grantTeam(ctx.flybot)
+      await social.registerAll()
+      const envelope = (op, extra = {}) => `FLYBOT-ROOM-SHARE\n${JSON.stringify({ v: 1, op, roomId: 'session-e2439f82', name: 'You, Chief, Chief', invitedHandle: '@coder.bob.home', seq: 0, ...extra })}`
+      const text = via === 'room' ? envelope('line', { text: 'SelfTest A2: hello', seq: 1 }) : envelope('join')
+      assert.equal((await ctx.flybot.bot.send({ from: 'a', to: '@coder.bob.home', text, via })).action, 'allow')
+      for (let i = 0; i < 50 && !server.calls.some(c => c.name === 'list_approvals'); i += 1) await new Promise(resolve => setTimeout(resolve, 10))
+      assert.equal(server.calls.some(c => c.name === 'list_approvals'), true, `the ${holdReason} hold was looked at`)
+      assert.equal(server.calls.some(c => c.name === 'decide_approval'), false, `a ${holdReason} hold is the owner's decision, not the host's`)
+      assert.equal(server.queue.length, 1, `the ${holdReason} hold stays pending`)
+      assert.equal((await call('flybot/social/status', {})).value.approvals.length, 1, `the ${holdReason} hold stays listed`)
+    } finally {
+      social.dispose()
+      await stop()
+    }
+  }
+})
+
+test('#882: a room envelope carrying an attachment keeps Bot Social\'s hold', async (t) => {
+  // Files are always shown to the owner first, and an envelope that carries one must not be auto-cleared
+  // even when its hold is a clean blanket one: the file is the reason its card exists.
+  const { ctx, call, stop, home } = await team()
+  t.after(stop)
+  const server = holdingServer()
+  const social = createSocial(ctx.flybot, { autoAccept: false, inboxPollMs: 0, filesDir: join(home, 'files') }, { client: createMcpClient({ server: 'https://s', token: 'owner-token', fetch: server.fetch }), home: { id: 'h1', handle: '@danyang.home' } })
+  t.after(() => social.dispose())
+  await grantTeam(ctx.flybot)
+  await social.registerAll()
+  const plan = join(home, 'plan.md')
+  writeFileSync(plan, '# Plan')
+  const bytes = readFileSync(plan)
+  const attachment = { name: 'plan.md', size: bytes.length, mime: 'text/markdown', sha256: createHash('sha256').update(bytes).digest('hex'), path: plan }
+  const envelope = `FLYBOT-ROOM-SHARE\n${JSON.stringify({ v: 1, op: 'line', roomId: 'session-e2439f82', name: 'You, Chief, Chief', invitedHandle: '@coder.bob.home', seq: 1, text: 'SelfTest A2: the plan' })}`
+  assert.equal((await ctx.flybot.bot.send({ from: 'a', to: '@coder.bob.home', text: envelope, via: 'room', attachments: [attachment] })).action, 'hold')
+  const [pending] = ctx.flybot.approvals.list()
+  assert.match(pending.reason, /attaches files/)
+  await ctx.flybot.approvals.decide(pending.id, 'approve')
+  assert.equal(server.calls.some(c => c.name === 'send_as_member'), true, 'the approved line reaches Bot Social')
+  assert.equal(server.calls.some(c => c.name === 'decide_approval'), false, 'an envelope carrying a file keeps Bot Social\'s hold')
+  assert.equal(server.queue.length, 1, 'the hold with the attachment stays on its card')
+  assert.equal((await call('flybot/social/status', {})).value.approvals.length, 1)
+})
+
 test('#258: a Bot\'s reply the owner approved on its card leaves at once: no second hold on Bot Social', async (t) => {
   const { ctx, call, stop } = await team()
   t.after(stop)
