@@ -127,6 +127,15 @@
       "role": "Re-reads `hold` and the newest conclusion at the entry's head, and fails the queue entry when either refuses it."
     },
     {
+      "id": "enqueue-guard",
+      "workflow": ".github/workflows/enqueue-guard.yml",
+      "kind": "gate",
+      "layer": "L2",
+      "gate": true,
+      "runs": "pull_request_target, pull_request_review, issue_comment, workflow_dispatch",
+      "role": "Writes the `enqueue-guard` check run a merge on the fork requires: the decision of `enqueue-guard.mjs`, on the live head, from code taken from `main`. The ruleset refuses a merge while it is red (#812)."
+    },
+    {
       "id": "docker",
       "workflow": ".github/workflows/docker.yml",
       "kind": "workflow-only",

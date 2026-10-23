@@ -207,6 +207,39 @@ skipped the queue prints as `bypassed queue:` and fails the run while an older o
 not — the watermark lives in the Actions API and nothing is committed. Its first run passes `--baseline`, so the first
 green run is the baseline and only a newer bypass turns it red ([#697](https://github.com/ThinkFlowLab/FlyBot/issues/697)).
 
+### The gate on the code fork: a ruleset and a written check (#812)
+
+The fork `Birfy/FlyBot` is where this team's pull requests are actually merged, and it had neither a ruleset nor branch
+protection: `merge-gate.yml` reports on `pull_request` and never fails there, `pass-label` records a PASS and is not a
+gate, and `enqueue-guard.mjs` only refused in a script somebody remembered to run. So a PASS was advisory, and #30
+merged without `agent-pr`.
+
+`.github/workflows/enqueue-guard.yml` writes the guard's own decision onto the pull request head as a check run named
+`enqueue-guard`, and `.github/agent/merge-gate-ruleset.json` is the ruleset that requires it next to `tests-ok` on
+`refs/heads/main`, with `bypass_actors: []`. Two properties make it a gate rather than a badge:
+
+- **One definition.** The script calls `decidePull` in [`enqueue-guard.mjs`](../.github/scripts/enqueue-guard.mjs) — the
+  same function behind the command the guard prints — so a rule added to the merge gate is enforced by the check without
+  being restated. Green means exactly "the printed command would say ALLOW".
+- **It flips without a commit.** A verdict is a comment and a label is a label: neither starts a `pull_request` run for
+  the head being judged, which is why the check is written through the API instead of being a job's own result.
+  `external_id` is the head, so a re-judgement PATCHes that one run; a new commit is a new head and therefore a new run,
+  and a green check never carries over.
+
+`pull_request_target` is the trigger, not `pull_request`: a `pull_request` job from a fork is read-only and could not write
+the check, while a required context that is never produced leaves that pull request on "Expected" forever (#639). The code
+that judges is checked out from `main` (`ref: main`), no pull request code is fetched or run, and the only thing read from
+the event is the number.
+
+**Turning it on is sequenced, and it is the owner's call.** `node .github/scripts/gate-ruleset.mjs --check` reads the live
+state and writes nothing; `--apply` creates or converges the ruleset and `--rollback` deletes it and proves it is gone —
+both change repository protection, which no Bot does on its own (AGENTS.md → Hard rules). The order is: merge the
+workflow, prove the check goes red on a pull request that is missing `agent-pr` and green on one that is complete, and
+only then apply the ruleset. Applied first, every open pull request reads "Expected — waiting for status" and none can
+merge. `--apply` runs `--check`'s assertions on what GitHub read back (`bypass_actors`, `current_user_can_bypass: never`,
+both contexts, `strict_required_status_checks_policy: false` so one merge on `main` does not force every open pull
+request to rebase).
+
 **The patrol that keeps the labels honest.** A status label says what is happening to an item *now*, so it must not
 outlive the item: on 2026-10-22 the board counted 11 closed issues and 43 closed pull requests as in flight, because
 nothing removed `agent-working`/`agent-pr` when they closed. `.github/workflows/label-hygiene.yml` runs

@@ -107,9 +107,12 @@ function arg(name) {
   return i > 0 ? process.argv[i + 1] : undefined
 }
 
-// `gh` and `env` are injectable so a test drives the whole check without the network, the way
-// merge-gate.mjs does.
-export function main({ gh = realGh, env = process.env, repo: repoOption, pr: prOption } = {}) {
+// The decision for one pull request, read live: the single place that reads the pull request, its
+// conclusions and its diff, and calls `judge` + `guard`. `main` below prints it (the command an agent
+// runs); `gate-check.mjs` turns the same object into the `enqueue-guard` check run the ruleset requires
+// (#812). One function with two readers, so the check and the printed command cannot disagree — #812's
+// kill condition is a second copy of these rules, and there is none.
+export function decidePull({ gh = realGh, env = process.env, repo: repoOption, pr: prOption, expectedHead } = {}) {
   const list = (path) => gh('api', '--paginate', '--jq', '.[]', path).split('\n').filter(Boolean).map((line) => JSON.parse(line))
   const repo = repoOption || env.GH_REPO || arg('--repo')
   if (!repo) throw new Error('set GH_REPO or pass --repo owner/name')
@@ -133,14 +136,20 @@ export function main({ gh = realGh, env = process.env, repo: repoOption, pr: prO
 
   // The live head is judged, never a cached one: a push that moved the tip voids the PASS the caller
   // believes it has, and `--sha` lets a caller insist on the head it read a moment ago.
-  const result = judge({ labels, files, head, author: pull.user?.login, reports, policy: loadPolicy(policyPath), expectedHead: arg('--sha'), mode: 'queue' })
+  const result = judge({ labels, files, head, author: pull.user?.login, reports, policy: loadPolicy(policyPath), expectedHead: expectedHead ?? arg('--sha'), mode: 'queue' })
   const mechanicalRelease = isMechanicalRelease(files.map((f) => f.filename))
   // The branch this repository owns, not a contributor's: `head.repo` is null when the fork was deleted,
   // which is not ours either. Both sides are lower-cased because the repository name in the API paths is
   // case-insensitive: `--repo thinkflowlab/flybot` used to read our own branch as a fork and print ALLOW.
   const fork = String(pull.head?.repo?.full_name ?? '').toLowerCase() !== String(repo).toLowerCase()
   const decision = guard({ pr, head, labels, body: pull.body, mechanicalRelease, fork, result, reports })
+  return { decision, pull, repo, pr }
+}
 
+// The printed form: the guard's own ALLOW/REFUSE line, then the command to run.
+export function main({ gh = realGh, env = process.env, repo: repoOption, pr: prOption } = {}) {
+  const { decision, pull, pr } = decidePull({ gh, env, repo: repoOption, pr: prOption })
+  const labels = (pull.labels ?? []).map((l) => l.name)
   console.log(`enqueue-guard: PR #${pr} head ${short(decision.head)}, labels [${labels.join(', ')}]`)
   console.log(decision.ok
     ? `enqueue-guard: ALLOW — ${decision.message}; ${decision.exempt ? `a ${decision.tier ?? 'T0/T1'} tier or a mechanical release PR (AGENTS.md 6)` : `${decision.verdict?.by}'s PASS names this tip`}`
