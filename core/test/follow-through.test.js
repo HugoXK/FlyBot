@@ -93,11 +93,24 @@ const freshHome = (t) => {
   })
   return home
 }
-const settle = async (check) => {
-  const until = Date.now() + 3000
-  while (!check() && Date.now() < until) await new Promise(resolve => setImmediate(resolve))
-  assert.ok(check(), 'condition not reached')
+// The timers a case mocked, if any. A wait must advance that clock: `setImmediate` rounds alone can
+// never fire a mocked `setTimeout`, so a wall-clock deadline would decide a race the test controls (#821).
+let mockedTimers
+const mockTimers = (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  mockedTimers = t.mock.timers
+  t.after(() => { if (mockedTimers === t.mock.timers) mockedTimers = undefined })
 }
+// Bounded by rounds, never by wall-clock: a passing run does not depend on how slow the runner is,
+// and a genuine failure names the condition rather than a timeout.
+const waitFor = async (check, rounds = 20000) => {
+  for (let i = 0; i < rounds && !check(); i++) {
+    mockedTimers?.tick(1)
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  return check()
+}
+const settle = async (check) => { assert.ok(await waitFor(check), 'condition not reached') }
 // Writes to `inflight.json` land on a later tick; after a mock-timer tick and after `stop()` the file
 // can still hold the previous write. Wait for them rather than reading early (the note of a failed
 // pickup is only proved kept once the clearing write has landed and been replaced).
@@ -125,7 +138,7 @@ async function openRoomTurn(t, host) {
 }
 
 test('a group turn cut off by a restart is picked up once, and the group is told', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+  mockTimers(t)
   const home = freshHome(t)
   const first = await start(home)
   await openRoomTurn(t, first)
@@ -164,7 +177,7 @@ test('a group turn cut off by a restart is picked up once, and the group is told
 })
 
 test('a request cut off by a restart goes on under the same exchange; own-chat work resumes in the chat', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+  mockTimers(t)
   const home = freshHome(t)
   const first = await start(home)
   run(first, 'b', 1, { content: [{ type: 'text', text: '[Message from Chief]\nDraft the plan' }], source: { kind: 'bot', form: 'relay', role: 'request', exchangeId: 'x1', senderName: 'Chief', senderSessionId: 'a', hop: 0 } })
@@ -186,7 +199,7 @@ test('a request cut off by a restart goes on under the same exchange; own-chat w
 })
 
 test('when only DS Bot restarts, a turn still running or finished meanwhile is not picked up', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+  mockTimers(t)
   const home = freshHome(t)
   const first = await start(home)
   run(first, 'b', 1, { content: [{ type: 'text', text: '[Message from Chief]\nDraft the plan' }], source: { kind: 'bot', form: 'relay', role: 'request', exchangeId: 'x1', senderName: 'Chief', senderSessionId: 'a', hop: 0 } })
@@ -217,7 +230,7 @@ test('when only DS Bot restarts, a turn still running or finished meanwhile is n
 })
 
 test('a turn that finished while the plugin was not listening is not picked up', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+  mockTimers(t)
   const home = freshHome(t)
   const first = await start(home)
   run(first, 'a', 1, { content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } })
@@ -233,7 +246,7 @@ test('a turn that finished while the plugin was not listening is not picked up',
 })
 
 test('a turn the restart truly cut (interrupted in the durable log) is still picked up', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+  mockTimers(t)
   const home = freshHome(t)
   const first = await start(home)
   run(first, 'a', 1, { content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } })
@@ -247,7 +260,7 @@ test('a turn the restart truly cut (interrupted in the durable log) is still pic
 })
 
 test('a pickup that fails keeps its note for the next start', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+  mockTimers(t)
   const home = freshHome(t)
   const first = await start(home)
   run(first, 'a', 1, { content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } })
@@ -284,7 +297,7 @@ test('a pickup that fails keeps its note for the next start', async (t) => {
 })
 
 test('a resumed turn that writes its own note keeps it', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+  mockTimers(t)
   const home = freshHome(t)
   const first = await start(home)
   run(first, 'a', 1, { content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } })
@@ -321,7 +334,7 @@ test('stop waits for the note it just wrote', async (t) => {
 })
 
 test('a finished turn leaves nothing to pick up', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+  mockTimers(t)
   const home = freshHome(t)
   const first = await start(home)
   run(first, 'a', 1, { content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } })
@@ -359,7 +372,7 @@ test('a message a shutdown cancelled is sent again once; one still waiting, take
   await settle(() => (notes(home).queued.b ?? []).length === 2)
   await first.stop()
 
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+  mockTimers(t)
   const second = await start(home)
   // A hard stop keeps the inbox: that message runs when the Session wakes.
   second.agentOf('b').inbox.nextTurn.push(numbers)
@@ -381,7 +394,7 @@ test('a message sent again is forgotten everywhere once a turn takes it up', asy
   await first.stop()
 
   // The second start sends the noted message again, under the same exchange.
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+  mockTimers(t)
   const second = await start(home)
   t.mock.timers.tick(3000)
   await settle(() => second.agentOf('b').calls.length === 1)
@@ -391,7 +404,9 @@ test('a message sent again is forgotten everywhere once a turn takes it up', asy
   // every later start send the message once more.
   second.emit('b', 'user/message', { content: again.content, source: again.source })
   const notedExchange = () => Object.values(notes(home).queued ?? {}).flat().filter(item => item?.args?.exchangeId === exchangeId)
-  await settle(() => notedExchange().length === 0)
+  // The clearing write is what this case proves: drive the clock the case controls and let the
+  // assertion below judge it. A wait here would blame `settle` for a write that never happened.
+  await waitFor(() => notedExchange().length === 0)
   await second.stop()
   assert.equal(notedExchange().length, 0, 'the exchange a turn took up is still noted on disk')
 
@@ -403,7 +418,7 @@ test('a message sent again is forgotten everywhere once a turn takes it up', asy
 })
 
 test('a live interrupted end does not drop the note of a turn still owed a pickup', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+  mockTimers(t)
   const home = freshHome(t)
   const first = await start(home)
   run(first, 'a', 1, { content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } })
@@ -417,7 +432,7 @@ test('a live interrupted end does not drop the note of a turn still owed a picku
 })
 
 test('a turn/start this process sees proves the noted turn ended, even when the log cannot', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+  mockTimers(t)
   const home = freshHome(t)
   const first = await start(home)
   run(first, 'a', 1, { content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } })
