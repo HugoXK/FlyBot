@@ -9122,6 +9122,31 @@ test('#798: a room name with markup renders cleaned, and a count without a maxim
   assert.equal(dialog.text(dialog.find('face-link-preview-members')), '2 in the room')
 })
 
+test('#823: an empty count is missing, not a zero, and a real zero still shows', async () => {
+  const card = async (members) => {
+    const dialog = dialogWithState(async (endpoint) => {
+      if (endpoint === 'social/face-invite-preview') return { name: 'Kitchen sync', members, maxMembers: 8 }
+      return {}
+    })
+    dialog.find('face-link-join-go').props.onClick()
+    await dialog.settle()
+    dialog.render()
+    return dialog
+  }
+  const empty = await card('')
+  assert.equal(empty.has('face-link-preview-members'), false, "an empty string is a missing count, not '0 / 8'")
+  const blank = await card(' ')
+  assert.equal(blank.has('face-link-preview-members'), false, 'whitespace is a missing count, not 0')
+  const word = await card('eight')
+  assert.equal(word.has('face-link-preview-members'), false, 'a non-number is a missing count')
+  const zeroNumber = await card(0)
+  assert.equal(zeroNumber.text(zeroNumber.find('face-link-preview-members')), '0 / 8 in the room', 'a real numeric zero is a real count')
+  const zero = await card('0')
+  assert.equal(zero.text(zero.find('face-link-preview-members')), '0 / 8 in the room', 'a real zero is a real count')
+  const spaced = await card(' 8 ')
+  assert.equal(spaced.text(spaced.find('face-link-preview-members')), '8 / 8 in the room', 'whitespace around a number is trimmed')
+})
+
 test('#798: an older host says so and does not join; a 404 still joins', async () => {
   const older = []
   const unsupported = dialogWithState(async (endpoint, payload) => {

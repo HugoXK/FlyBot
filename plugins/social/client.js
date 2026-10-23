@@ -893,14 +893,24 @@ window.__ModuleLoader__.load({
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, ROOM_NAME_MAX) || fallback
+    // A count is only what reads as one (#823): `Number('')` is 0, which would draw an unknown room
+    // as empty, so an empty or non-numeric string is "not sent", like null.
+    const roomCount = (value) => {
+      if (typeof value === 'number') return Number.isFinite(value) ? value : NaN
+      if (typeof value !== 'string') return NaN
+      const text = value.trim()
+      if (!text) return NaN
+      const count = Number(text)
+      return Number.isFinite(count) ? count : NaN
+    }
     // What the card can honestly say, and nothing else: a room with no field worth showing is no
     // card at all, so the join below runs as before.
     const faceInvitePreview = (seen) => {
       if (!seen || typeof seen !== 'object' || seen.unsupported === true) return null
       const name = cleanRoomName(seen.name)
       const lead = cleanRoomName(seen.lead)
-      const members = seen.members === undefined || seen.members === null ? NaN : Number(seen.members)
-      const maxMembers = seen.maxMembers === undefined || seen.maxMembers === null ? NaN : Number(seen.maxMembers)
+      const members = roomCount(seen.members)
+      const maxMembers = roomCount(seen.maxMembers)
       const people = Number.isFinite(members) && Number.isFinite(maxMembers)
         ? `${members} / ${maxMembers} in the room`
         : Number.isFinite(members) ? `${members} in the room` : ''
