@@ -104,6 +104,20 @@ const closingQuote = text => {
   return -1
 }
 
+// A quoted scalar may continue onto the next line (`run: "echo hi` with the closing quote on a later
+// line). A `#` on a continuation line is text, not a comment, so the strip has to know the scalar is
+// still open: `openQuoteClose` returns the index of the closing quote on this line, or -1 (#850).
+const openQuoteClose = (line, quote) => {
+  for (let i = 0; i < line.length; i += 1) {
+    if (quote === '"' && line[i] === '\\') { i += 1; continue }
+    if (line[i] === quote) {
+      if (quote === "'" && line[i + 1] === "'") { i += 1; continue }
+      return i
+    }
+  }
+  return -1
+}
+
 const withoutTrailingComment = line => {
   const start = scalarStart(line)
   if (start < 0) return line
@@ -136,14 +150,28 @@ const withoutTrailingComment = line => {
 export const withoutYamlComments = block => {
   const kept = []
   let scalar = -1
+  let quote = '' // a quoted scalar that did not close on its own line (#850)
   for (const line of block.split('\n')) {
+    if (quote) {
+      const close = openQuoteClose(line, quote)
+      if (close < 0) { kept.push(line); continue }
+      const after = commentStart(line.slice(close + 1), false)
+      kept.push(after < 0 ? line : line.slice(0, close + 1 + after).trimEnd())
+      quote = ''
+      continue
+    }
     const indent = line.search(/\S/)
     if (scalar >= 0) {
       if (line.trim() === '' || indent > scalar) { kept.push(line); continue }
       scalar = -1
     }
-    if (/^\s*[\w.-]+:\s*[|>][-+]?\s*$/.test(line)) { scalar = indent; kept.push(line); continue }
+    if (/^\s*[\w.-]+:\s*[|>][-+]?\d*(?:\s+#.*)?\s*$/.test(line)) { scalar = indent; kept.push(line); continue }
     if (line.trim().startsWith('#')) continue
+    const start = scalarStart(line)
+    if (start >= 0) {
+      const text = line.slice(start).replace(/^\s+/, '')
+      if ((text[0] === '"' || text[0] === "'") && closingQuote(text) < 0) { quote = text[0]; kept.push(line); continue }
+    }
     kept.push(withoutTrailingComment(line))
   }
   return kept.join('\n')
@@ -297,6 +325,43 @@ test('#834: a plain scalar keeps nothing of a # comment, and an escaped quote ke
   // The negative control of case 2: the same quoting, but closed before the `#`, is a comment.
   const closed = probe('        run: "echo hi" # ${{ secrets.DEEPSEEK_API_KEY }}\n')
   assert.equal(closed.mapsSecret, false, 'a comment after a closed scalar is not a carrier')
+})
+
+// #850: a block scalar's header may carry an indentation indicator or a trailing comment, and a quoted
+// scalar may close on a later line. In both, the body line's ` # ` is text that Actions interpolates, so
+// the step holds the key and has to be gated. One test per shape, plus the control that keeps a `|2`
+// without an expression out of the carrier list.
+const probeStep = body => stepsOf(`${live}\n      - name: probe\n${body}`).find(step => step.name === 'probe')
+
+test('#850: a block scalar with an indentation indicator (|2) is a carrier', () => {
+  const step = probeStep('        run: |2\n          # ${{ secrets.DEEPSEEK_API_KEY }}\n')
+  assert.equal(step.mapsSecret, true, 'the body line is inside the |2 value, so it is a carrier')
+  assert.equal(step.gate, '', 'the probe carries no gate, so the #811 rule has something to catch')
+})
+
+test('#850: a block scalar whose header carries a trailing comment is a carrier', () => {
+  const step = probeStep('        run: | # note\n          # ${{ secrets.DEEPSEEK_API_KEY }}\n')
+  assert.equal(step.mapsSecret, true, 'the ` # note` ends the header, not the scalar, so the body is a carrier')
+  assert.equal(step.gate, '', 'the probe carries no gate, so the #811 rule has something to catch')
+})
+
+test('#850: a folded block scalar with an indentation indicator (>2) is a carrier', () => {
+  const step = probeStep('        run: >2\n          # ${{ secrets.DEEPSEEK_API_KEY }}\n')
+  assert.equal(step.mapsSecret, true, 'the body line is inside the >2 value, so it is a carrier')
+  assert.equal(step.gate, '', 'the probe carries no gate, so the #811 rule has something to catch')
+})
+
+test('#850: a double-quoted scalar that closes on a later line is a carrier', () => {
+  const step = probeStep('        run: "echo hi\n          # ${{ secrets.DEEPSEEK_API_KEY }}"\n')
+  assert.equal(step.mapsSecret, true, 'the quote is still open on the # line, so the # is text, not a comment')
+  assert.equal(step.gate, '', 'the probe carries no gate, so the #811 rule has something to catch')
+})
+
+test('#850: a block scalar with no expression stays out of the carrier list', () => {
+  // The control: `|2` must not become a carrier by itself, or the four cases above would pass for the
+  // wrong reason and every block scalar would demand a gate.
+  const step = probeStep('        run: |2\n          # plain comment\n')
+  assert.equal(step.mapsSecret, false, 'a |2 whose body names no expression is not a carrier')
 })
 
 test('#813: the secret reaches exactly three steps, and the preflight alone stays ungated', () => {
