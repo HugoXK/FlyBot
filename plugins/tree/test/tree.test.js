@@ -507,9 +507,9 @@ test('#90: new and adopted Bots start ungranted, prompts tell a child how outsid
   assert.doesNotMatch(sp(m, m.root), /granted access to you/)
 })
 
-const loadClient = () => {
+const loadClient = (react = reactStub) => {
   let mod
-  globalThis.window = { __ModuleLoader__: { load: ({ factory }) => { mod = factory(() => reactStub) } } }
+  globalThis.window = { __ModuleLoader__: { load: ({ factory }) => { mod = factory(() => react) } } }
   new Function(readFileSync(new URL('../client.js', import.meta.url), 'utf8'))()
   return mod
 }
@@ -1940,4 +1940,109 @@ test('#810: an existing lead of the group is reused, and no second lead is made'
   assert.equal([...f.bots.values()].filter(x => x.fields?.lead?.key === 'project:flybot').length, 1, 'the existing lead is reused')
   assert.deepEqual([ra.created.parent.id, rb.created.parent.id], [leadId, leadId])
   assert.deepEqual(childrenIn(f, leadId).map(x => x.name).sort(), ['FlyBot Programmer', 'FlyBot Tester'])
+})
+
+// #816: a burst whose bots the vocabulary cannot place shares only `area:` ('other' → "General"), and
+// that is the bucket roles are *filed* under, not a group (#810's key must be a real one). Without the
+// exclusion in createChild, two such creates in flight at once would be forced under one "General Lead"
+// — a group of unrelated Bots — instead of each taking the plain path.
+test('#816: an `area:` key never groups a burst, so no "General Lead" is made', async () => {
+  const { profileOf, keysOf } = await import('../src/roles.js')
+  const areaOf = name => keysOf(profileOf({ name, role: 'x' }))
+  assert.deepEqual(areaOf('Bo'), ['area:other'], 'a two-letter name with an unplaceable role has only the area key')
+  assert.deepEqual(areaOf('Al'), ['area:other'], 'and so does its sibling: they would share that key')
+  const f = fakeAdapter()
+  const tree = createTree(f.fb, { limits: { maxDepth: 5, maxChildren: 8 } })
+  const releaseA = f.hold('Bo')
+  const releaseB = f.hold('Al')
+  const a = tree.allocateChild(f.chief, 'Bo', 'x', undefined)
+  const b = tree.allocateChild(f.chief, 'Al', 'y', undefined)
+  await until('a create to start', () => byName(f, 'Bo') || byName(f, 'Al'))
+  releaseA(); releaseB()
+  const [ra, rb] = await Promise.all([a, b])
+  assert.equal(byName(f, 'General Lead'), undefined, 'no lead is made for the "other" area')
+  assert.equal([...f.bots.values()].filter(x => x.fields?.lead?.key === 'area:other').length, 0, 'and no entry claims that key')
+  assert.deepEqual([ra.created.parent.id, rb.created.parent.id], [f.chief, f.chief], 'each lands at the caller, where it would have gone alone')
+  assert.deepEqual([...f.bots.values()].map(x => x.name).sort(), ['Al', 'Bo', 'Chief', 'Dev Lead', 'Existing Programmer'])
+  // A real key still groups the same fixture, so the case fails for the right reason.
+  const g = fakeAdapter()
+  const grouped = createTree(g.fb, { limits: { maxDepth: 5, maxChildren: 8 } })
+  const relA = g.hold('FlyBot Programmer')
+  const relB = g.hold('FlyBot Tester')
+  const pa = grouped.allocateChild(g.chief, 'FlyBot Programmer', 'writes code', undefined)
+  const pb = grouped.allocateChild(g.chief, 'FlyBot Tester', 'tests code', undefined)
+  await until('a create to start', () => byName(g, 'FlyBot Programmer') || byName(g, 'FlyBot Tester'))
+  relA(); relB()
+  const [qa, qb] = await Promise.all([pa, pb])
+  assert.equal(qa.created.parent.id, qb.created.parent.id, 'a project: key still makes one group')
+  assert.equal(byName(g, 'FlyBot Lead').fields.parent, g.devLead)
+})
+
+// The client's sections render in ascending `order` within a slot (ds-bot sorts them), so a smaller
+// number sits HIGHER. The archived list (#810) is 88 and the reorganization notice is 89: the archived
+// Bots stay above the "Tree reorganized" card instead of the card pushing them down.
+test('#816: the archived list is ordered above the reorganization notice', () => {
+  const mod = loadClient()
+  const entries = []
+  const off = mod.apply({ flybot: { slots: { register: (name, entry) => { entries.push({ name, entry }); return () => {} } } } }, {})
+  const section = id => entries.find(e => e.name === 'flybot.sidebar.section' && e.entry.id === id)?.entry
+  const archived = section('flybot-tree-archived')
+  const reorg = section('flybot-tree-reorg')
+  assert.ok(archived && reorg, 'both sections are registered by default')
+  assert.ok(archived.order < reorg.order, `archived ${archived.order} must come before reorg ${reorg.order} (ascending order renders first)`)
+  assert.deepEqual(
+    entries.filter(e => e.name === 'flybot.sidebar.section').map(e => e.entry.id).sort((a, b) => section(a).order - section(b).order),
+    ['flybot-tree-archived', 'flybot-tree-reorg'],
+    'sorted the way the slot renders them: archived on top',
+  )
+  off()
+})
+
+// #816: the structure entry and the archived list both need ctx.flybot.bots(); each used to poll it on
+// its own 10 s timer, so a mounted sidebar asked the host for the same list twice per tick. Now the
+// plugin keeps one feed: the first subscriber starts it, later ones join it (no read on mount), and the
+// last one to leave stops it.
+test('#816: one roster read per tick, shared by the structure entry and the archived list', async () => {
+  const tick = (ms = 0) => new Promise(r => setTimeout(r, ms))
+  let reads = 0
+  const roster = [{ id: 'c', name: 'Chief', isMain: true, fields: {} }]
+  const flybot = { bots: async () => { reads++; return roster }, fields: { on: () => () => {} }, slots: { register: () => () => {} } }
+  const cleanups = []
+  const mod = loadClient({ ...reactStub, useEffect(fn) { const stop = fn(); cleanups.push(stop) } })
+
+  // (a) The feed itself: every subscriber sees every read, and one tick is one read.
+  const feed = mod.rosterFeed(flybot, { interval: 5 })
+  let seenStructure = 0
+  let seenArchived = 0
+  const offStructure = feed.subscribe(() => { seenStructure++ })
+  const offArchived = feed.subscribe(() => { seenArchived++ })
+  assert.equal(reads, 1, 'one read for both subscribers, not one each')
+  await tick() // let the read started by the first subscriber land before the window opens
+  reads = 0
+  seenStructure = 0
+  seenArchived = 0
+  await tick(40)
+  assert.ok(reads >= 2, 'the timer really ticked')
+  assert.equal(seenStructure, seenArchived, 'both consumers see the same reads')
+  assert.equal(seenStructure, reads, 'each read is delivered once: one roster read per tick, not one per consumer')
+  offStructure(); offArchived()
+  const afterStop = reads
+  await tick(30)
+  assert.equal(reads, afterStop, 'the last subscriber to leave stops the timer')
+
+  // (b) The wiring in apply(): mounting the archived list joins the structure entry's read instead of
+  // starting its own (a private feed would read once on its first subscribe, so this count would be 2).
+  reads = 0
+  const entries = []
+  const slots = { register: (name, entry) => { entries.push({ name, entry }); return () => {} } }
+  const stop = mod.apply({ flybot: { ...flybot, slots } }, {})
+  await tick()
+  assert.equal(reads, 1, 'the plugin starts with one read for the structure entry')
+  const archivedEntry = entries.find(e => e.name === 'flybot.sidebar.section' && e.entry.id === 'flybot-tree-archived')
+  assert.ok(archivedEntry, 'the archived section is registered by default')
+  renderToString(archivedEntry.entry.component({ bots: roster }))
+  await tick()
+  assert.equal(reads, 1, 'mounting the archived list reuses that read and does not ask for the roster again')
+  stop()
+  for (const stopEffect of cleanups.splice(0)) { try { stopEffect?.() } catch { /* already gone */ } }
 })

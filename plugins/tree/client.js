@@ -312,7 +312,44 @@ window.__ModuleLoader__.load({
     // retired and non-tree Bots have no parent and ds-bot shows them under Chief; archived / 归档-*
     // Bots are omitted via include() (#452). The entry is
     // re-registered whenever the structure changes (field changes and a 10 s poll), which re-renders.
-    function registerStructure(flybot) {
+    // One roster read for the whole plugin (#816): the structure entry and the archived section both
+    // need ctx.flybot.bots(), and each of them polled it on its own 10 s timer, so a mounted sidebar
+    // asked the host for the same list twice per tick. The first subscriber starts the poll, every
+    // subscriber gets the same list, and the last one to leave stops it. `refresh()` asks for a fresh
+    // read now — a field change or a removal — without starting a second timer.
+    function rosterFeed(flybot, { interval = REFRESH_MS } = {}) {
+      let bots = []
+      let timer = null
+      let reading = false
+      let again = false
+      const subs = new Set()
+      const read = async () => {
+        if (reading) { again = true; return } // a slow read does not stack up behind the timer
+        reading = true
+        let next
+        try { next = typeof flybot.bots === 'function' ? await flybot.bots() : [] } catch { reading = false; return }
+        reading = false
+        bots = next ?? []
+        for (const fn of [...subs]) { try { fn(bots) } catch { /* one subscriber must not stop the feed */ } }
+        if (again) { again = false; void read() }
+      }
+      return {
+        get: () => bots,
+        subscribe(fn) {
+          subs.add(fn)
+          try { fn(bots) } catch { /* the subscriber can start again on the next read */ }
+          if (subs.size === 1) {
+            timer = setInterval(read, interval)
+            timer?.unref?.()
+            void read()
+          }
+          return () => { subs.delete(fn); if (!subs.size && timer) { clearInterval(timer); timer = null } }
+        },
+        refresh() { if (subs.size) void read() },
+      }
+    }
+
+    function registerStructure(flybot, feed = rosterFeed(flybot)) {
       let parents = new Map()
       let statuses = new Map()
       let key = '[[],[],[]]'  // parents, tags, hidden (#452)
@@ -323,9 +360,7 @@ window.__ModuleLoader__.load({
       let hidden = new Set()
       const entry = () => ({ id: 'flybot-tree', order: 90, parentOf: id => parents.get(id), include: id => !hidden.has(id), menuItems, nodeActions })
       let off = flybot.slots.register('flybot.sidebar.structure', entry())
-      const refresh = async () => {
-        let bots
-        try { bots = typeof flybot.bots === 'function' ? await flybot.bots() : [] } catch { return }
+      const update = bots => {
         if (stopped) return
         const next = new Map()
         const walk = (node, parent) => { if (parent) next.set(node.id, parent); for (const c of node.children) walk(c, node.id) }
@@ -347,14 +382,10 @@ window.__ModuleLoader__.load({
         off()
         off = flybot.slots.register('flybot.sidebar.structure', entry())
       }
-      const offs = []
-      try { offs.push(flybot.fields?.on?.('change', c => { if (c && (c.key === 'parent' || c.key === 'treeRole' || c.key === 'retired' || c.key === 'archived' || c.key === 'idle' || c.removed)) refresh() })) } catch { /* no change feed */ }
-      const timer = setInterval(refresh, REFRESH_MS)
-      timer?.unref?.()
-      void refresh()
+      const offs = [feed.subscribe(update)]
+      try { offs.push(flybot.fields?.on?.('change', c => { if (c && (c.key === 'parent' || c.key === 'treeRole' || c.key === 'retired' || c.key === 'archived' || c.key === 'idle' || c.removed)) feed.refresh() })) } catch { /* no change feed */ }
       return () => {
         stopped = true
-        clearInterval(timer)
         for (const o of offs) { try { o?.() } catch { /* already gone */ } }
         off()
       }
@@ -476,22 +507,21 @@ window.__ModuleLoader__.load({
             }))
           : null)
     }
-    function makeArchivedSection(flybot) {
+    function makeArchivedSection(flybot, feed = rosterFeed(flybot)) {
       return function ArchivedSection(props) {
         useStyles()
         const [bots, setBots] = useState([])
         // Local, so the 10 s roster refresh re-renders the rows without closing the section.
         const [expanded, setExpanded] = useState(false)
-        const refresh = useCallback(async () => { try { setBots(archivedOf(await flybot.bots())) } catch { /* keep last */ } }, [])
+        // The roster read is the plugin's (#816): this section used to keep its own 10 s timer, so a
+        // mounted sidebar fetched the same list twice per tick.
+        const applyBots = useCallback(list => setBots(archivedOf(list)), [])
         useEffect(() => {
-          refresh()
-          const offs = []
-          try { offs.push(flybot.fields?.on?.('change', c => { if (c && (c.key === 'archived' || c.key === 'parent' || c.key === 'treeRole' || c.removed)) refresh() })) } catch { /* no change feed */ }
-          try { if (typeof flybot.on === 'function') offs.push(flybot.on('bot.removed', refresh)) } catch { /* no removal event */ }
-          const timer = setInterval(refresh, REFRESH_MS)
-          offs.push(() => clearInterval(timer))
+          const offs = [feed.subscribe(applyBots)]
+          try { offs.push(flybot.fields?.on?.('change', c => { if (c && (c.key === 'archived' || c.key === 'parent' || c.key === 'treeRole' || c.removed)) feed.refresh() })) } catch { /* no change feed */ }
+          try { if (typeof flybot.on === 'function') offs.push(flybot.on('bot.removed', () => feed.refresh())) } catch { /* no removal event */ }
           return () => { for (const off of offs) { try { off?.() } catch { /* already gone */ } } }
-        }, [refresh])
+        }, [applyBots, feed])
         const openSession = props?.actions?.openSession
         return h(ArchivedView, { bots, expanded, onToggle: () => setExpanded(e => !e), openBot: typeof openSession === 'function' ? id => openSession(id) : undefined })
       }
@@ -508,16 +538,18 @@ window.__ModuleLoader__.load({
       if (ctx.flybot && typeof ctx.flybot === 'object') { ctx.flybot.tree = helper; offs.push(() => { if (ctx.flybot.tree === helper) delete ctx.flybot.tree }) }
       if (globalThis.__flybot__) { globalThis.__flybot__.tree = helper; offs.push(() => { if (globalThis.__flybot__?.tree === helper) delete globalThis.__flybot__.tree }) }
       if (config?.sidebarSection === true) offs.push(ctx.flybot.slots.register('flybot.sidebar.section', { id: 'flybot-tree', order: 90, component: makeSection(ctx.flybot) }))
-      if (ctx.flybot?.slots) offs.push(registerStructure(ctx.flybot))
+      // One roster feed for the structure entry and the archived section, so one read per tick (#816).
+      const feed = ctx.flybot ? rosterFeed(ctx.flybot) : null
+      if (ctx.flybot?.slots && feed) offs.push(registerStructure(ctx.flybot, feed))
       // Archived Bots (#810) are hidden from ds-bot's list (#452), which left their chats reachable only
       // from the right-click menu. Draws nothing when no Bot is archived.
-      if (ctx.flybot?.slots && config?.archivedSection !== false) offs.push(ctx.flybot.slots.register('flybot.sidebar.section', { id: 'flybot-tree-archived', order: 88, component: makeArchivedSection(ctx.flybot) }))
+      if (ctx.flybot?.slots && feed && config?.archivedSection !== false) offs.push(ctx.flybot.slots.register('flybot.sidebar.section', { id: 'flybot-tree-archived', order: 88, component: makeArchivedSection(ctx.flybot, feed) }))
       // The reorganization notice (#446) is on by default (config.reorgNotice: false hides it); it draws nothing until a reorganization ran.
       if (ctx.flybot?.slots && config?.reorgNotice !== false) offs.push(ctx.flybot.slots.register('flybot.sidebar.section', { id: 'flybot-tree-reorg', order: 89, component: makeReorgNotice(ctx.flybot) }))
       const off = () => { for (const fn of offs.splice(0)) fn?.() }
       ctx.effect?.(() => off, 'flybot-tree: tree helper')
       return off
     }
-    return { name: 'flybot-tree', inject, apply, forestOf, registerStructure, makeReorgNotice, ReorgCard, noticeRun, statusOf, makeStatusTag, archivedOf, ArchivedView, makeArchivedSection, REORG_CSS, makeMenuItems, makeInviteAction, copyInvite, copyText, INVITE_CSS, buildForest, treeOf, TreeView, countNodes, EMPTY, CSS }
+    return { name: 'flybot-tree', inject, apply, forestOf, rosterFeed, registerStructure, makeReorgNotice, ReorgCard, noticeRun, statusOf, makeStatusTag, archivedOf, ArchivedView, makeArchivedSection, REORG_CSS, makeMenuItems, makeInviteAction, copyInvite, copyText, INVITE_CSS, buildForest, treeOf, TreeView, countNodes, EMPTY, CSS }
   },
 })
