@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { decide, loadPolicy, parseReport, render } from './review-gate.mjs'
+import { adminsFor, decide, loadPolicy, parseReport, render } from './review-gate.mjs'
 
 const HEAD = 'a4d506a1b2c3d4e5f60718293a4b5c6d7e8f9012'
 const OLD = '175328d0c1b2a3d4e5f60718293a4b5c6d7e8f90'
@@ -515,4 +515,154 @@ test('#928: a listed self-reviewer who is a CONTRIBUTOR counts, only on their ow
   const elsewhere = decide({ head: HEAD, author: 'opener', reports: [own()], policy: selfPolicy })
   assert.equal(elsewhere.ok, false, 'a listed self-reviewer judging someone else\'s pull request is not exempt')
   assert.equal(elsewhere.judged[0].counts, false)
+})
+
+// #936 / #925: a login holding admin on this repository is stamped CONTRIBUTOR on its reviews, so the
+// association gate cannot be the only word. The permission API is asked only for a Tip+Verdict
+// conclusion by a login already in `reviewers`; it never widens the reviewers list, never skips the
+// own-author rule, and a failed lookup is not admin.
+test('#925: repo admin qualifies a CONTRIBUTOR, and does not skip the reviewers list or the own-author rule', () => {
+  const adminPolicy = { reviewers: ['reviewer-agent', 'hsliuustc0106'], selfReview: [], writers: ['Reviewer'] }
+  const pass = comment('hsliuustc0106', report(), '2026-10-18T01:00:00Z', 'review', 'CONTRIBUTOR')
+
+  const accepted = decide({ head: HEAD, author: 'opener', reports: [pass], policy: adminPolicy, admins: ['HSLiuustc0106'] })
+  assert.equal(accepted.ok, true, accepted.reason)
+  assert.equal(accepted.by, 'hsliuustc0106')
+
+  const notAdmin = decide({ head: HEAD, author: 'opener', reports: [pass], policy: adminPolicy })
+  assert.equal(notAdmin.ok, false)
+  assert.match(notAdmin.reason, /author association CONTRIBUTOR/)
+
+  const outsider = decide({
+    head: HEAD,
+    author: 'opener',
+    reports: [comment('passer-by', report(), '2026-10-18T01:00:00Z', 'review', 'CONTRIBUTOR')],
+    policy: adminPolicy,
+    admins: ['passer-by'],
+  })
+  assert.equal(outsider.ok, false, 'admin does not skip the reviewers list')
+  assert.match(outsider.reason, /not a reviewer/)
+
+  const selfPass = decide({ head: HEAD, author: 'hsliuustc0106', reports: [pass], policy: adminPolicy, admins: ['hsliuustc0106'] })
+  assert.equal(selfPass.ok, false, 'admin does not skip the own-author selfReview rule')
+  assert.match(selfPass.reason, /own author is not a reviewer/)
+})
+
+test('#925: a Tip+Verdict from a login outside reviewers does not call the permission API', () => {
+  const calls = []
+  const gh = (_cmd, path) => {
+    calls.push(path)
+    return JSON.stringify({ permission: 'admin' })
+  }
+  const p = { reviewers: ['Reviewer-Agent'], selfReview: [], writers: ['Reviewer'] }
+  const body = `Verdict: PASS at ${HEAD}`
+  const admins = adminsFor({
+    gh,
+    repo: 'ThinkFlowLab/FlyBot',
+    policy: p,
+    reports: [
+      { login: 'passer-by', association: 'CONTRIBUTOR', body },
+      { login: 'reviewer-agent', association: 'CONTRIBUTOR', body },
+    ],
+  })
+  assert.deepEqual(admins, ['reviewer-agent'])
+  assert.deepEqual(calls, ['repos/ThinkFlowLab/FlyBot/collaborators/reviewer-agent/permission'])
+})
+
+test('#925: the permission API is asked only for a listed reviewer conclusion the association and selfReview do not already qualify', () => {
+  const p = { reviewers: ['reviewer-agent', 'Birfy', 'hsliuustc0106', 'write-user', 'custom', 'bad-body', 'gone'], selfReview: ['Birfy'], writers: ['Reviewer'] }
+  const verdict = `Verdict: PASS at ${HEAD}`
+  const reports = [
+    { login: 'reviewer-agent', association: 'MEMBER', body: verdict },
+    { login: 'Birfy', association: 'CONTRIBUTOR', body: verdict },
+    { login: 'chatter', association: 'CONTRIBUTOR', body: 'LGTM, ship it' },
+    { login: 'tiponly', association: 'CONTRIBUTOR', body: `Tip SHA: ${HEAD}` },
+    { login: 'hsliuustc0106', association: 'CONTRIBUTOR', body: verdict },
+    { login: 'hsliuustc0106', association: 'NONE', body: verdict },
+    { login: 'writer', association: 'CONTRIBUTOR', body: verdict },
+    { login: 'broken', association: 'CONTRIBUTOR', body: verdict },
+    { login: 'missing', association: 'CONTRIBUTOR', body: verdict },
+    { login: 'write-user', association: 'CONTRIBUTOR', body: verdict },
+    { login: 'custom', association: 'CONTRIBUTOR', body: verdict },
+    { login: 'bad-body', association: 'CONTRIBUTOR', body: verdict },
+    { login: 'gone', association: 'CONTRIBUTOR', body: verdict },
+    { login: '', association: 'NONE', body: verdict },
+  ]
+  const calls = []
+  const gh = (_cmd, path) => {
+    calls.push(path)
+    const login = decodeURIComponent(path.split('/collaborators/')[1].split('/')[0])
+    if (login === 'hsliuustc0106') return JSON.stringify({ permission: 'admin', role_name: 'admin' })
+    if (login === 'write-user') return JSON.stringify({ permission: 'write', role_name: 'write', permissions: { admin: false } })
+    if (login === 'custom') return JSON.stringify({ permission: 'write', permissions: { admin: true } })
+    if (login === 'bad-body') return 'not-json'
+    throw new Error('HTTP 404')
+  }
+  // `author` decides which shape is skipped: the own-author `selfReview` carve-out (#928) needs no
+  // lookup, everyone else is asked. `Birfy` is in `selfReview` and is not this author, so it is asked
+  // and its 404 means "not admin".
+  assert.deepEqual(adminsFor({ gh, repo: 'ThinkFlowLab/FlyBot', reports, policy: p, author: 'opener' }), ['hsliuustc0106', 'custom'])
+  assert.deepEqual(calls, [
+    'repos/ThinkFlowLab/FlyBot/collaborators/Birfy/permission',
+    'repos/ThinkFlowLab/FlyBot/collaborators/hsliuustc0106/permission',
+    'repos/ThinkFlowLab/FlyBot/collaborators/write-user/permission',
+    'repos/ThinkFlowLab/FlyBot/collaborators/custom/permission',
+    'repos/ThinkFlowLab/FlyBot/collaborators/bad-body/permission',
+    'repos/ThinkFlowLab/FlyBot/collaborators/gone/permission',
+  ])
+  for (const outsider of ['writer', 'broken', 'missing']) {
+    assert.equal(calls.some((path) => path.includes(`/collaborators/${outsider}/`)), false, outsider)
+  }
+  // Their own pull request: the `selfReview` carve-out already qualifies the report, so no lookup.
+  const ownCalls = []
+  const own = adminsFor({
+    gh: (_cmd, path) => { ownCalls.push(path); return JSON.stringify({ permission: 'admin' }) },
+    repo: 'ThinkFlowLab/FlyBot',
+    reports: [{ login: 'Birfy', association: 'CONTRIBUTOR', body: verdict }],
+    policy: p,
+    author: 'Birfy',
+  })
+  assert.deepEqual(own, [])
+  assert.deepEqual(ownCalls, [])
+  assert.deepEqual(adminsFor({ gh, reports, policy: p, author: 'opener' }), [])
+  assert.equal(calls.length, 6, 'no repo means no lookup')
+})
+
+test('#925: OWNER, MEMBER and COLLABORATOR still count, and a bare CONTRIBUTOR does not', () => {
+  for (const association of ['OWNER', 'MEMBER', 'COLLABORATOR']) {
+    const r = decide({ head: HEAD, author: 'opener', reports: [comment('reviewer-agent', report(), '2026-10-18T01:00:00Z', 'review', association)], policy })
+    assert.equal(r.ok, true, association)
+  }
+  const bare = decide({ head: HEAD, author: 'opener', reports: [comment('reviewer-agent', report(), '2026-10-18T01:00:00Z', 'review', 'CONTRIBUTOR')], policy })
+  assert.equal(bare.ok, false)
+  assert.match(bare.reason, /author association CONTRIBUTOR/)
+})
+
+// The pair to #931's negative case. Same policy shape, same login in `selfReview`, same
+// `CONTRIBUTOR` report on **someone else's** pull request — the only difference is the admin
+// evidence `adminsFor` collected, and the comment below says so at both ends. That case stays
+// `false` (a non-admin `selfReview` login has no right on another author's pull request); this one
+// is `true` because repository admin is a separate qualification, not a widening of `selfReview`.
+test('#928 pair: the same report counts once the API reports admin, and the lookup is asked once', () => {
+  const selfPolicy = { reviewers: ['reviewer-agent', 'hsliuustc0106'], selfReview: ['hsliuustc0106'], writers: ['Reviewer', 'hsliuustc0106'] }
+  const reports = [comment('hsliuustc0106', report({ writer: 'hsliuustc0106' }), '2026-10-18T01:00:00Z', 'comment', 'CONTRIBUTOR')]
+  const calls = []
+  const gh = (_cmd, path) => { calls.push(path); return JSON.stringify({ permission: 'admin', role_name: 'admin' }) }
+  const admins = adminsFor({ gh, repo: 'ThinkFlowLab/FlyBot', reports, policy: selfPolicy, author: 'opener' })
+  assert.deepEqual(admins, ['hsliuustc0106'], 'a selfReview login on someone else\'s pull request is looked up')
+  assert.deepEqual(calls, ['repos/ThinkFlowLab/FlyBot/collaborators/hsliuustc0106/permission'], 'asked exactly once')
+
+  const r = decide({ head: HEAD, author: 'opener', reports, policy: selfPolicy, admins })
+  assert.equal(r.ok, true, r.reason)
+  assert.equal(r.by, 'hsliuustc0106')
+
+  // Identical fixture, no admin evidence: this is exactly #931's negative case (asserted there, not
+  // restated here, so that case stays the single red when the carve-out is widened).
+  assert.deepEqual(adminsFor({ gh: (_cmd, path) => { calls.push(path); return JSON.stringify({ permission: 'write' }) }, repo: 'ThinkFlowLab/FlyBot', reports, policy: selfPolicy, author: 'opener' }), [])
+
+  // Their own pull request: the `selfReview` carve-out already qualifies the report, so no lookup.
+  const ownCalls = []
+  const own = adminsFor({ gh: (_cmd, path) => { ownCalls.push(path); return JSON.stringify({ permission: 'admin' }) }, repo: 'ThinkFlowLab/FlyBot', reports, policy: selfPolicy, author: 'hsliuustc0106' })
+  assert.deepEqual(own, [])
+  assert.deepEqual(ownCalls, [])
 })

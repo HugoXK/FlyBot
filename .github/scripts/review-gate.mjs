@@ -11,6 +11,9 @@
 //   - it is not the pull request author's own report, unless the author is listed in the policy's
 //     `selfReview` (owner decision 2026-10-19: the owner's Bot/agent, acting as Birfy, may PASS
 //     its own pull requests; any other author still needs someone else);
+//   - the login is tied to this repository (#676, #925): `author_association` is OWNER, MEMBER or
+//     COLLABORATOR, the login is this pull request's own author listed in `selfReview`, or
+//     `adminsFor` found repo admin. A CONTRIBUTOR who is none of those is not a conclusion;
 //   - it carries the Verifier block review-pr already writes, with a `Tip SHA:` that is the
 //     head being judged and a `Verdict:`;
 //   - it names its writer in the header: `Written-by: <Bot>` (the older prose `Written by: …` reads
@@ -34,6 +37,51 @@ const SHORT = 12
 // above makes any newest conclusion refuse, so without this an outside comment saying `Verdict: INC`
 // could hold a merge. A comment from anyone else is not a conclusion: it can neither pass nor block.
 const ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR'])
+
+// A conclusion GitHub did not already tie to the repo (OWNER/MEMBER/COLLABORATOR), from a login
+// in `reviewers`, asked once via the collaborator permission API. Anyone else can never pass the
+// reviewers check, so they are not looked up. A `selfReview` login is already qualified on its own
+// pull request (#928), so only that shape is skipped; on anyone else's pull request the permission
+// API is the one thing that can qualify it. Skipping every `selfReview` login left this rule dead —
+// today every reviewer is also in `selfReview`. A comment with no Tip SHA and Verdict is not a
+// conclusion. Metadata read on the token
+// the job already has. Fail closed: no repo, no `gh`, a 403/404, or a body that is not
+// the permission object is not admin. `permission: admin` or `permissions.admin` counts.
+export function adminsFor({ gh, repo, reports, policy, author } = {}) {
+  if (!repo || typeof gh !== 'function') return []
+  const selfReview = new Set((policy?.selfReview ?? []).map((l) => String(l).toLowerCase()))
+  const reviewers = new Set((policy?.reviewers ?? []).map((l) => String(l).toLowerCase()))
+  const authorLogin = String(author ?? '').toLowerCase()
+  const admins = []
+  const seen = new Set()
+  for (const r of reports ?? []) {
+    if (ASSOCIATIONS.has(String(r.association ?? '').toUpperCase())) continue
+    const name = String(r.login ?? '').trim()
+    const key = name.toLowerCase()
+    if (!name || !reviewers.has(key)) continue
+    if (selfReview.has(key) && key === authorLogin) continue
+    const parsed = parseReport(r.body)
+    if (!parsed.tip || !parsed.verdict) continue
+    if (seen.has(key)) continue
+    seen.add(key)
+    let text
+    try {
+      text = gh('api', `repos/${repo}/collaborators/${encodeURIComponent(name)}/permission`)
+    } catch {
+      // Fail closed. A 403 or 404 is not admin.
+      continue
+    }
+    let data
+    try {
+      data = JSON.parse(text)
+    } catch {
+      // A body that is not the permission object is not admin.
+      continue
+    }
+    if (String(data?.permission ?? '').toLowerCase() === 'admin' || data?.permissions?.admin === true) admins.push(name)
+  }
+  return admins
+}
 
 // The last Verifier block in one body: a comment may hold an earlier review that a later
 // one replaced, and only the last block is the verdict the reviewer stands behind.
@@ -137,12 +185,13 @@ const login = (r) => String(r.login ?? '').toLowerCase()
 const where = (r) => `${r.kind === 'review' ? 'review' : 'comment'} by ${r.login}`
 
 // reports: [{ login, body, at, kind, id }] from the comments and review bodies of one PR.
-export function decide({ head, author, reports, policy }) {
+export function decide({ head, author, reports, policy, admins } = {}) {
   const headSha = String(head ?? '').toLowerCase()
   const authorLogin = String(author ?? '').toLowerCase()
   const reviewers = new Set((policy?.reviewers ?? []).map((l) => String(l).toLowerCase()))
   const selfReview = new Set((policy?.selfReview ?? []).map((l) => String(l).toLowerCase()))
   const writers = new Set((policy?.writers ?? []).map((w) => String(w).toLowerCase()))
+  const adminSet = new Set((admins ?? []).map((l) => String(l).toLowerCase()))
   const reasons = [] // reports that do not name this tip at all
   const judged = []
   const atTip = [] // conclusions that name this tip, valid or not, in the order the API returned them
@@ -163,8 +212,11 @@ export function decide({ head, author, reports, policy }) {
     // and still count, but only on its own pull request. That is one exception for one person, not a
     // second reviewers list: the same login judging someone else's pull request keeps every rule
     // below, and #676 still refuses a login nobody listed.
+    // #936 (#925): this gate also accepts a repository admin, the one fact the association stamp gets
+    // wrong for this account. `admins` is what `adminsFor` resolved; it skips no check below.
     const selfOnly = selfReview.has(login(r)) && login(r) === authorLogin
-    if (!ASSOCIATIONS.has(association) && !selfOnly) {
+    const isAdmin = adminSet.has(login(r))
+    if (!ASSOCIATIONS.has(association) && !selfOnly && !isAdmin) {
       reasons.push(`${where(r)}: author association ${association || 'missing'} is not OWNER, MEMBER or COLLABORATOR, so it is not a conclusion`)
       continue
     }
@@ -256,7 +308,8 @@ function main() {
       .map((v) => ({ kind: 'review', login: v.user?.login, body: v.body, at: v.submitted_at, association: v.author_association, url: v.html_url })),
   ]
 
-  const result = decide({ head, author, reports, policy: loadPolicy(policyPath) })
+  const policy = loadPolicy(policyPath)
+  const result = decide({ head, author, reports, policy, admins: adminsFor({ gh, repo, reports, policy, author }) })
   console.log(`review-gate (report only): PR #${pr} tip ${String(head).slice(0, SHORT)} — ${result.ok ? `PASS by ${result.by}` : result.reason}`)
   const text = render(result, { pr, head, author })
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, text + '\n')

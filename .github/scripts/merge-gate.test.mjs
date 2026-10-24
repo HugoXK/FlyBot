@@ -186,6 +186,33 @@ test('#637: a verdict Chief posts for the Reviewer parses like the Reviewer wrot
   assert.equal(result.verdict.by, 'reviewer-agent')
 })
 
+test('#925: a CONTRIBUTOR review by a repo admin passes the queue entry, and a failed lookup does not', () => {
+  const body = firstLine('PASS')
+  const pull = JSON.stringify({ head: { sha: HEAD }, user: { login: 'opener' }, labels: [] })
+  const review = JSON.stringify({ user: { login: 'reviewer-agent' }, body, submitted_at: '2026-10-24T03:42:31Z', author_association: 'CONTRIBUTOR' })
+  const gh = (permission) => (...args) => {
+    const path = args[args.length - 1]
+    if (path.includes('/permission')) {
+      if (permission !== 'admin') throw new Error('404')
+      return JSON.stringify({ permission: 'admin', role_name: 'admin' })
+    }
+    if (path.includes('/files')) return JSON.stringify({ filename: 'core/src/host/turns.js' })
+    if (path.includes('/comments')) return ''
+    if (path.includes('/reviews')) return review
+    if (/\/pulls\/\d+$/.test(path)) return pull
+    throw new Error('fake gh: unexpected ' + path)
+  }
+  const policyPath = join(mkdtempSync(join(tmpdir(), 'merge-gate-policy-')), 'review-policy.json')
+  writeFileSync(policyPath, JSON.stringify({ reviewers: ['reviewer-agent'], selfReview: [], writers: ['Reviewer'] }))
+  const env = { GITHUB_STEP_SUMMARY: '', REVIEW_POLICY: policyPath, GH_REPO: 'ThinkFlowLab/FlyBot', PR: '925' }
+  const allowed = main({ gh: gh('admin'), env, repo: 'ThinkFlowLab/FlyBot', pr: 925 })
+  assert.equal(allowed.ok, true, allowed.reasons.join('; '))
+  assert.equal(allowed.verdict.by, 'reviewer-agent')
+  const refused = main({ gh: gh('none'), env, repo: 'ThinkFlowLab/FlyBot', pr: 925 })
+  assert.equal(refused.ok, false)
+  assert.match(refused.reasons.join('; '), /author association CONTRIBUTOR/)
+})
+
 test('#637: a body that does not start with the verdict is no conclusion, so the entry is refused', () => {
   const prefixed = ['Verdict (written by Reviewer, posted by Chief)', '', firstLine('PASS')].join('\n')
   const result = runGate({ comments: [apiComment(prefixed, '2026-10-21T12:49:00Z')] })
@@ -411,4 +438,33 @@ test('#660-#663: the fenced Ran block is evidence only with a $ command, and a T
   const r = queueReal(fx, noCommand)
   assert.equal(r.ok, false)
   assert.match(r.reasons.join('; '), /lists no command it ran/)
+})
+
+test('#925: admin does not skip the own-author rule, and selfReview does not carry to someone else\'s pull request', () => {
+  const own = judge({ labels: [], head: HEAD, author: 'reviewer-agent', reports: [say(report(), '2026-10-24T03:42:31Z', 'comment')], policy, admins: ['reviewer-agent'] })
+  assert.equal(own.ok, false, 'admin does not skip the own-author rule')
+  assert.match(own.reasons.join('; '), /own author is not a reviewer/)
+
+  const listed = { reviewers: ['reviewer-agent', 'hsliuustc0106'], selfReview: ['hsliuustc0106'], writers: ['Reviewer'] }
+  const other = judge({
+    labels: [],
+    head: HEAD,
+    author: 'opener',
+    reports: [{ login: 'hsliuustc0106', body: report(), at: '2026-10-24T03:42:31Z', kind: 'comment', association: 'CONTRIBUTOR' }],
+    policy: listed,
+    admins: [],
+  })
+  assert.equal(other.ok, false, 'a selfReview login judging someone else\'s pull request is not exempt (#931)')
+  assert.match(other.reasons.join('; '), /author association CONTRIBUTOR/)
+})
+
+test('#925: a selfReview login with admin on someone else\'s pull request lets the entry through', () => {
+  const listed = { reviewers: ['reviewer-agent', 'hsliuustc0106'], selfReview: ['hsliuustc0106'], writers: ['Reviewer'] }
+  const other = { login: 'hsliuustc0106', body: report(), at: '2026-10-24T03:42:31Z', kind: 'comment', association: 'CONTRIBUTOR' }
+  const refused = judge({ labels: [], head: HEAD, author: 'opener', reports: [other], policy: listed, admins: [] })
+  assert.equal(refused.ok, false)
+  assert.match(refused.reasons.join('; '), /author association CONTRIBUTOR/)
+  const allowed = judge({ labels: [], head: HEAD, author: 'opener', reports: [other], policy: listed, admins: ['hsliuustc0106'] })
+  assert.equal(allowed.ok, true, allowed.reasons.join('; '))
+  assert.equal(allowed.verdict.by, 'hsliuustc0106')
 })

@@ -136,7 +136,9 @@ export function decidePull({ gh = realGh, env = process.env, repo: repoOption, p
 
   // The live head is judged, never a cached one: a push that moved the tip voids the PASS the caller
   // believes it has, and `--sha` lets a caller insist on the head it read a moment ago.
-  const result = judge({ labels, files, head, author: pull.user?.login, reports, policy: loadPolicy(policyPath), expectedHead: expectedHead ?? arg('--sha'), mode: 'queue' })
+  // `judge` asks `adminsFor` when this tier needs a PASS.
+  const policy = loadPolicy(policyPath)
+  const result = judge({ labels, files, head, author: pull.user?.login, reports, policy, gh, repo, expectedHead: expectedHead ?? arg('--sha'), mode: 'queue' })
   const mechanicalRelease = isMechanicalRelease(files.map((f) => f.filename))
   // The branch this repository owns, not a contributor's: `head.repo` is null when the fork was deleted,
   // which is not ours either. Both sides are lower-cased because the repository name in the API paths is
