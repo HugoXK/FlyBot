@@ -725,8 +725,24 @@ export function install(rt) {
     }
     if (job.moved) {
       rt.renewMemory(agent.id)
+      // An armed scheduled task keeps its Session active, and DSH refuses to archive one
+      // (#896): the earlier part's tasks have to finish moving to the fresh part first.
+      await job.scheduleMove?.catch(error => rt.warn('ds-bot: tasks of earlier part %s not moved: %s', agent.id, error))
       await ctx.workspaceRegistry.archiveSession(agent.id)
-        .catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', agent.id, error))
+        .catch(async (error) => {
+          rt.warn('ds-bot: earlier part %s not archived: %s', agent.id, error)
+          // `stopActivity` asks every `workspace/session-stop` provider to stop what it
+          // holds, not only the schedule service, so the retry may only be asked for a
+          // refusal a scheduled task alone caused (#896 review): a job, turn or subagent
+          // that holds the part is left to finish, exactly as before this fix.
+          const kinds = Array.isArray(error?.activity) ? error.activity.map(entry => entry?.kind) : []
+          if (kinds.length === 0 || kinds.some(kind => kind !== 'schedule')) return
+          // A task that could not be moved still holds the part, and leaving it active
+          // forever is the leak #896 is about. Stop its activity, the way a deletion does
+          // (roster.js:450): a finished part is never left running a task nobody sees.
+          await ctx.workspaceRegistry.archiveSession(agent.id, { stopActivity: true })
+            .catch(again => rt.warn('ds-bot: earlier part %s not archived, not even stopped: %s', agent.id, again))
+        })
     }
   }
 
@@ -857,7 +873,10 @@ export function install(rt) {
       await ctx.workspaceRegistry.archiveSession(freshId).catch(() => { /* best effort */ })
       throw error
     }
-    void rt.moveSchedules(agent.id, freshId)
+    // The earlier part may not be archived while this move still holds its tasks (#896), so
+    // the switch keeps the promise and waits for it before archiving; the handoff goes on now.
+    job.scheduleMove = rt.moveSchedules(agent.id, freshId)
+    job.scheduleMove.catch(error => rt.warn('ds-bot: tasks of %s not moved: %s', agent.id, error))
     // The old part's held input goes on here. Mark the move done only once it was handed on, so a
     // failure lets the finalizer retry it on the part that is now current.
     const held = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
