@@ -2004,17 +2004,146 @@ diff --git a/src/client/voice.js b/src/client/voice.js
 diff --git a/src/host/agents.js b/src/host/agents.js
 --- a/src/host/agents.js
 +++ b/src/host/agents.js
-@@ -129,8 +129,8 @@ export function install(rt) {
+@@ -77,6 +77,13 @@ export function install(rt) {
+     const readOnly = rt.readOnly()
+     if (readOnly !== undefined) throw new Error(readOnly)
+   }
++  // A change made outside a request may start in a window that was read-only only because
++  // the other dsh had the team open: refresh first — it adopts what that host left and
++  // takes the free lock (#1027, #1032) — then refuse if the lock is still someone else's.
++  const beforeWrite = async () => {
++    if (rt.readOnly() !== undefined) await rt.refresh()
++    writeCheck()
++  }
+   const record = (agentId) => {
+     const agent = state.agents[agentId]
+     if (agent === undefined) throw new Error('Unknown DSH Agent')
+@@ -84,16 +84,15 @@ export function install(rt) {
+   }
+ 
+   async function createAgentSession(agentId, workspaceId) {
+-    writeCheck()
+-    const agent = record(agentId)
++    record(agentId)
++    await beforeWrite()
+     // A known workspace id wins (the Agent's latest Session may live outside the
+     // team workspace after a workspace switch); anything else gets the team's own.
+     const target = typeof workspaceId === 'string' && ctx.workspaceRegistry.get(workspaceId)
+       ? workspaceId
+       : await rt.ensureWorkspace()
+     const { sessionId } = await ctx.sessionController.create({ workspaceId: target })
+-    agent.sessions.push(sessionId)
+-    await rt.save()
++    await rt.mutate(() => { record(agentId).sessions.push(sessionId) })
+     // agent/created fired before the session joined the index, so restrict again now.
+     await restrictTeamTools(await rt.resolveAgent(sessionId))
+     return sessionId
+@@ -103,48 +103,54 @@ export function install(rt) {
+   // picker or a fork) is adopted into the same Agent: it keeps dsh's surface and
+   // the team tools stay hidden.
+   async function adoptAgentSession(agentId, sessionId) {
+-    writeCheck()
+-    const agent = record(agentId)
+-    if (agent.sessions.includes(sessionId)) return sessionId
++    record(agentId)
++    await beforeWrite()
++    if (record(agentId).sessions.includes(sessionId)) return sessionId
+     await rt.resolveAgent(sessionId)
+-    const owned = rt.selfOf(sessionId) !== undefined || rt.botOf(sessionId) !== undefined
+-      || rt.roomOf(sessionId) !== undefined || agentOf(sessionId) !== undefined
+-    if (owned) throw new Error('Session already belongs to the team')
+-    agent.sessions.push(sessionId)
+-    await rt.save()
++    // The ownership check reads the records, so it runs inside the change, after the adopt.
++    await rt.mutate(() => {
++      const owned = rt.selfOf(sessionId) !== undefined || rt.botOf(sessionId) !== undefined
++        || rt.roomOf(sessionId) !== undefined || agentOf(sessionId) !== undefined
++      if (owned) throw new Error('Session already belongs to the team')
++      const agent = record(agentId)
++      if (!agent.sessions.includes(sessionId)) agent.sessions.push(sessionId)
++    })
+     await restrictTeamTools(await rt.resolveAgent(sessionId))
+     return sessionId
+   }
+ 
+   async function addAgent() {
+-    writeCheck()
+-    if (Object.keys(state.agents).length > 0) throw new Error('The team already has a DSH Agent')
+-    const agent = { id: randomUUID(), name: AGENT_NAME, sessions: [], createdAt: Date.now() }
+-    state.agents[agent.id] = agent
++    const id = randomUUID()
++    await rt.mutate(() => {
++      writeCheck()
++      if (Object.keys(state.agents).length > 0) throw new Error('The team already has a DSH Agent')
++      state.agents[id] = { id, name: AGENT_NAME, sessions: [], createdAt: Date.now() }
++    })
+     try {
+-      await createAgentSession(agent.id)
++      await createAgentSession(id)
+     } catch (error) {
+       // The first Session may already be created and saved: archive it and
+       // persist the rollback, or the Agent returns on restart with its team
        // tools never denied.
-       const createdSessions = [...agent.sessions]
-       delete state.agents[agent.id]
+-      const createdSessions = [...agent.sessions]
+-      delete state.agents[agent.id]
 -      for (const sessionId of createdSessions) await ctx.workspaceRegistry.archiveSession(sessionId).catch(() => {})
 -      await rt.save().catch(() => {})
++      const createdSessions = [...record(id).sessions]
++      await rt.mutate(() => { delete state.agents[id] }).catch(() => { /* rollback is best effort; the original error is what the caller sees */ })
 +      for (const sessionId of createdSessions) await ctx.workspaceRegistry.archiveSession(sessionId).catch(() => { /* rollback is best effort; the original error is what the caller sees */ })
-+      await rt.save().catch(() => { /* rollback is best effort; the original error is what the caller sees */ })
        throw error
      }
-     return agent
+-    return agent
++    return record(id)
+   }
+ 
+   async function archiveAgentSession(agentId, sessionId) {
+-    writeCheck()
+-    const agent = record(agentId)
+-    if (!agent.sessions.includes(sessionId)) throw new Error('Session does not belong to the DSH Agent')
++    record(agentId)
++    await beforeWrite()
++    if (!record(agentId).sessions.includes(sessionId)) throw new Error('Session does not belong to the DSH Agent')
+     // Archive first: the Session leaves the Agent only once it is actually gone,
+     // so a failed archive stays retryable and keeps its tool restriction.
+     await ctx.workspaceRegistry.archiveSession(sessionId)
+-    agent.sessions = agent.sessions.filter(id => id !== sessionId)
+-    await rt.save()
++    await rt.mutate(() => {
++      const agent = record(agentId)
++      agent.sessions = agent.sessions.filter(id => id !== sessionId)
++    })
+   }
+ 
+   async function renameAgentSession(agentId, sessionId, title) {
+@@ -158,9 +158,9 @@ export function install(rt) {
+   }
+ 
+   async function removeAgent(agentId) {
+-    writeCheck()
+-    const agent = record(agentId)
+-    const sessions = [...agent.sessions]
++    record(agentId)
++    await beforeWrite()
++    const sessions = [...record(agentId).sessions]
+     const kept = []
+     let failure
+     for (const sessionId of sessions) {
+@@ -174,12 +174,10 @@ export function install(rt) {
+     // What could not be archived stays with the Agent, so it keeps its tool
+     // restriction and the removal can be retried from the same place.
+     if (kept.length > 0) {
+-      agent.sessions = kept
+-      await rt.save()
++      await rt.mutate(() => { record(agentId).sessions = kept })
+       throw failure
+     }
+-    delete state.agents[agentId]
+-    await rt.save()
++    await rt.mutate(() => { delete state.agents[agentId] })
+   }
+ 
+   Object.assign(rt, { agentOf, addAgent, createAgentSession, adoptAgentSession, archiveAgentSession, renameAgentSession, removeAgent })
 diff --git a/src/host/approvals.js b/src/host/approvals.js
 --- a/src/host/approvals.js
 +++ b/src/host/approvals.js
@@ -6049,33 +6178,19 @@ diff --git a/test/follow-through.test.js b/test/follow-through.test.js
    started.set(home, [...(started.get(home) ?? []), host])
    return host
  }
-@@ -69,21 +85,52 @@
- const freshHome = (t) => {
-   const home = mkdtempSync(join(tmpdir(), 'ds-bot-follow-'))
-   writeFileSync(join(home, 'state.json'), JSON.stringify(seed()))
--  t.after(async () => {
--    await Promise.all((started.get(home) ?? []).map(host => host.stop()))
--    started.delete(home)
--    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
--  })
--  return home
--}
+@@ -72,15 +72,46 @@ const freshHome = (t) => {
+   t.after(async () => {
+     await Promise.all((started.get(home) ?? []).map(host => host.stop()))
+     started.delete(home)
++    durable.delete(home)
+     rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
+   })
+   return home
+ }
 -const settle = async (check) => {
 -  const until = Date.now() + 3000
 -  while (!check() && Date.now() < until) await new Promise(resolve => setImmediate(resolve))
 -  assert.ok(check(), 'condition not reached')
--}
--const text = message => message.content.map(block => block.text ?? '').join('\n')
--const notes = (home) => {
--  try { return JSON.parse(readFileSync(join(home, 'inflight.json'), 'utf8')) } catch { return { turns: {}, queued: {} } }
-+  t.after(async () => {
-+    await Promise.all((started.get(home) ?? []).map(host => host.stop()))
-+    started.delete(home)
-+    durable.delete(home)
-+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
-+  })
-+  return home
-+}
 +// The timers a case mocked, if any. A wait must advance that clock: `setImmediate` rounds alone can
 +// never fire a mocked `setTimeout`, so a wall-clock deadline would decide a race the test controls (#821).
 +let mockedTimers
@@ -6105,18 +6220,15 @@ diff --git a/test/follow-through.test.js b/test/follow-through.test.js
 +    await new Promise(resolve => setImmediate(resolve))
 +  }
 +  return check()
-+}
+ }
 +const settle = async (check) => { assert.ok(await waitFor(check), 'condition not reached') }
 +// Writes to `inflight.json` land on a later tick; after a mock-timer tick and after `stop()` the file
 +// can still hold the previous write. Wait for them rather than reading early (the note of a failed
 +// pickup is only proved kept once the clearing write has landed and been replaced).
 +const flushWrites = async (rounds = 20) => { for (let i = 0; i < rounds; i++) await new Promise(resolve => setImmediate(resolve)) }
-+const text = message => message.content.map(block => block.text ?? '').join('\n')
-+const notes = (home) => {
-+  try { return JSON.parse(readFileSync(join(home, 'inflight.json'), 'utf8')) } catch { return { turns: {}, queued: {} } }
- }
- const inflight = home => notes(home).turns ?? {}
- // A message as DSH would replay it: the turn starts and takes it up.
+ const text = message => message.content.map(block => block.text ?? '').join('\n')
+ const notes = (home) => {
+   try { return JSON.parse(readFileSync(join(home, 'inflight.json'), 'utf8')) } catch { return { turns: {}, queued: {} } }
 @@ -104,7 +104,7 @@ async function openRoomTurn(t, host) {
  }
  
@@ -6335,7 +6447,8 @@ diff --git a/test/follow-through.test.js b/test/follow-through.test.js
  const WRITTEN = 'Checking now.\n<tool_call>\n<function=pwsh>\n<parameter=command>\nGet-ChildItem E:\\\n</parameter>\n</function>\n</tool_call>'
  
  test('a tool call written as text gets one more turn on the same round slot', async (t) => {
-@@ -284,5 +284,17 @@
+@@ -283,6 +283,18 @@ test('in its own chat, a Bot that wrote a tool call as text is asked to make it'
+   assert.match(text(retry), /^\[Your last reply wrote a tool call as text, so nothing ran\]/)
  })
  
 +test('a real-clock wait outlives its round budget (#1012)', async () => {
@@ -6353,7 +6466,6 @@ diff --git a/test/follow-through.test.js b/test/follow-through.test.js
  test('a written tool call is told apart from text about one', () => {
    assert.equal(writesToolCall(WRITTEN), true)
    assert.equal(writesToolCall('<function=read>\n<parameter=path>a.md</parameter></function>'), true)
-
 diff --git a/test/group-status.test.js b/test/group-status.test.js
 --- a/test/group-status.test.js
 +++ b/test/group-status.test.js
@@ -6705,7 +6817,7 @@ diff --git a/test/history.test.js b/test/history.test.js
 diff --git a/test/home-lock.test.js b/test/home-lock.test.js
 --- a/test/home-lock.test.js
 +++ b/test/home-lock.test.js
-@@ -5,7 +5,7 @@
+@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from 'node:module'
  import { hostname, tmpdir } from 'node:os'
  import { join } from 'node:path'
  import { test } from 'node:test'
@@ -6714,7 +6826,7 @@ diff --git a/test/home-lock.test.js b/test/home-lock.test.js
  import { homeLock } from '../src/host/home-lock.js'
  import { fakeContext } from './fake-ctx.js'
  
-@@ -118,10 +118,14 @@
+@@ -118,10 +118,14 @@ function start(t, home) {
      route = options
      return register(options)
    }
@@ -6814,7 +6926,6 @@ diff --git a/test/home-lock.test.js b/test/home-lock.test.js
 +  fb.remote.publish([{ handle: '@a.b.home', name: 'A' }])
 +  assert.deepEqual(fb.remote.list(), [])
 +})
-
 diff --git a/test/images.test.js b/test/images.test.js
 --- a/test/images.test.js
 +++ b/test/images.test.js
