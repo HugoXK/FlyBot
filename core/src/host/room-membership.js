@@ -36,7 +36,7 @@
 import { randomBytes } from 'node:crypto'
 import { cleanPeerName, disambiguatedRemoteTitle, faceAliases, isChiefRecord, remoteBotName, remoteBotTitle, remoteCallName, sharedRoomTitle } from '../shared/remote-label.js'
 import { formatFaceRoomTitle, isAutoFaceTitle, faceRoomCreatedAt } from '../shared/face-title.js'
-import { HISTORY_MAX, HISTORY_TEXT, encodeRoomShare, parseRoomInviteLink, parseRoomShare, roomInviteUrl } from '../shared/room-share.js'
+import { HISTORY_MAX, HISTORY_TEXT, ROOM_SHARE_TEXT_MAX, encodeRoomShare, parseRoomInviteLink, parseRoomShare, roomInviteUrl } from '../shared/room-share.js'
 import { cleanFaceLead, cleanRoleLabel, faceLeadOf } from './face-lead.js'
 import { cleanName, fenceUntrusted, isFencedUntrusted, unwrapUntrusted } from './delivery.js'
 import { hasAnyGrant, mayShareRoom } from './reach.js'
@@ -976,18 +976,26 @@ export function install(rt) {
   async function sendShareTo(room, remote, payload, via, sender, scope) {
     const from = sender ?? shareSpeaker(room)
     if (!from || !rt.flybotSend) return undefined
+    const text = encodeRoomShare(payload)
+    // Bot Social answers `payload.text (1-4000 chars) required` and drops the share (#1161).
+    if (text.length < 1 || text.length > ROOM_SHARE_TEXT_MAX) {
+      rt.warn?.('ds-bot: room share not sent to %s: payload.text (1-4000 chars) required', remote.handle || remote.id)
+      return undefined
+    }
     try {
       // The answer says whether the send went out, is held for the owner, or was refused (#825 D):
       // a held or refused reply has to become one line in the room instead of nothing.
       return await rt.flybotSend({
         from,
         to: remote.handle || remote.id,
-        text: encodeRoomShare(payload),
+        text,
         role: 'request',
         via,
         meta: { roomId: room.id, seq: payload.seq, share: payload.op, ...(scope ? { scope } : {}) },
       })
     } catch (error) {
+      // Still on the owner's card (#1161). `allow` would record the seat as told and never retry.
+      if (error?.code === 'pending_approval') return { action: 'hold' }
       rt.warn?.('ds-bot: room share not sent to %s: %s', remote.handle || remote.id, error)
       return undefined
     }
@@ -1827,49 +1835,110 @@ export function install(rt) {
   // and it can be refused, held, or never read (a room-only Bot is not polled). The claim is the
   // authority either way: read every open server link and seat the homes it names. A room that
   // cannot be shown, or a notice that does not leave, stays on the link as `waiting` for the owner.
-  rt.seatOpenClaims = async function seatOpenClaims({ roomId, force = false } = {}) {
-    if (typeof rt.roomInviteServer?.verify !== 'function') return { seated: [], waiting: [] }
-    const wanted = roomId === undefined || roomId === null || roomId === '' ? undefined : String(roomId)
-    const rooms = wanted ? [rt.roomOf(wanted)].filter(Boolean) : Object.values(state.rooms || {})
-    const seated = []
+  // #1161: Bot Social counts each preview against the same address budget as a face-code attempt
+  // (20 in 10 minutes). The inbox poll used to preview every open link on every tick, so a home
+  // that stayed open could never see the next claim. One open link per quiet read, a minute apart,
+  // stays under that budget. Seat them (`force` or one room) still reads at once. A `rate_limited`
+  // or `locked_out` answer pauses the quiet reads for the server's retry, at least a minute and at
+  // most the budget window. The clock is only moved after a preview that answered, so a network
+  // error is tried again on the next tick. Prod (u-682b8a) logged the preview as
+  // `Too many attempts. Try again in 10 minutes.` and then previewed again on every poll, so that
+  // 10 minutes never elapsed and the claim was never read.
+  const CLAIM_READ_GAP_MS = 60_000
+  const CLAIM_READ_PAUSE_MAX_MS = 10 * 60 * 1000
+  let claimReadAt = null
+  let claimReadPauseUntil = 0
+  let claimReadCursor = 0
+  const claimWaiting = (rooms) => {
     const waiting = []
     for (const room of rooms) {
       if (!room || room.origin === 'inbound-share' || isFaceRoom(room)) continue
       for (const invite of invitesOf(room)) {
+        if (invite.server !== true || !openInvite(invite) || !invite.waiting) continue
+        waiting.push({ roomId: room.id, ticket: invite.ticket, reason: invite.waiting.reason, bots: invite.waiting.bots ?? [] })
+      }
+    }
+    return waiting
+  }
+  // `retryAfter` is seconds when the client kept it. The sentence the host logged
+  // (`Try again in 10 minutes.`) is the same fact when only the message arrives.
+  const attemptLimitMs = (error) => {
+    const code = String(error?.code ?? '')
+    const message = String(error?.message ?? error ?? '')
+    if (code !== 'rate_limited' && code !== 'locked_out' && !/too many attempts/i.test(message)) return 0
+    const seconds = Number(error?.retryAfter ?? error?.retry_after)
+    if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000
+    const minutes = message.match(/(\d+)\s+minutes?/i)
+    if (minutes) return Number(minutes[1]) * 60 * 1000
+    const secs = message.match(/(\d+)\s+seconds?/i)
+    if (secs) return Number(secs[1]) * 1000
+    return CLAIM_READ_PAUSE_MAX_MS
+  }
+  rt.seatOpenClaims = async function seatOpenClaims({ roomId, force = false, now = Date.now() } = {}) {
+    if (typeof rt.roomInviteServer?.verify !== 'function') return { seated: [], waiting: [] }
+    const wanted = roomId === undefined || roomId === null || roomId === '' ? undefined : String(roomId)
+    const rooms = wanted ? [rt.roomOf(wanted)].filter(Boolean) : Object.values(state.rooms || {})
+    const polling = !force && wanted === undefined
+    if (polling && (now < claimReadPauseUntil || (claimReadAt !== null && now - claimReadAt < CLAIM_READ_GAP_MS))) {
+      return { seated: [], waiting: claimWaiting(rooms) }
+    }
+    const open = []
+    for (const room of rooms) {
+      if (!room || room.origin === 'inbound-share' || isFaceRoom(room)) continue
+      for (const invite of invitesOf(room)) {
         if (invite.server !== true || !openInvite(invite)) continue
-        let claim
-        try {
-          claim = await rt.roomInviteServer.verify(invite.ticket)
-        } catch (error) {
-          rt.warn?.('ds-bot: a room link claim was not read: %s', error)
+        open.push({ room, invite })
+      }
+    }
+    let batch = open
+    let cursor = claimReadCursor
+    if (polling) {
+      if (open.length === 0) return { seated: [], waiting: [] }
+      cursor = claimReadCursor % open.length
+      batch = [open[cursor]]
+    }
+    const seated = []
+    const seen = new Set(batch.map(item => item.invite.ticket))
+    const waiting = claimWaiting(rooms).filter(item => !seen.has(item.ticket))
+    for (const { room, invite } of batch) {
+      let claim
+      try {
+        claim = await rt.roomInviteServer.verify(invite.ticket)
+      } catch (error) {
+        const wait = attemptLimitMs(error)
+        if (wait > 0) claimReadPauseUntil = now + Math.min(CLAIM_READ_PAUSE_MAX_MS, Math.max(CLAIM_READ_GAP_MS, wait))
+        rt.warn?.('ds-bot: a room link claim was not read: %s', error)
+        if (invite.waiting) waiting.push({ roomId: room.id, ticket: invite.ticket, reason: invite.waiting.reason, bots: invite.waiting.bots ?? [] })
+        if (wait > 0) break
+        continue
+      }
+      claimReadAt = now
+      if (polling) claimReadCursor = (cursor + 1) % open.length
+      if (!claim || String(claim.roomId ?? '') !== room.id) continue
+      const claims = (Array.isArray(claim.claimers) ? claim.claimers : claim.claimer ? [claim.claimer] : []).filter(c => botsOfClaim(c).length > 0)
+      const mark = () => JSON.stringify({ waiting: invite.waiting ?? null, told: invite.told ?? null, held: invite.held ?? null, tries: invite.tellTries ?? null })
+      const before = mark()
+      let blocked = null
+      if (claims.length === 0) {
+        if (invite.waiting) delete invite.waiting
+      } else for (const mine of claims) {
+        const admitted = await admitClaim(room, invite, mine, botsOfClaim(mine)[0])
+        if (admitted.refused === 'not-addable') {
+          blocked = { reason: 'not-addable', bots: admitted.bots ?? [] }
           continue
         }
-        if (!claim || String(claim.roomId ?? '') !== room.id) continue
-        const claims = (Array.isArray(claim.claimers) ? claim.claimers : claim.claimer ? [claim.claimer] : []).filter(c => botsOfClaim(c).length > 0)
-        const mark = () => JSON.stringify({ waiting: invite.waiting ?? null, told: invite.told ?? null, held: invite.held ?? null, tries: invite.tellTries ?? null })
-        const before = mark()
-        let blocked = null
-        if (claims.length === 0) {
-          if (invite.waiting) delete invite.waiting
-        } else for (const mine of claims) {
-          const admitted = await admitClaim(room, invite, mine, botsOfClaim(mine)[0])
-          if (admitted.refused === 'not-addable') {
-            blocked = { reason: 'not-addable', bots: admitted.bots ?? [] }
-            continue
-          }
-          if (admitted.refused) continue
-          seated.push(...(admitted.fresh ?? []))
-          const outcome = await tellSeats(room, invite, admitted.seats ?? [], { force })
-          if (outcome === 'not-delivered') blocked = blocked ?? { reason: 'not-delivered', bots: [] }
-          else if (outcome === 'held') blocked = blocked ?? { reason: 'held', bots: [] }
-        }
-        if (claims.length > 0) {
-          if (blocked) invite.waiting = { reason: blocked.reason, bots: blocked.bots, at: invite.waiting?.at ?? Date.now() }
-          else if (invite.waiting) delete invite.waiting
-        }
-        if (mark() !== before) await rt.save?.()
-        if (invite.waiting) waiting.push({ roomId: room.id, ticket: invite.ticket, reason: invite.waiting.reason, bots: invite.waiting.bots ?? [] })
+        if (admitted.refused) continue
+        seated.push(...(admitted.fresh ?? []))
+        const outcome = await tellSeats(room, invite, admitted.seats ?? [], { force })
+        if (outcome === 'not-delivered') blocked = blocked ?? { reason: 'not-delivered', bots: [] }
+        else if (outcome === 'held') blocked = blocked ?? { reason: 'held', bots: [] }
       }
+      if (claims.length > 0) {
+        if (blocked) invite.waiting = { reason: blocked.reason, bots: blocked.bots, at: invite.waiting?.at ?? Date.now() }
+        else if (invite.waiting) delete invite.waiting
+      }
+      if (mark() !== before) await rt.save?.()
+      if (invite.waiting) waiting.push({ roomId: room.id, ticket: invite.ticket, reason: invite.waiting.reason, bots: invite.waiting.bots ?? [] })
     }
     return { seated, waiting }
   }

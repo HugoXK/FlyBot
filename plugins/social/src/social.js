@@ -1855,10 +1855,25 @@ export function createSocial(service, config = {}, { client: given, api: givenAp
     const member = activeMember(msg.from)
     if (!member) throw new Error(`${flybot.bot.get(msg.from)?.name ?? 'This Bot'} has no Bot Social identity yet`)
     const to = norm(msg.target.handle)
-    const sent = await client.callTool('send_as_member', { from_bot_id: member.bot_id, to, text: msg.text, room_id: pair.scope })
+    const text = String(msg.text ?? '')
+    // The same refusal the host logged: `payload.text (1-4000 chars) required` (#1161).
+    if (text.length < 1 || text.length > 4000) {
+      throw Object.assign(new Error('payload.text (1-4000 chars) required'), { code: 'invalid_request' })
+    }
+    const sent = await client.callTool('send_as_member', { from_bot_id: member.bot_id, to, text, room_id: pair.scope })
       .catch((error) => { if (isPaused(error)) notePaused(to, error); throw error })
     clearPaused(to)
-    if (sent?.message?.status === 'pending_approval') await autoSendRoomEnvelope(sent)
+    if (sent?.message?.status === 'pending_approval') {
+      const cleared = await autoSendRoomEnvelope(sent)
+      // A blanket hold that cleared did leave. A finding is still on its card, so the host must not
+      // record the seat as told (#1161). A hold the server has not listed yet is not a finding: the
+      // next read tries again.
+      if (cleared !== true) {
+        throw Object.assign(new Error('This group update is still waiting for approval.'), {
+          code: cleared === 'kept' ? 'pending_approval' : 'pending_unlisted',
+        })
+      }
+    }
     return { exchangeId: sent?.message?.message_id ?? msg.exchangeId }
   }
 
@@ -1995,7 +2010,7 @@ export function createSocial(service, config = {}, { client: given, api: givenAp
         warn(`room envelope: Bot Social has not listed the hold ${approvalId} yet; it waits on its card`)
         return false
       }
-      if (!(holdIsBlanket(held) || roomPolicyClears(held))) return false
+      if (!(holdIsBlanket(held) || roomPolicyClears(held))) return 'kept'
       await confirmedCall('decide_approval', { approval_id: approvalId, decision: 'approved' })
       return true
     } catch (error) {

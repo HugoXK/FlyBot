@@ -23,6 +23,82 @@ export const NOTICE_MAX = 2000
 // backfill (an older host); an empty list means the room had no chat lines.
 export const HISTORY_MAX = 20
 export const HISTORY_TEXT = 2000
+// Bot Social rejects `send_as_member` text longer than this. A join that carries the room's chat
+// used to exceed it, so the seat was made and the joiner never got the sidebar row (#1161).
+export const ROOM_SHARE_TEXT_MAX = 4000
+// The instruction-override half of Bot Social's injection detector (plugins/social `ROOM_INSTRUCTION_OVERRIDE`).
+// A join that copies one of these lines is held and, until #1161, marked as already sent. Leave them out
+// of the join; the owner's card still decides a later line that says the same thing.
+const JOIN_HELD_TEXT = [
+  /ignore (all |any )?(previous|prior|above) (instructions|prompts)/i,
+  /忽略(之前|以上|前面|先前)的?(所有)?(指令|提示|设定)/,
+  /(system prompt|系统提示|developer message)/i,
+  /\[(SYSTEM|ADMIN|PLATFORM)\]|<\/?system>/i,
+  /(send|forward|reveal|leak) (me )?(all|every|your owner'?s?)/i,
+]
+
+function joinTextHeld(text) {
+  return JOIN_HELD_TEXT.some(pattern => pattern.test(String(text ?? '')))
+}
+
+// A join has to fit the transport and must not carry a line that would hold the whole envelope.
+// History that was emptied to fit is omitted (absent means don't backfill; `[]` means there were no lines).
+// A roster emptied the same way is omitted (`[]` would tell the guest this home keeps no Bots).
+function fitJoin(body) {
+  if (Array.isArray(body.history)) {
+    const had = body.history.length
+    body.history = body.history.filter(line => !joinTextHeld(line.text))
+    if (had > 0 && body.history.length === 0) delete body.history
+  }
+  if (typeof body.notice === 'string' && joinTextHeld(body.notice)) delete body.notice
+  const wire = () => `${ROOM_SHARE_MARK}\n${JSON.stringify(body)}`
+  let trimmedHistory = false
+  while (Array.isArray(body.history) && body.history.length > 0 && wire().length > ROOM_SHARE_TEXT_MAX) {
+    body.history.shift()
+    trimmedHistory = true
+  }
+  if (trimmedHistory && body.history.length === 0) delete body.history
+  if (typeof body.notice === 'string' && wire().length > ROOM_SHARE_TEXT_MAX) {
+    while (body.notice.length > 0 && wire().length > ROOM_SHARE_TEXT_MAX) {
+      const extra = wire().length - ROOM_SHARE_TEXT_MAX
+      body.notice = body.notice.slice(0, Math.max(0, body.notice.length - extra))
+    }
+    if (body.notice.length === 0) delete body.notice
+  }
+  if (Array.isArray(body.roster) && body.roster.length > 0 && wire().length > ROOM_SHARE_TEXT_MAX) {
+    while (body.roster.length > 0 && wire().length > ROOM_SHARE_TEXT_MAX) body.roster.pop()
+    if (body.roster.length === 0) delete body.roster
+  }
+}
+
+// Bot Social rejects send_as_member text outside 1–4000 characters (`payload.text (1-4000 chars) required`).
+// A join is fitted above; a line's own text is the other way an envelope crosses that line (#1161).
+function fitTransport(body) {
+  if (body.op === 'join') fitJoin(body)
+  const wire = () => `${ROOM_SHARE_MARK}\n${JSON.stringify(body)}`
+  if (typeof body.text === 'string') {
+    while (body.text.length > 0 && wire().length > ROOM_SHARE_TEXT_MAX) {
+      const extra = Math.max(1, wire().length - ROOM_SHARE_TEXT_MAX)
+      body.text = body.text.slice(0, Math.max(0, body.text.length - extra))
+    }
+    if (!body.text) delete body.text
+  }
+  for (const key of ['history', 'calls', 'bots', 'roster', 'notice']) {
+    if (wire().length <= ROOM_SHARE_TEXT_MAX) break
+    delete body[key]
+  }
+  let out = wire()
+  if (out.length > ROOM_SHARE_TEXT_MAX || out.length < 1) {
+    out = `${ROOM_SHARE_MARK}\n${JSON.stringify({
+      v: 1,
+      op: body.op,
+      ...(body.roomId ? { roomId: String(body.roomId).slice(0, 64) } : {}),
+      ...(body.ticket ? { ticket: body.ticket } : {}),
+      seq: body.seq || 0,
+    })}`
+  }
+  return out
+}
 
 // #904: a handle is unique only inside its home, so an entry carries the home it belongs to: two homes
 // can keep Bots with the same local name, and a guest has to tell them apart when it attributes a line.
@@ -104,7 +180,7 @@ export function encodeRoomShare(payload = {}) {
   if (body.op === 'join' && Array.isArray(payload.history)) {
     body.history = payload.history.map(historyLine).filter(Boolean).slice(-HISTORY_MAX)
   }
-  return `${ROOM_SHARE_MARK}\n${JSON.stringify(body)}`
+  return fitTransport(body)
 }
 
 // #852: a link invitation for a room that lives in FlyBot itself. No server knows this ticket: the
