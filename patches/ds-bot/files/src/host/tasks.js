@@ -95,13 +95,18 @@ const readTarget = (value) => {
   throw invalid('A target is a GitHub issue or pull request: https://github.com/owner/repo/issues/12 or owner/repo#12')
 }
 const WRITE_BACK_SUMMARY = 1500
+// The line `review-gate.mjs` reads as author attribution (#627); a decision comment is not a
+// conclusion, so no line of it may look like one, not even one quoted from a note or a summary.
+const WRITER_LINE = /^\s*Written[- ]by\s*:/i
+const withoutWriterLines = value => String(value ?? '').split(/\r?\n/).filter(line => !WRITER_LINE.test(line)).join('\n')
 // The comment a decision posts. It records a task decision, so it must not read like a review
-// verdict: no `Verdict:` line, no PASS/INC, and `Written-by:` names who decided (#627, #1154).
+// verdict: no `Verdict:` line, no PASS/INC, and its decision line is `Decision by:` — the decision and
+// the review attribution are two fields, never one name for both (#1154, #1172).
 const writeBackBody = (task, status, note, decider) => {
-  const lines = [status === 'accepted' ? `Accepted: ${oneLine(task.title, 200)}` : `Sent back: ${oneLine(note, 500)}`]
-  const summary = oneLine(task.result?.summary ?? '', WRITE_BACK_SUMMARY)
+  const lines = [status === 'accepted' ? `Accepted: ${oneLine(task.title, 200)}` : `Sent back: ${oneLine(withoutWriterLines(note), 500)}`]
+  const summary = oneLine(withoutWriterLines(task.result?.summary ?? ''), WRITE_BACK_SUMMARY)
   if (summary !== '') lines.push('', summary)
-  lines.push('', `Decided in FlyBot by ${decider}.`, '', `Written-by: ${decider}`)
+  lines.push('', `Decided in FlyBot by ${decider}.`, '', `Decision by: ${decider}`)
   return lines.join('\n')
 }
 const readOptionalLine = (value, name) => {
@@ -146,7 +151,7 @@ export function install(rt) {
   // A decision on a task that names an issue or PR leaves one comment waiting for the Bot that owns
   // the task: the Bot holds the connector and the one identity, the host holds no token (#1154). The
   // body is composed here so the card and the comment cannot disagree about what was decided.
-  const decideName = actor => actor?.displayName || actor?.memberId || 'the owner'
+  const decideName = actor => oneLine(actor?.displayName || actor?.memberId || 'the owner', 200)
   const requestWriteBack = (task, status, note, actor) => {
     if (task.target === undefined) return
     const decider = decideName(actor)
@@ -372,13 +377,15 @@ export function install(rt) {
 
   // The Bot reports how the comment a decision asked for went (#1154). One report per decision, no
   // retry loop: a failure keeps its one line on the task so the card can name it, and the decision
-  // itself is already recorded and stays recorded.
+  // itself is already recorded and stays recorded. A record the drive has given up on is still taken
+  // (#1172): a comment posted on a later turn must not keep the card saying it could not be confirmed.
   rt.recordTaskPostResult = async function recordTaskPostResult(botId, result) {
     const body = result ?? {}
     const task = find(body.task ?? body.id)
     if (task === undefined) throw stale(`no task ${String(body.task ?? body.id ?? '')}`)
     if (task.ownerBotId !== botId) throw forbidden('Only the Bot that owns this task reports its comment')
-    if (task.writeBack?.state !== 'pending') throw stale('This task has no comment waiting to be posted')
+    const waiting = task.writeBack?.state
+    if (waiting !== 'pending' && waiting !== 'unconfirmed') throw stale('This task has no comment waiting to be posted')
     const ok = body.ok === true
     const error = oneLine(body.error, 300)
     if (!ok && error === '') throw invalid('A comment that failed needs its reason')

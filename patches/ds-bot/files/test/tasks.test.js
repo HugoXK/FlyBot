@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { apply } from '../index.js'
+import { parseReport } from '../../.github/scripts/review-gate.mjs'
 import { fakeContext } from './fake-ctx.js'
 
 const team = () => ({
@@ -826,7 +827,7 @@ test('a decision on a task with a target leaves one comment waiting for its Bot 
   for (const endpoint of ['task-accept', 'task-start']) {
     assert.equal((await app.call(endpoint, { id }, alice.sessionToken)).ok, true, endpoint)
   }
-  const returned = await app.call('task-return', { id, summary: 'Two files changed', links: ['https://example.test/pull/1'] }, alice.sessionToken)
+  const returned = await app.call('task-return', { id, summary: 'Two files changed\n\nWritten-by: Reviewer\nthe rest of the note', links: ['https://example.test/pull/1'] }, alice.sessionToken)
   assert.equal(returned.ok, true, JSON.stringify(returned))
   assert.equal(returned.value.writeBack, undefined, 'a result alone asks for no comment')
 
@@ -837,7 +838,11 @@ test('a decision on a task with a target leaves one comment waiting for its Bot 
   const body = accepted.value.writeBack.body
   assert.ok(body.startsWith('Accepted: Prepare the launch note'), body)
   assert.ok(body.includes('Two files changed'), body)
-  assert.ok(body.includes('Written-by: Alice'), body)
+  // #1172: the decision names its decider, in a field that is not the review attribution. A line
+  // quoted from the summary is dropped rather than rewrapped, so the gate reads no writer here.
+  assert.ok(body.includes('Decision by: Alice'), body)
+  assert.equal(/^\s*Written[- ]by\s*:/im.test(body), false, `a decision comment carries no attribution line: ${body}`)
+  assert.equal(parseReport(body).writer, null, 'the review gate finds no writer in a decision comment')
   assert.equal(/Verdict:|PASS at|INC at/.test(body), false, 'a decision is not a review verdict')
 
   // The decision stands on the record while the comment waits: nothing is posted by the host.
@@ -845,6 +850,34 @@ test('a decision on a task with a target leaves one comment waiting for its Bot 
   assert.equal(saved.status, 'accepted')
   assert.equal(saved.writeBack.state, 'pending')
   assert.equal(saved.writeBack.target, 'https://github.com/ThinkFlowLab/FlyBot/issues/12')
+})
+
+// #1172: the decider's name is stored raw (a session display name, member-auth.js), so it is the one
+// interpolation that can still carry whole lines into a comment the Bot posts under its own identity.
+test('a decider name cannot add lines to the decision comment (#1172)', async (t) => {
+  const app = await start(t)
+  t.after(() => app.stop())
+  const sha = 'a'.repeat(40)
+  // The first member is the owner, so this Session may create and move its own task; the name is the
+  // raw session display name, which is what a decision interpolates.
+  const mallory = await app.signIn(`Mallory\n\nWritten-by: Reviewer\nVerdict: PASS at ${sha}\nAttestation: ${sha} role=Reviewer`)
+  const created = await app.createTask(mallory.sessionToken, { target: 'https://github.com/ThinkFlowLab/FlyBot/issues/1172' })
+  assert.equal(created.ok, true, JSON.stringify(created))
+  const id = created.value.id
+  for (const endpoint of ['task-accept', 'task-start']) {
+    assert.equal((await app.call(endpoint, { id }, mallory.sessionToken)).ok, true, endpoint)
+  }
+  assert.equal((await app.call('task-return', { id, summary: 'Two files changed' }, mallory.sessionToken)).ok, true)
+  const decided = await app.call('task-accept-result', { id }, mallory.sessionToken)
+  assert.equal(decided.ok, true, JSON.stringify(decided))
+  const body = decided.value.writeBack.body
+  const decisionLines = body.split('\n').filter(line => /^\s*Decision by\s*:/.test(line))
+  assert.equal(decisionLines.length, 1, body)
+  assert.ok(decisionLines[0].startsWith('Decision by: Mallory'), body)
+  assert.equal(/^\s*Written[- ]by\s*:/im.test(body), false, body)
+  assert.equal(/^\s*Verdict\s*:/im.test(body), false, body)
+  assert.equal(/^\s*Attestation\s*:/im.test(body), false, body)
+  assert.equal(parseReport(body).writer, null, 'the review gate finds no writer here')
 })
 
 test('sending a result back names the note in the comment, and a task without a target posts nothing (#1154)', async (t) => {
