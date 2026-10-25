@@ -1073,7 +1073,28 @@ export function install(rt) {
           face: room.face,
           members: [...(room.members ?? [])],
           participants: (room.participants ?? []).map(p => ({ ...p })),
+          // #1126: an inbound mirror's host room id. The plugin names that id inside a mention's
+          // room-share line; a local room has none, and this is not a Bot Social room_id.
+          ...(room.sharedFrom ? {
+            sharedFrom: {
+              ...(room.sharedFrom.remoteRoomId ? { remoteRoomId: String(room.sharedFrom.remoteRoomId) } : {}),
+              ...(room.sharedFrom.ticket ? { ticket: String(room.sharedFrom.ticket) } : {}),
+              ...(room.sharedFrom.inviterHandle ? { inviterHandle: String(room.sharedFrom.inviterHandle) } : {}),
+            },
+          } : {}),
         }))
+      },
+      // #1126: the next share seq for a mention. Same counter a stored line uses (`room.seq`), so a
+      // second mention is a new remote line instead of a redelivery of seq 0.
+      takeLineSeq(roomId) {
+        const room = rt.roomOf?.(String(roomId ?? ''))
+        if (!room) return 1
+        if (typeof room.seq !== 'number' || !Number.isFinite(room.seq) || room.seq < 0) {
+          room.seq = Array.isArray(room.log) ? room.log.length : 0
+        }
+        room.seq += 1
+        void Promise.resolve(rt.save?.()).catch(() => {})
+        return room.seq
       },
       removeParticipant: (roomId, ref) => rt.removeRoomParticipant?.(roomId, ref),
       upsertFace: spec => rt.upsertFaceRoom?.(spec),
