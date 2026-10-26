@@ -30,6 +30,13 @@ const isSearch = (args) => args.some((a) => a.startsWith('search/issues?'))
 const isCreate = (args) => args.includes('POST') && args.some((a) => a === `repos/${REPO}/issues`)
 const isRuns = (args) => args.some((a) => a.startsWith(`repos/${REPO}/actions/workflows/release.yml/runs`))
 
+// The tags listing is paginated; which page a call asks for is part of the route, because that is the
+// whole point of the fixture below (#1220). No `page=` is page one, which is what the old code asked for.
+const pageOf = (args) => {
+  const url = args.find((a) => a.startsWith(`repos/${REPO}/tags?`)) ?? ''
+  return Number(new URL(url, 'https://api.github.test/').searchParams.get('page') ?? '1')
+}
+
 function happyRoutes({ tagDateInstant = '2026-10-25T10:00:00Z', tags = 'v0.2.8', openTitles = '', searchTotal = '0', created = '{"number": 77}' } = {}) {
   return [
     [isTagList, `${tags}\n`],
@@ -85,6 +92,29 @@ test('the newest tag is semver order, not string order', () => {
   assert.equal(latestOf(['v0.3.0', 'v0.2.99']), 'v0.3.0')
   assert.equal(latestOf(['not-a-tag', 'v1.0.0']), 'v1.0.0')
   assert.equal(latestOf([]), null)
+})
+
+// #1220: `/tags?per_page=100` has no paging, and the names come back in string order while the versions
+// are not (`v0.2.100` sorts below `v0.2.99`). Past 100 tags the newest version can sit on a later page,
+// so one read of page one reports a false "no v* tag since …" every day. This fixture is that repository:
+// page one is 100 older tags and only page two carries today's tag. On the old single read the newest
+// seen is `v0.2.100`, dated yesterday, and the run alerts — the false alarm, red here.
+test('a newest tag past page one is still read: >100 tags must not raise a false miss (#1220)', () => {
+  const pageOne = Array.from({ length: 100 }, (_, i) => `v0.2.${i + 1}`).join('\n')
+  const { gh, calls } = fakeGh([
+    [(args) => isTagList(args) && pageOf(args) === 1, `${pageOne}\n`],
+    [(args) => isTagList(args) && pageOf(args) === 2, 'v0.2.101\n'],
+    [(args) => isTagRef(args) && args.some((a) => a.endsWith('/v0.2.101')), 'commit abc101\n'],
+    [(args) => isCommit(args) && args.some((a) => a.endsWith('/abc101')), '2026-10-26T03:00:00Z\n'],
+    [isTagRef, 'commit c0ffee\n'],
+    [isCommit, '2026-10-25T10:00:00Z\n'],
+    [isPulls, ''],
+    [isSearch, '0'],
+  ])
+  const r = run({ gh, repo: REPO, date: '2026-10-26', open: false, summary: null, write: () => {} })
+  assert.equal(r.action, 'ok', 'the newest tag is dated today, on page two')
+  assert.match(r.reason, /v0\.2\.101/)
+  assert.ok(calls.some((c) => isTagList(c.args) && pageOf(c.args) === 2), 'the second page was read')
 })
 
 test('an annotated tag reads its tagger date; a lightweight tag reads its commit date', () => {
@@ -170,6 +200,12 @@ const workflow = readFileSync(new URL('../workflows/release-beat.yml', import.me
 test('the workflow runs at 02:30 Asia/Shanghai exactly, and its one comment says so', () => {
   assert.match(workflow, /^ {4}- cron: "30 18 \* \* \*" # daily 02:30 Asia\/Shanghai \(the previous day's 18:30 UTC\)$/m)
   assert.deepEqual(workflow.match(/cron: "[^"]*"/g), ['cron: "30 18 * * *"'], 'one cron, and it is this one')
+})
+
+test('the checkout action stays pinned to a full commit (#1220)', () => {
+  // The job holds `issues: write`, so a floating major tag would hand that permission to whatever the
+  // tag points at tomorrow. The same one-line check audit-merges.test.mjs uses for its workflow.
+  assert.match(workflow, /uses: actions\/checkout@[0-9a-f]{40}/, 'actions stay pinned to a commit')
 })
 
 test('permissions are exactly the two this job needs: read at the top, issues: write on the job', () => {
