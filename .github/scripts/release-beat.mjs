@@ -71,8 +71,27 @@ function apiJson(gh, path, jq) {
   return out
 }
 
+// Every page, not the first one (#1220). The listing is 100 names to a page in string order, and a
+// string order is not a version order: `v0.2.100` sorts below `v0.2.99`, so once the repository has more
+// than a page of tags the newest version can sit on page two and a single read reports yesterday's tag —
+// a false "no v* tag since …" every day. Paging to the end is the cheapest way to keep `latestOf`'s
+// semver rule and the pre-release boundary untouched; `/releases/latest` would answer a different
+// question (GitHub's "latest" release, not the highest plain `vX.Y.Z` tag).
+const TAGS_PER_PAGE = 100
+
 export function newestTag(gh, repo) {
-  const names = apiJson(gh, `repos/${repo}/tags?per_page=100`, '.[].name').split('\n').filter(Boolean)
+  const names = []
+  let previous = null
+  for (let page = 1; ; page += 1) {
+    const batch = apiJson(gh, `repos/${repo}/tags?per_page=${TAGS_PER_PAGE}&page=${page}`, '.[].name').split('\n').filter(Boolean)
+    // A server that ignored `page` would hand back the same page forever; the repeated page also
+    // carries no new name, so stopping there loses nothing.
+    const pageText = batch.join('\n')
+    if (pageText === previous) break
+    names.push(...batch)
+    previous = pageText
+    if (batch.length < TAGS_PER_PAGE) break
+  }
   return latestOf(names)
 }
 
