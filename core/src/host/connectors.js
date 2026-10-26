@@ -18,6 +18,8 @@
 
 import { randomUUID } from 'node:crypto'
 import { createNotifier } from './notify.js'
+import { appCredentials, createInbound } from './feishu-inbound.js'
+import { createFeishuTransport } from './feishu-sdk.js'
 
 export const GITHUB = 'github'
 export const GITHUB_SECRET = 'GITHUB_TOKEN'
@@ -316,6 +318,20 @@ export function feishuTransport(webhook, { fetch: request = fetch, timeoutMs = S
   return { postMessage: message => feishuPost(webhook, message?.text ?? '', { fetch: request, timeoutMs }) }
 }
 
+// The way out for an answer to a Feishu message (#1266): the webhook phase 1 already posts on, so a
+// message in and an answer out are one credential and one transport. Kept out of `install` so the
+// exit can be asserted without a socket. A missing webhook or a refusal is a sentence the chat
+// shows ("Not sent: …"), never a silent drop: `remote-chat` prints exactly what is thrown here.
+export function feishuReply({ secretValue, post = feishuPost, timeoutMs = SEND_TIMEOUT_MS } = {}) {
+  return async ({ text }) => {
+    const webhook = secretValue?.(FEISHU_SECRET)
+    if (webhook === undefined) throw new Error('Not sent: connect Feishu first, so the answer has a webhook to leave on.')
+    const answer = await post(webhook, String(text ?? ''), { timeoutMs })
+    if (answer?.ok === true) return
+    throw new Error(`Not sent: Feishu refused the answer (${answer?.error ?? 'no answer'})`)
+  }
+}
+
 const DEFINITIONS = {
   [GITHUB]: {
     id: GITHUB,
@@ -412,6 +428,55 @@ export function install(rt) {
       // between must not mount (the endpoint mounts itself once the connection is saved).
       saving: 0,
     }
+  })
+
+  // Feishu inbound (#1266): a message in Feishu starts a turn here. The socket is injected —
+  // `rt.feishuTransport` is the one adapter the SDK-versus-hand-written decision changes, so nothing
+  // below depends on which client dials. Off unless the owner turned it on, and with no socket adapter
+  // it starts nothing rather than pretend. The message lands through `remote-chat.deliver` — the same
+  // seam a friend's Bot uses — and the answer leaves through the sender this module registers in that
+  // same seam, on the webhook phase 1 posts on: one path in, one path out.
+  //
+  // The default adapter is the official SDK, and it is put on the runtime *before* the policy reads
+  // it. That read happens on every `start()` rather than once here, so an adapter installed later
+  // (a test's stub, a plugin's own client) is the one the next start dials instead of a snapshot
+  // taken while it was missing.
+  if (rt.feishuTransport === undefined) {
+    rt.feishuTransport = createFeishuTransport({
+      credentials: () => appCredentials(name => rt.secretValue(name)),
+      log: (format, ...args) => rt.warn(`ds-bot: ${format}`, ...args),
+    })
+  }
+  // One way out per Feishu chat: `remote-chat` keys a reply's sender by the chat's plugin, so this
+  // registers the webhook post under `feishu`. Registered against the seam object it saw, so a runtime
+  // that replaces the seam is wired again instead of keeping a dead registration.
+  let feishuWire = { seam: undefined, off: undefined }
+  const wireFeishuReply = () => {
+    const seam = rt.remoteChats
+    if (typeof seam?.onSend !== 'function') return
+    if (feishuWire.seam === seam) return
+    feishuWire.off?.()
+    feishuWire = { seam, off: seam.onSend(FEISHU, feishuReply({ secretValue: name => rt.secretValue(name) })) }
+  }
+
+  const feishuInbound = createInbound({
+    enabled: rt.config?.feishu?.enabled === true,
+    ownerOpenId: rt.config?.feishu?.ownerOpenId,
+    transport: () => rt.feishuTransport,
+    deliver: async ({ handle, text, name }) => {
+      const seam = rt.remoteChats
+      if (typeof seam?.deliver !== 'function') throw new Error('no chat seam is installed for a Feishu message')
+      // The seam is installed after this module, so the answer's sender is registered when the first
+      // message lands rather than while module install runs.
+      wireFeishuReply()
+      // `plugin` is what `remote-chat.forward` keys the sender by. Without it the chat is opened with
+      // `remote.plugin === undefined` and every answer reads "Not sent: the plugin that reaches this
+      // Bot is not running." `open` refreshes a chat that an older build opened without the plugin.
+      if (typeof seam.open === 'function') await seam.open({ handle, name, plugin: FEISHU })
+      await seam.deliver({ handle, text, name, plugin: FEISHU })
+    },
+    log: (format, ...args) => rt.warn(`ds-bot: ${format}`, ...args),
+    redact: rt.redactSecrets,
   })
 
   const saved = c => state.connectors?.[c.def.id]
@@ -537,6 +602,7 @@ export function install(rt) {
     ...(c.def.kind !== undefined ? { kind: c.def.kind } : {}),
     account: rt.secretValue(c.def.secret) !== undefined ? c.def.account(saved(c)) : null,
     ...(c.def.extra !== undefined ? c.def.extra(rt.secretValue(c.def.secret) !== undefined ? saved(c) : undefined) : {}),
+    ...(c.def.id === FEISHU ? { inbound: { ...feishuInbound.view(), app: appCredentials(name => rt.secretValue(name)) === undefined ? 'missing' : 'set' } } : {}),
   })
   const connectorsView = () => connectors.filter(c => c.options !== null).map(view)
 
@@ -670,6 +736,10 @@ export function install(rt) {
       const c = known(body.id)
       await rt.loadSecrets()
       await sync(c, true)
+      // "Try again" is one press for the whole row: a Feishu row proves the webhook and, when the
+      // long connection is switched on, dials it again — which is how an adapter installed after the
+      // first attempt comes up without a restart.
+      if (c.def.id === FEISHU) await feishuInbound.start()
       return connectorsView()
     },
     // One message, on demand, once. Nothing posts room traffic on its own: that is a spam
@@ -707,9 +777,17 @@ export function install(rt) {
 
   ctx.effect(() => {
     stopped = false
-    void scrubAddresses().catch(error => rt.warn('ds-bot: connectors: %s', reason(error))).then(() => rt.loadSecrets()).then(syncAll)
+    // The long connection dials once the secrets are loaded: the app pair lives there, so starting
+    // before that read would report a missing app that is in fact saved.
+    void scrubAddresses().catch(error => rt.warn('ds-bot: connectors: %s', reason(error))).then(() => rt.loadSecrets()).then(async () => {
+      await syncAll()
+      if (!stopped) await feishuInbound.start()
+    })
     return () => {
       stopped = true
+      feishuWire.off?.()
+      feishuWire = { seam: undefined, off: undefined }
+      void feishuInbound.stop()
       for (const c of connectors) void unmount(c)
     }
   }, 'ds-bot: connectors')
