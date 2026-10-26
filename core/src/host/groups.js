@@ -30,6 +30,7 @@ import { FACE_LEAD_NOTE, FACE_LEAD_ROUTE, faceLeadIsRemote, faceMemberNote, face
 import { faceMentions } from './face-mentions.js'
 import { cleanName, stripSessionChips, unwrapUntrusted } from './delivery.js'
 import { createRoomParticipants } from './room-participant.js'
+import { ROOM_CONTEXT_BUDGET, boardCoversCue, fitRoomLines, formatRoomBoard, prepareRoomLine } from './room-context.js'
 
 const ROOM_LOG_MAX = 60
 const ROOM_FIRST_LOOK = 12
@@ -156,12 +157,17 @@ export const referenceNote = references => (references?.length
   : '')
 
 const ROOM_REPLY = 'Reply with your message for the group, no name prefix: in a discussion, one or two short messages. When you are asked to do something, do it now with your tools. The group does not wait for you, and your final reply is posted here when you finish, so give the result, never a promise to do it later. Reply [PASS] to stay silent when you have nothing new to add or the message is for someone else.'
+// A group that has a board. Assigning, claiming, and progress are board writes.
+// @Name only wakes. A face-to-face room has no board, so it keeps ROOM_REPLY.
+const ROOM_REPLY_BOARD = 'Reply with your message for the group, no name prefix: in a discussion, one or two short messages. When you are asked to do something, do it now with your tools. The group does not wait for you, and your final reply is posted here when you finish, so give the result, never a promise to do it later. Assigning work, claiming it, and progress are the task board: the overall task, the subtask, the assignee, the column, and the progress, written with track_tasks. @Name only wakes a member whose card already names them; it does not assign or record progress. Do not narrate CI, merge-queue, or review status in the group. When the board already shows it, reply [PASS]. A status meant for someone else is [PASS]. Reply [PASS] to stay silent when you have nothing new to add or the message is for someone else.'
 // The turn's own closing line: the full reply rule above stands in the group's section of the system prompt.
 const ROOM_REPLY_NOW = 'Reply now with your message for the group, no name prefix, or [PASS] to stay silent.'
 // Words that address the whole room: a plain line with one of them may get an answer from each Bot (#299).
 const ROOM_EVERYONE = /大家|你们|各位|所有人|所有 ?[Bb]ot|每个人|每位|各自|分别|everyone|everybody|y'?all|you all|all of you|each of you|introduce yourselves/i
 const ROOM_REPLY_FORCED = 'This turn is the exception to the [PASS] rule: reply with your message for the group, no name prefix, short. Do not reply [PASS].'
 const ROOM_CALLS = 'Writing "@Name" calls that member next, to answer or to do what you ask; when it finishes work you gave it, you answer its result. To only mention a member, write its name without "@".'
+// Same wake, on a room that has a board: the call does not assign or record progress.
+const ROOM_CALLS_BOARD = 'Writing "@Name" wakes that member to answer, or to do the card the board already assigned to it. It does not assign work or record progress. When it finishes that card, you answer its result. To only mention a member, write its name without "@".'
 
 const slotLabel = (slot) => {
   if (slot.status === 'speaking') return `${slot.name} (you, now)`
@@ -283,10 +289,10 @@ export function install(rt) {
     const leadId = typeof rt.taskLeadOf === 'function' ? rt.taskLeadOf(room) : undefined
     if (!leadId) return 'This room has no task lead on the board. Do not divide the work; the user or a Main Bot picks one task lead.'
     if (leadId === member.id) {
-      return 'You are this room\'s task lead (总负责人) for the board. When the group is given a job, record one overall task with track_tasks and assign each part to the Bot it fits (assignee is that Bot\'s name). Nobody else plans. A card you assign is claimed: that Bot starts the work and does not wait for a confirmation. A question stays in this group.'
+      return 'You are this room\'s task lead (总负责人) for the board. When the group is given a job, assign it on the board with track_tasks: one overall task, and a subtask for each part (assignee is that Bot\'s name). Nobody else plans. A chat line does not assign. A card you assign is claimed: that Bot starts the work in its own chat and does not wait for a confirmation. Progress is that card\'s column and progress. A question a person has to decide is one short post in this group; do not @ a Bot to hand the work on.'
     }
     const name = String(rt.botOf(leadId)?.name ?? 'The task lead').replace(/[\r\n]+/g, ' ').slice(0, 80)
-    return `${name} is this room's task lead (总负责人) for the board: it writes the one plan and assigns the parts. Do the card it assigns you, or link your own subtask to that overall task. Do not record a new plan or assign work. Start the work; do not wait for a confirmation. A question about your card goes in your reply here, not in your own chat.`
+    return `${name} is this room's task lead (总负责人) for the board: it assigns the parts on the board. Claim the card it assigns you by setting its column to in-progress with track_tasks, and update that card's column and progress as the work moves. Do not record a new plan, assign work, or post a status in the group. @Name only wakes someone; it does not assign. Start the work in your own chat; do not wait for a confirmation. A question a person has to decide is one short post in this group; do not @ a Bot to hand the work on.`
   }
 
   // What holds for every turn of a member in this group (#894): who is here, how calls work, the
@@ -299,7 +305,8 @@ export function install(rt) {
     const peers = room.members.filter(id => id !== member.id).map(rt.botOf).filter(Boolean)
       .map(bot => `${bot.name}${rt.isAdminOf(room, bot.id) ? ' (admin)' : ''}`)
     const leads = rt.isAdminOf(room, member.id)
-    const members = `${isFaceRoom(room) ? `${faceRoster(room, member, rt.botOf)}\n` : `Members: the user${peers.length ? `, ${peers.join(', ')}` : ''} and you${leads ? ' (admin)' : ''}. `}Members speak one at a time; each message is posted before the next speaker starts. ${ROOM_CALLS}`
+    const face = isFaceRoom(room)
+    const members = `${face ? `${faceRoster(room, member, rt.botOf)}\n` : `Members: the user${peers.length ? `, ${peers.join(', ')}` : ''} and you${leads ? ' (admin)' : ''}. `}Members speak one at a time; each message is posted before the next speaker starts. ${face ? ROOM_CALLS : ROOM_CALLS_BOARD}`
     return [
       '# This group chat',
       'This conversation is where you speak in one group chat. Each turn arrives as a "[Group chat …]" message with what is new and the speaking order; the rules below hold for every turn here.',
@@ -308,7 +315,7 @@ export function install(rt) {
       leads ? adminNote(room) : faceMemberNote(room, member, rt.botOf),
       taskBoardNote(room, member),
       routeRules(room, member),
-      ROOM_REPLY,
+      face ? ROOM_REPLY : ROOM_REPLY_BOARD,
     ].filter(Boolean).join('\n\n')
   }
   const roomSectionFor = (sessionId) => {
@@ -343,18 +350,34 @@ export function install(rt) {
   // The group's standing rules are not repeated here: they are in the section above.
   function roomPrompt(room, member, round) {
     const lines = unseenLines(room, member.id)
-    const earlier = lines.filter(line => line.seq < round.startSeq).slice(-ROOM_EARLIER_MAX)
-    const current = lines.filter(line => line.seq >= round.startSeq)
+    const earlierLines = lines.filter(line => line.seq < round.startSeq).slice(-ROOM_EARLIER_MAX)
+    const currentLines = lines.filter(line => line.seq >= round.startSeq)
+    // Count caps first, then a character budget. Long status essays collapse
+    // inside the budget; the stored log is unchanged (#1203).
+    const fitted = fitRoomLines([...earlierLines, ...currentLines], {
+      budget: ROOM_CONTEXT_BUDGET,
+      render: lineText,
+      prepare: prepareRoomLine,
+    })
+    const earlier = fitted.entries.filter(entry => entry.line.seq < round.startSeq)
+    const current = fitted.entries.filter(entry => entry.line.seq >= round.startSeq)
+    const show = entries => entries.map(entry => entry.text).join('\n')
     const spokeThisRound = (room.seen[member.id] ?? 0) >= round.startSeq
     const index = round.slots.findIndex(slot => slot.status === 'speaking')
     const before = index
     const after = round.slots.length - index - 1
     const working = workingIn(room).filter(item => item.bot.id !== member.id)
+    const board = isFaceRoom(room) ? '' : formatRoomBoard(rt.state.tasks, {
+      roomId: room.id,
+      nameOf: task => rt.botOf(task.ownerBotId)?.name,
+    })
     return [
       noticeChange(room, member),
-      earlier.length ? `Earlier in the group, before this round (context only):\n${transcript(earlier)}` : '',
+      board,
+      fitted.omitted > 0 ? `${fitted.omitted} older lines are not in this turn. Progress is on the task board; call read_group_chat when you need an exact earlier line.` : '',
+      earlier.length ? `Earlier in the group, before this round (context only):\n${show(earlier)}` : '',
       current.length
-        ? `This round so far${spokeThisRound ? ', since your last message' : ', starting with the new message'} (oldest first):\n${transcript(current)}`
+        ? `This round so far${spokeThisRound ? ', since your last message' : ', starting with the new message'} (oldest first):\n${show(current)}`
         : 'Nothing new in this round since your last message.',
       round.shown?.includes(member.id) ? '' : referenceNote(round.references),
       working.length > 0 ? `Still at work on what they were asked; each posts here when done: ${working.map(item => `${item.bot.name} (${minutesSince(item.since)} min)`).join(', ')}.` : '',
@@ -377,13 +400,15 @@ export function install(rt) {
   // already spoke; either way it goes right after slot `index`. `cap` is the caller's
   // per-member turn bound for the round; `by` is the calling member, if a member called.
   // `uncapped` names the callees that bound does not apply to (#804).
-  function callMembers(round, turns, index, callees, note, cap, by, uncapped = NOBODY) {
+  function callMembers(round, turns, index, callees, note, cap, by, uncapped = NOBODY, cue) {
     let next = index + 1
     for (const peer of callees) {
       if (!uncapped.has(peer.id) && (turns.get(peer.id) ?? 0) >= cap) continue
       const waiting = round.slots.findIndex((other, at) => at > index && other.id === peer.id && other.status === 'waiting')
       const called = waiting === -1 ? { id: peer.id, name: peer.name, status: 'waiting' } : round.slots.splice(waiting, 1)[0]
       called.note = note
+      if (typeof cue === 'string') called.cue = cue
+      else if (by === undefined) delete called.cue
       if (by === undefined) delete called.by
       else called.by = by
       round.slots.splice(next, 0, called)
@@ -524,7 +549,7 @@ export function install(rt) {
       if (callees.length === 0) continue
       const leads = rt.isAdminOf(room, call.by)
       const uncapped = new Set(callees.filter(bot => rt.isAdminOf(room, bot.id)).map(bot => bot.id))
-      callMembers(round, turns, index - 1, callees, `${call.name} mentioned you`, leads ? ROOM_ADMIN_TURNS_EACH : ROOM_TURNS_EACH, call.by, uncapped)
+      callMembers(round, turns, index - 1, callees, `${call.name} mentioned you`, leads ? ROOM_ADMIN_TURNS_EACH : ROOM_TURNS_EACH, call.by, uncapped, call.text)
     }
     return round.slots.length - before
   }
@@ -556,6 +581,13 @@ export function install(rt) {
       // One answer for a line that is not for everyone (#299): once a Bot has answered, the Bots still waiting are not
       // asked at all (no model call, no line), so three Bots never post three similar answers.
       if (answeredAlready(room, round) || currentFaceLine(room, round.faceLine)?.answered.includes(member.id)) {
+        slot.status = 'passed'
+        round.passed.push(member.name)
+        continue
+      }
+      // A Bot @ whose open card already shows this line is silence, not a turn (#1205).
+      // The slot is passed, so the report says stayed silent rather than no answer.
+      if (slot.by !== undefined && typeof slot.cue === 'string' && !isFaceRoom(room) && boardCoversCue(rt.state.tasks, { roomId: room.id, botId: member.id, text: slot.cue })) {
         slot.status = 'passed'
         round.passed.push(member.name)
         continue
@@ -635,7 +667,7 @@ export function install(rt) {
       // and dropping that is the failure #804 was filed for. Everyone else keeps the cap, so a chain of
       // Bots naming each other cannot keep a round talking.
       const uncapped = new Set(found.filter(other => rt.isAdminOf(room, other.id)).map(other => other.id))
-      if (!round.single) callMembers(round, turns, index, callees, `${member.name} mentioned you`, leads ? ROOM_ADMIN_TURNS_EACH : ROOM_TURNS_EACH, member.id, uncapped)
+      if (!round.single) callMembers(round, turns, index, callees, `${member.name} mentioned you`, leads ? ROOM_ADMIN_TURNS_EACH : ROOM_TURNS_EACH, member.id, uncapped, typeof reply === 'string' ? reply : undefined)
     }
   }
 
@@ -688,7 +720,7 @@ export function install(rt) {
         ...(references.length > 0 ? { references, shown: [] } : {}),
         slots: speakers.map(member => ({
           id: member.id, name: member.name, status: 'waiting',
-          ...(named.includes(member) ? (opener.botId === undefined ? { addressed: true } : { by: opener.botId }) : {}),
+          ...(named.includes(member) ? (opener.botId === undefined ? { addressed: true } : { by: opener.botId, cue: opener.text ?? '' }) : {}),
         })),
         // One pass: a plain line's speakers do not call each other on (#295), so Bots in two homes cannot loop.
         ...(isPlainFaceLine(room, opener) ? { single: true } : {}),
@@ -988,7 +1020,7 @@ export function install(rt) {
     // of the held post from calling them a second time.
     const callees = mentionsIn(text, room.members.map(rt.botOf).filter(Boolean)).found.filter(bot => bot.id !== sender.id)
     if (callees.length > 0) {
-      round.calls = [...(round.calls ?? []), { by: sender.id, name: sender.name, callees }]
+      round.calls = [...(round.calls ?? []), { by: sender.id, name: sender.name, callees, text }]
       extra.called = true
     }
     return true

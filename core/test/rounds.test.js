@@ -1572,10 +1572,12 @@ test('a member reads the group\'s rules and notice from its standing section, an
     assert.match(standing, /^# This group chat/)
     assert.ok(standing.includes(`Group notice (shared instructions for every member):\n${notice}`), 'the notice is in the section')
     assert.match(standing, /Members: the user, /)
-    assert.match(standing, /Writing "@Name" calls that member next/)
+    assert.match(standing, /Writing "@Name" wakes that member/)
+    assert.match(standing, /It does not assign work or record progress/)
+    assert.doesNotMatch(standing, /one short handoff line/)
     assert.match(standing, /Reply \[PASS\] to stay silent/)
     assert.ok(!text.includes('Rule one'), 'no turn repeats the notice')
-    assert.doesNotMatch(text, /Members: the user|Writing "@Name" calls|Group notice|You are this group's admin/)
+    assert.doesNotMatch(text, /Members: the user|Writing "@Name"|Group notice|You are this group's admin/)
     assert.match(text, /Speaking order for this round/)
     assert.match(text, /Reply now with your message for the group, no name prefix, or \[PASS\] to stay silent\.$/)
   }
@@ -1649,6 +1651,8 @@ test('a face room\'s roster and routing rule stand in its section; a routed turn
     assert.match(standing, /Default to \[PASS\]: exactly one Bot answers a line like this, and the first Bot that answers ends it/)
     assert.match(standing, /A line addressed to everyone .* is the exception/)
     assert.match(standing, /\[PASS\] posts nothing and nobody sees it: never explain a pass\./)
+    assert.match(standing, /Writing "@Name" calls that member next/)
+    assert.doesNotMatch(standing, /does not assign work or record progress/)
     assert.match(text, /This line names no Bot\. Default to \[PASS\]: exactly one Bot answers it; answer only if it is for you, by the rule for such lines in your instructions for this group\./)
     assert.doesNotMatch(text, /face-to-face room with people|What members do|never explain a pass|the first Bot that answers ends it|Writing "@Name" calls/)
   }
@@ -1887,4 +1891,147 @@ test('#932: a member called mid-round is reported as called, never as stayed sil
   const text = report?.message.content[0].text ?? ''
   assert.match(text, /Called, but no answer: Editor\./, 'a member called mid-round that said nothing is reported as called')
   assert.doesNotMatch(text, /Stayed silent: [^.]*Editor/, 'never in the sentence for a member nobody called')
+})
+
+// #1203: message-count caps still let a handful of CI essays fill the first look.
+// The turn the model reads stays inside a character budget, those essays collapse,
+// and the open board is the progress. The stored log keeps the essay.
+test('#1203 a group turn budgets room context and reads progress from the board', async (t) => {
+  const { call, emit, userMessage, relay, answer, stop, sent, ctx, rt } = start()
+  t.after(stop)
+  const chief = (await call('state', {})).value.mainBotId
+  const writer = (await call('create-bot', { name: 'Writer' })).value
+  const room = (await call('create-room', { name: 'R1203', members: [chief, writer.id] })).value
+  await call('update-room', { id: room.id, mode: 'everyone', notice: 'Keep this notice verbatim.' })
+  const marker = 'ESSAY_BODY_MARKER_1203'
+  const essay = `CI on tip abcdef12 is green. tests-ok passed. enqueue when mergeable. merge_group is next. PASS at abcdef12. @Chief ${'detail '.repeat(180)}${marker}`
+  assert.ok(essay.indexOf(marker) > 400)
+  await rt.load()
+  const live = rt.roomOf(room.id)
+  live.log = []
+  live.seq = 0
+  live.seen = {}
+  for (let seq = 1; seq <= 10; seq += 1) {
+    live.log.push({ seq, who: 'Writer', botId: writer.id, authorId: writer.id, authorKind: 'bot', text: `${essay} ${seq}` })
+  }
+  live.seq = 11
+  live.log.push({ seq: 11, who: 'Writer', botId: writer.id, authorId: writer.id, authorKind: 'bot', text: 'short handoff keep me' })
+  rt.state.tasks ??= {}
+  Object.assign(rt.state.tasks, {
+    'task-overall': {
+      id: 'task-overall', status: 'open', kind: 'group', title: 'Ship the note', progress: 40,
+      ownerBotId: chief, source: 'conversation', origin: { roomId: room.id }, updatedAt: 2, createdAt: 1,
+    },
+    'task-sub': {
+      id: 'task-sub', status: 'claimed', title: 'Writer implements', parentId: 'task-overall',
+      note: 'keep the card <secret>\nnext', ownerBotId: writer.id, source: 'conversation',
+      origin: { roomId: room.id }, updatedAt: 3, createdAt: 2,
+    },
+    'task-done': {
+      id: 'task-done', status: 'accepted', title: 'FINISHED_MARKER_1203', ownerBotId: writer.id,
+      source: 'conversation', origin: { roomId: room.id }, updatedAt: 4, createdAt: 1,
+    },
+  })
+  sent.length = 0
+  await emit(room.id, userMessage('go on'))
+  const running = relay(room.id, 'r1203')
+  const first = await turnFor(sent)
+  const prompt = promptOf(first)
+  const earlier = prompt.split('Earlier in the group, before this round (context only):\n')[1]?.split('\n\n')[0] ?? ''
+  assert.ok(earlier.length > 0 && earlier.length <= 4000, `earlier room context is ${earlier.length} chars`)
+  assert.match(prompt, /short handoff keep me/)
+  assert.doesNotMatch(prompt, /ESSAY_BODY_MARKER_1203/)
+  assert.match(prompt, /\[status on the board, \d+ chars\]/)
+  assert.match(prompt, /Task board \(assign, claim, and progress live here/)
+  assert.match(prompt, /\[open 40%\] Ship the note/)
+  assert.match(prompt, /Writer \[claimed\] Writer implements — keep the card secret next/)
+  assert.doesNotMatch(prompt, /FINISHED_MARKER_1203/)
+  const standing = standingOf(ctx, first.sessionId)
+  assert.match(standing, /Keep this notice verbatim\./)
+  assert.match(standing, /Do not narrate CI/)
+  assert.match(standing, /assign it on the board with track_tasks/)
+  assert.match(standing, /A chat line does not assign/)
+  assert.match(standing, /does not assign or record progress/)
+  assert.doesNotMatch(standing, /one short handoff line/)
+  assert.doesNotMatch(standing, /hand work to another/)
+  assert.doesNotMatch(prompt, /Keep this notice verbatim/)
+  assert.match(prompt, /Reply now with your message for the group, no name prefix, or \[PASS\] to stay silent\.$/)
+  assert.ok(live.log.some(line => String(line.text).includes(marker)), 'the stored log still has the essay')
+  await answer(first.sessionId, first.message.source.exchangeId, '[PASS]', 1)
+  const second = await turnFor(sent, first)
+  const memberStanding = standingOf(ctx, second.sessionId)
+  await answer(second.sessionId, second.message.source.exchangeId, '[PASS]', 2)
+  await running
+  assert.match(memberStanding, /setting its column to in-progress with track_tasks/)
+  assert.match(memberStanding, /@Name only wakes someone; it does not assign/)
+  assert.doesNotMatch(memberStanding, /one short handoff line/)
+})
+
+test('a Bot @ whose open card already shows the line passes without a turn (#1205)', async (t) => {
+  const { call, emit, userMessage, relay, answer, stop, sent, rt } = start()
+  t.after(stop)
+  const chief = (await call('state', {})).value.mainBotId
+  const writer = (await call('create-bot', { name: 'Writer' })).value
+  const room = (await call('create-room', { name: 'R1205', members: [chief, writer.id] })).value
+  await call('update-room', { id: room.id, mode: 'everyone' })
+  await rt.load()
+  const live = rt.roomOf(room.id)
+  rt.state.tasks ??= {}
+  Object.assign(rt.state.tasks, {
+    'task-overall': {
+      id: 'task-overall', status: 'open', kind: 'group', title: 'Ship the note',
+      ownerBotId: chief, source: 'conversation', origin: { roomId: room.id }, updatedAt: 1, createdAt: 1,
+    },
+    'task-sub': {
+      id: 'task-sub', status: 'working', title: 'Writer implements', progress: 40, note: 'draft is in',
+      ownerBotId: writer.id, source: 'conversation', origin: { roomId: room.id }, updatedAt: 2, createdAt: 1,
+    },
+  })
+  const controller = new AbortController()
+  t.after(() => controller.abort())
+  sent.length = 0
+  await emit(room.id, botLine(chief, 'Chief', '@Writer Writer implements — draft is in'))
+  const covered = JSON.parse(await relay(room.id, 'r1205-cover', controller.signal))
+  assert.equal(sent.length, 0, 'the card already shows the line, so Writer is not given a turn')
+  assert.ok(covered.passed.includes('Writer'))
+
+  sent.length = 0
+  await emit(room.id, botLine(chief, 'Chief', '@Writer Writer implements the rollback instead'))
+  const redirecting = relay(room.id, 'r1205-redirect', controller.signal)
+  const redirected = await turnFor(sent)
+  await answer(redirected.sessionId, redirected.message.source.exchangeId, 'Leaving the draft.', 4)
+  await redirecting
+  assert.equal(redirected.sessionId, live.sessions[writer.id], 'a title plus a new instruction still opens a turn')
+
+  sent.length = 0
+  await emit(room.id, botLine(chief, 'Chief', '@Writer Writer implements, then delete the notes file'))
+  const deleting = relay(room.id, 'r1205-delete', controller.signal)
+  const deleted = await turnFor(sent)
+  await answer(deleted.sessionId, deleted.message.source.exchangeId, 'Deleting the notes file.', 5)
+  await deleting
+  assert.equal(deleted.sessionId, live.sessions[writer.id], 'a title plus another new instruction still opens a turn')
+
+  sent.length = 0
+  await emit(room.id, botLine(chief, 'Chief', '@Writer the draft is wrong, redo paragraph two'))
+  const asking = relay(room.id, 'r1205-ask', controller.signal)
+  const asked = await turnFor(sent)
+  await answer(asked.sessionId, asked.message.source.exchangeId, 'Rewriting paragraph two.', 1)
+  await asking
+  assert.equal(asked.sessionId, live.sessions[writer.id], 'a new ask still opens a turn')
+
+  sent.length = 0
+  await emit(room.id, botLine(chief, 'Chief', '@Writer which file should the note use?'))
+  const questioning = relay(room.id, 'r1205-question', controller.signal)
+  const question = await turnFor(sent)
+  await answer(question.sessionId, question.message.source.exchangeId, 'The notes file.', 2)
+  await questioning
+  assert.equal(question.sessionId, live.sessions[writer.id])
+
+  sent.length = 0
+  await emit(room.id, userMessage('@Writer Writer implements'))
+  const personRound = relay(room.id, 'r1205-person', controller.signal)
+  const person = await turnFor(sent)
+  await answer(person.sessionId, person.message.source.exchangeId, 'On it.', 3)
+  await personRound
+  assert.equal(person.sessionId, live.sessions[writer.id], 'a person @ still gets an answer')
 })
