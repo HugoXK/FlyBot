@@ -1467,7 +1467,7 @@ diff --git a/src/client/index.js b/src/client/index.js
      stopMemberWork: (roomId, botId) => after(call('stop-member-work', { roomId, botId })),
      // Values go out in these requests and never come back in a response.
      secretSet: payload => after(call('secret-set', payload)),
-@@ -539,15 +539,28 @@ export function apply(ctx) {
+@@ -539,15 +539,29 @@ export function apply(ctx) {
      secretCancel: requestId => after(call('secret-cancel', { requestId })),
      secretUpdate: (name, scope) => after(call('secret-update', { name, scope })),
      secretDelete: name => after(call('secret-delete', { name })),
@@ -1478,6 +1478,7 @@ diff --git a/src/client/index.js b/src/client/index.js
 +    connectorAppStatus: id => call('connector-app-status', { id }),
      connectorDisconnect: id => after(call('connector-disconnect', { id })),
      connectorRetry: id => after(call('connector-retry', { id })),
++    connectorSend: (id, text) => after(call('connector-send', { id, text })),
      saveCapability: capability => after(call('capability-save', capability)),
      deleteCapability: name => after(call('capability-delete', { name })),
      approveCapability: name => after(call('capability-approve', { name })),

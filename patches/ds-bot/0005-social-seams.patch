@@ -719,7 +719,7 @@ diff --git a/src/host/channel.js b/src/host/channel.js
          case 'stop-member-work':
            return ok(await rt.stopMemberWork(String(body.roomId ?? ''), String(body.botId ?? '')))
          case 'dismiss-question':
-@@ -231,6 +231,9 @@ export function install(rt) {
+@@ -231,8 +231,12 @@ export function install(rt) {
            await rt.load()
            return ok(await rt.secretEndpoint(endpoint, body))
          case 'connector-connect':
@@ -728,7 +728,10 @@ diff --git a/src/host/channel.js b/src/host/channel.js
 +        case 'connector-app-status':
          case 'connector-disconnect':
          case 'connector-retry':
++        case 'connector-send':
            await rt.load()
+           return ok(await rt.connectorEndpoint(endpoint, body))
+         case 'capability-save':
 @@ -241,11 +241,22 @@ export function install(rt) {
          case 'bot-capability':
            await rt.load()

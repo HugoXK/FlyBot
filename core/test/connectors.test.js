@@ -189,19 +189,25 @@ test('deleting GITHUB_TOKEN on the Secrets page unmounts GitHub', async (t) => {
   assert.equal(state.value.connectors[0].state, 'off')
 })
 
-test('github: false and composio: false hide the connectors', async (t) => {
+test('github: false, composio: false and feishu: false hide the connectors', async (t) => {
   const home = teamHome()
   const ctx = fakeContext()
   capture(ctx)
   apply(ctx, { home, github: false })
   t.after(async () => { await ctx.dispose(); await cleanHome(home) })
-  assert.deepEqual((await call(ctx, 'state', {})).value.connectors.map(entry => entry.id), ['composio'])
+  assert.deepEqual((await call(ctx, 'state', {})).value.connectors.map(entry => entry.id), ['composio', 'feishu'])
   const other = teamHome()
   const second = fakeContext()
   capture(second)
   apply(second, { home: other, github: false, composio: false })
   t.after(async () => { await second.dispose(); await cleanHome(other) })
-  assert.deepEqual((await call(second, 'state', {})).value.connectors, [])
+  assert.deepEqual((await call(second, 'state', {})).value.connectors.map(entry => entry.id), ['feishu'])
+  const third = teamHome()
+  const last = fakeContext()
+  capture(last)
+  apply(last, { home: third, github: false, composio: false, feishu: false })
+  t.after(async () => { await last.dispose(); await cleanHome(third) })
+  assert.deepEqual((await call(last, 'state', {})).value.connectors, [])
 })
 
 test('a GitHub address without https refuses to send the token', async (t) => {
@@ -409,7 +415,7 @@ test('deleting COMPOSIO_API_KEY on the Secrets page unmounts Composio, and GitHu
   const view = (await call(ctx, 'state', {})).value.connectors
   assert.equal(mounts[1].disposed, true)
   assert.equal(mounts[0].disposed, false)
-  assert.deepEqual(view.map(entry => [entry.id, entry.state]), [['github', 'ready'], ['composio', 'off']])
+  assert.deepEqual(view.map(entry => [entry.id, entry.state]), [['github', 'ready'], ['composio', 'off'], ['feishu', 'off']])
 })
 
 test('a Composio address without https refuses to send the key', async (t) => {

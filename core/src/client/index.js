@@ -602,6 +602,7 @@ export function apply(ctx) {
     connectorAppStatus: id => call('connector-app-status', { id }),
     connectorDisconnect: id => after(call('connector-disconnect', { id })),
     connectorRetry: id => after(call('connector-retry', { id })),
+    connectorSend: (id, text) => after(call('connector-send', { id, text })),
     saveCapability: capability => after(call('capability-save', capability)),
     deleteCapability: name => after(call('capability-delete', { name })),
     approveCapability: name => after(call('capability-approve', { name })),

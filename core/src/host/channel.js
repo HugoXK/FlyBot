@@ -491,6 +491,7 @@ export function install(rt) {
         case 'connector-app-status':
         case 'connector-disconnect':
         case 'connector-retry':
+        case 'connector-send':
           await rt.load()
           return ok(await rt.connectorEndpoint(endpoint, body))
         case 'capability-save':

@@ -12,7 +12,9 @@ export function ownBots(roster) {
   return (roster?.bots ?? []).filter(bot => !bot.remote && (me === undefined || me === null || bot.ownerId === undefined || bot.ownerId === me))
 }
 
-export const connectedConnectors = roster => (roster?.connectors ?? []).filter(connector => connector.state !== 'off')
+// Connectors that give a Bot tools. A sender (#1263) has none: a per-Bot switch for it would be a
+// choice that never changes anything, so it is not offered.
+export const connectedConnectors = roster => (roster?.connectors ?? []).filter(connector => connector.state !== 'off' && connector.kind !== 'sender')
 
 // Only an explicit false turns it off; no record means on.
 export const isOn = (bot, id) => bot.connectors?.[id] !== false

@@ -218,7 +218,7 @@ diff --git a/src/client/browser-pane.js b/src/client/browser-pane.js
 diff --git a/src/client/connectors.js b/src/client/connectors.js
 --- a/src/client/connectors.js
 +++ b/src/client/connectors.js
-@@ -1,26 +1,107 @@
+@@ -1,41 +1,151 @@
 -import { createElement as h, useRef, useState } from 'react'
 +import { createElement as h, useCallback, useEffect, useRef, useState } from 'react'
  import { useMorph } from './motion.js'
@@ -230,6 +230,8 @@ diff --git a/src/client/connectors.js b/src/client/connectors.js
  
  const TOKEN_URL = 'https://github.com/settings/personal-access-tokens/new'
 +const COMPOSIO_KEY_URL = 'https://platform.composio.dev/'
++// Feishu's own page for a group's custom bot, where the webhook URL comes from.
++const FEISHU_WEBHOOK_URL = 'https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot'
 +
 +// Common apps, searched when Composio cannot be asked; any other app is found by the search.
 +const APPS = [
@@ -247,10 +249,17 @@ diff --git a/src/client/connectors.js b/src/client/connectors.js
  
 -const MARKS = { github: GitHubMark }
 -const ABOUT = { github: () => t('Repositories, issues, and pull requests') }
-+const MARKS = { github: GitHubMark, composio: ConnectorIcon }
++// Feishu's mark: two stacked wings around a middle line, drawn here rather than copied.
++export const FeishuMark = () => h('svg', { width: 20, height: 20, viewBox: '0 0 20 20', fill: 'currentColor', 'aria-hidden': true },
++  h('path', { d: 'M3.2 6.6c3 .1 6.4 1.5 8.6 3.9-1.9.4-3.5 1.4-4.7 2.9-1.9-.6-3.4-1.9-3.9-3.6-.2-.7-.2-1.5 0-3.2z' }),
++  h('path', { d: 'M16.8 5.4c-2.9.2-5.6 1.5-7.4 3.4 1.7 1.2 3.1 2.8 3.9 4.9 2.2-1.1 3.8-3.2 4-5.6.1-.9-.1-1.9-.4-2.7z' }),
++  h('path', { d: 'M8.6 12.1c.9.7 1.7 1.6 2.2 2.7-1.1.2-2.3 0-3.3-.6.2-.8.6-1.5 1.1-2.1z' }))
++
++const MARKS = { github: GitHubMark, composio: ConnectorIcon, feishu: FeishuMark }
 +const ABOUT = {
 +  github: () => t('Repositories, issues, and pull requests'),
 +  composio: () => t('Gmail, Slack, Calendar, Notion and many more apps, through one Composio key'),
++  feishu: () => t('Posts into one Feishu group through a custom bot webhook'),
 +}
  
  function statusText(connector) {
@@ -329,12 +338,15 @@ diff --git a/src/client/connectors.js b/src/client/connectors.js
 +  const [picking, setPicking] = useState(false)
    const [busy, setBusy] = useState(false)
    const [error, setError] = useState(null)
++  const [message, setMessage] = useState('')
    const run = (task, after) => {
-@@ -28,14 +28,31 @@ function ConnectorRow({ connector, actions }) {
+     setBusy(true)
      setError(null)
      return task.then(() => { after?.() }, failure => setError(failure?.message ?? String(failure))).finally(() => setBusy(false))
    }
 +  const gateway = connector.id === 'composio'
++  // A sender posts through one webhook: no tools, so no per-Bot switch, and its own send field.
++  const sender = connector.kind === 'sender'
 +  const [statuses, setStatuses] = useState({})
 +  const appsKey = (connector.apps ?? []).join(',')
 +  // Asks Composio which picked apps are signed in, when the row is ready and again when the list changes.
@@ -364,25 +376,30 @@ diff --git a/src/client/connectors.js b/src/client/connectors.js
    return h('div', { ref: row, className: 'bt-connector', 'data-state': connector.state },
      h('div', { className: 'bt-connector-head' },
        h('span', { className: 'bt-connector-mark' }, Mark ? h(Mark) : null),
-@@ -44,15 +44,28 @@ function ConnectorRow({ connector, actions }) {
+@@ -44,15 +44,33 @@ function ConnectorRow({ connector, actions }) {
          h('span', { className: 'bt-connector-status' }, statusText(connector))),
        h('span', { className: 'bt-connector-actions' },
          connector.state === 'error' ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: () => void run(actions.connectorRetry(connector.id)) }, t('Try again')) : null,
 +        on && gateway && !picking ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: () => { setApps(connector.apps ?? []); setPicking(true) } }, t('Choose apps')) : null,
-+        on ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-expanded': bots, onClick: () => setBots(value => !value) }, bots ? t('Done') : t('Choose Bots')) : null,
++        on && !sender ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', 'aria-expanded': bots, onClick: () => setBots(value => !value) }, bots ? t('Done') : t('Choose Bots')) : null,
          on
            ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: () => void run(actions.connectorDisconnect(connector.id)) }, t('Disconnect'))
            : form ? null : h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setForm(true) }, t('Connect')))),
 +    on && gateway && !picking ? h(AppStatusList, { apps: connector.apps ?? [], statuses }) : null,
-+    on ? h('span', { className: 'bt-connector-uses' }, usageText(roster, connector.id)) : null,
++    on && !sender ? h('span', { className: 'bt-connector-uses' }, usageText(roster, connector.id)) : null,
 +    on && bots ? h(ConnectorBots, { connector, roster, actions, run, SwitchRow }) : null,
++    on && sender ? h('div', { className: 'bt-connector-form' },
++      h('label', { className: 'bt-q-field' }, h('input', { className: 'bt-input', type: 'text', value: message, 'aria-label': t('Message to send to Feishu'), placeholder: t('Type a message for the Feishu group'), onChange: event => setMessage(event.target.value) })),
++      h('div', { className: 'bt-connector-form-row' },
++        h('span', { className: 'bt-connector-link' }),
++        h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy || message.trim() === '' || actions.connectorSend === undefined, onClick: () => void run(actions.connectorSend(connector.id, message), () => setMessage('')) }, t('Send')))) : null,
      !on && form ? h('div', { className: 'bt-connector-form' },
 -      h('label', { className: 'bt-q-field bt-secret-field' }, h(MaskedInput, { value: token, onChange: setToken, onEnter: connect, label: t('GitHub token'), autoFocus: true })),
-+      h('label', { className: 'bt-q-field bt-secret-field' }, h(MaskedInput, { value: token, onChange: setToken, onEnter: connect, label: gateway ? t('Composio API key') : t('GitHub token'), autoFocus: true })),
++      h('label', { className: 'bt-q-field bt-secret-field' }, h(MaskedInput, { value: token, onChange: setToken, onEnter: connect, label: sender ? t('Feishu webhook URL') : gateway ? t('Composio API key') : t('GitHub token'), autoFocus: true })),
 +      gateway ? h(AppPicker, { apps, onChange: setApps, search: token.trim() === '' ? undefined : search }) : null,
        h('div', { className: 'bt-connector-form-row' },
 -        h('a', { className: 'bt-connector-link', href: TOKEN_URL, target: '_blank', rel: 'noopener noreferrer' }, t('Create a token on GitHub')),
-+        h('a', { className: 'bt-connector-link', href: gateway ? COMPOSIO_KEY_URL : TOKEN_URL, target: '_blank', rel: 'noopener noreferrer' }, gateway ? t('Get a Composio API key') : t('Create a token on GitHub')),
++        h('a', { className: 'bt-connector-link', href: sender ? FEISHU_WEBHOOK_URL : gateway ? COMPOSIO_KEY_URL : TOKEN_URL, target: '_blank', rel: 'noopener noreferrer' }, sender ? t('Get a webhook URL in Feishu') : gateway ? t('Get a Composio API key') : t('Create a token on GitHub')),
          h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy, onClick: () => { setForm(false); setToken(''); setError(null) } }, t('Cancel')),
          h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy || token.trim() === '', onClick: connect }, busy ? t('Connecting…') : t('Connect')))) : null,
 +    on && gateway && picking ? h('div', { className: 'bt-connector-form' },
@@ -693,13 +710,19 @@ diff --git a/src/client/i18n.js b/src/client/i18n.js
    Connected: '已连接',
    Disconnect: '断开',
    Connect: '连接',
-@@ -105,17 +105,44 @@ const ZH = {
+@@ -105,17 +105,50 @@ const ZH = {
    'GitHub addresses must start with https://': 'GitHub 地址必须以 https:// 开头',
    'This DSH cannot load connectors': '这个 DSH 不能加载连接器',
    'No such connector': '没有这个连接器',
 -  'Classic Agent mode': '经典 Agent 模式',
 -  'Switch': '切换',
 +  'Gmail, Slack, Calendar, Notion and many more apps, through one Composio key': 'Gmail、Slack、日历、Notion 等众多应用，一个 Composio key 就能连',
++  'Posts into one Feishu group through a custom bot webhook': '通过自定义机器人 webhook 发到你的一个飞书群',
++  'Feishu webhook URL': '飞书 webhook 地址',
++  'Get a webhook URL in Feishu': '去飞书获取 webhook 地址',
++  'Message to send to Feishu': '要发到飞书的消息',
++  'Type a message for the Feishu group': '输入要发到飞书群的消息',
++  Send: '发送',
 +  'Connected: {apps}': '已连接：{apps}',
 +  'Composio API key': 'Composio API key',
 +  'Get a Composio API key': '去 Composio 获取 API key',
@@ -1036,6 +1059,14 @@ diff --git a/src/client/i18n.js b/src/client/i18n.js
    'Save key': '保存密钥',
    'Keys your Bots asked for. Bots never see the values: they use them as ': '你的 Bot 请求过的密钥。Bot 永远看不到值：它们在 shell 里通过 ',
    ' in their shell, and every value is replaced by ': ' 使用，而且发给模型之前，每个值都会被替换成 ',
+@@ -568,7 +568,6 @@ const ZH = {
+   Remove: '删除',
+   'Ask or update': '询问或更新',
+   "Ask about or update {name}'s memory": '询问或更新 {name} 的记忆',
+-  Send: '发送',
+   'Added: {text}': '已添加：{text}',
+   'Added to team memory: {text}': '已加入团队记忆：{text}',
+   'Updated: {text}': '已更新：{text}',
 @@ -697,11 +697,11 @@ const ZH = {
    'Compared with the {count} days before': '与再往前 {count} 天相比',
    '{share}% of all usage from {span}': '占 {span} 全部用量的 {share}%',
@@ -2570,7 +2601,7 @@ diff --git a/src/host/chat-index.js b/src/host/chat-index.js
 diff --git a/src/host/connectors.js b/src/host/connectors.js
 --- a/src/host/connectors.js
 +++ b/src/host/connectors.js
-@@ -1,27 +1,44 @@
+@@ -1,27 +1,55 @@
 -// Connectors: outside services every Bot can use. GitHub is the first one. Its tools come
 -// from GitHub's MCP server through DSH's own MCP client, mounted on the plugin context,
 -// so every Bot and Session gets them as mcp__github__<tool>.
@@ -2599,11 +2630,14 @@ diff --git a/src/host/connectors.js b/src/host/connectors.js
 +// without touching the mount.
 +
 +import { randomUUID } from 'node:crypto'
++import { createNotifier } from './notify.js'
  
  export const GITHUB = 'github'
  export const GITHUB_SECRET = 'GITHUB_TOKEN'
 +export const COMPOSIO = 'composio'
 +export const COMPOSIO_SECRET = 'COMPOSIO_API_KEY'
++export const FEISHU = 'feishu'
++export const FEISHU_SECRET = 'FEISHU_WEBHOOK'
 +// Names a saved capability may not take, because the mount already uses them.
 +export const RESERVED_NAMES = [GITHUB, COMPOSIO]
  const MCP_CLIENT = '@deepseek-ai/dsh-mcp-client'
@@ -2614,8 +2648,16 @@ diff --git a/src/host/connectors.js b/src/host/connectors.js
    toolsets: 'context,repos,issues,pull_requests',
  }
 +const COMPOSIO_DEFAULTS = { api: 'https://backend.composio.dev/api/v3.1' }
++const FEISHU_DEFAULTS = { api: 'https://open.feishu.cn' }
  const CHECK_TIMEOUT_MS = 15_000
 -const INSECURE = 'GitHub addresses must start with https://'
++// A send waits longer than a connect: the connect is one small probe, while a message may sit
++// behind Feishu's own queue. The retry budget is notify.js's, not this deadline.
++const SEND_TIMEOUT_MS = 60_000
++// Feishu's custom-bot webhook answers HTTP 200 with the verdict in the body, so a rate limit has
++// to be read out of `code`; 9499 is the one code that means "the same call may work again".
++export const FEISHU_RATE_LIMITED = 9499
++const FEISHU_TEST_TEXT = 'FlyBot is connected.'
 +const INSECURE = name => `${name} addresses must start with https://`
 +const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
 +const APP_SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/
@@ -2627,7 +2669,7 @@ diff --git a/src/host/connectors.js b/src/host/connectors.js
    let response
    try {
      response = await request(`${api.replace(/\/$/, '')}/user`, {
-@@ -38,132 +38,491 @@ export async function signIn(token, { api = DEFAULTS.api, fetch: request = fetch
+@@ -38,132 +38,653 @@ export async function signIn(token, { api = DEFAULTS.api, fetch: request = fetch
    return { login: user.login }
  }
  
@@ -2813,6 +2855,74 @@ diff --git a/src/host/connectors.js b/src/host/connectors.js
 +  return { id, url, apps }
 +}
 +
++// The webhook URL is the credential, so it is checked against the API address before anything is
++// sent: https, on the host this instance was configured for. Never another host, never http.
++function webhookAddress(webhook, api) {
++  let url
++  try {
++    url = new URL(String(webhook).trim())
++  } catch {
++    throw new Error('Paste the webhook URL Feishu gave you')
++  }
++  const base = new URL(String(api))
++  if (url.protocol !== 'https:' || url.origin !== base.origin) throw new Error(`A Feishu webhook must be https on ${base.origin}`)
++  return url.href
++}
++
++// A fetch that ignores its abort signal would otherwise hang a connect (or a send) for ever.
++function withDeadline(promise, ms) {
++  let timer
++  const deadline = new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error('deadline')), Math.max(1, ms)) })
++  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer))
++}
++
++// One text message through a custom-bot webhook, answered in notify.js's vocabulary: `{ ok, ts }`
++// or `{ ok: false, error }`, where `rate_limited` and `service_unavailable` may pass on their own
++// and every other error is a shape Feishu will refuse again. The URL is never part of the answer.
++export async function feishuPost(webhook, text, { fetch: request = fetch, timeoutMs = CHECK_TIMEOUT_MS } = {}) {
++  let response
++  try {
++    response = await withDeadline(request(webhook, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json; charset=utf-8' },
++      body: JSON.stringify({ msg_type: 'text', content: { text: String(text) } }),
++      redirect: 'error',
++      signal: AbortSignal.timeout(Math.max(1, timeoutMs)),
++    }), timeoutMs)
++  } catch {
++    return { ok: false, error: 'network' }
++  }
++  const body = await response.json().catch(() => ({}))
++  if (response.status === 429) {
++    const asked = Number(response.headers?.get?.('retry-after')) * 1000
++    return { ok: false, error: 'rate_limited', retryAfterMs: Number.isFinite(asked) && asked > 0 ? asked : 0 }
++  }
++  if (!response.ok) return { ok: false, error: response.status >= 500 ? 'service_unavailable' : `feishu/http-${response.status}` }
++  const code = Number(body?.code)
++  if (code === 0) {
++    const id = body?.data?.message_id
++    return { ok: true, ts: typeof id === 'string' && id !== '' ? id : 'sent' }
++  }
++  if (code === FEISHU_RATE_LIMITED) return { ok: false, error: 'rate_limited', retryAfterMs: 0 }
++  return { ok: false, error: `feishu/${Number.isFinite(code) ? code : 'unknown'}` }
++}
++
++// The connect step: one test message, so a webhook that cannot post is caught before it is relied
++// on. It throws a sentence for the row; nothing it says carries the URL.
++export async function feishuCheck(webhook, { api = FEISHU_DEFAULTS.api, fetch: request = fetch, timeoutMs = CHECK_TIMEOUT_MS } = {}) {
++  const answer = await feishuPost(webhookAddress(webhook, api), FEISHU_TEST_TEXT, { fetch: request, timeoutMs })
++  if (answer.ok) return {}
++  if (answer.error === 'network' || answer.error === 'service_unavailable') throw new Error('Could not reach Feishu')
++  if (answer.error === 'rate_limited') throw new Error('Feishu is rate-limiting this webhook; try again in a minute')
++  throw new Error(`Feishu did not accept the webhook (${answer.error})`)
++}
++
++// notify.js's transport for a Feishu webhook: the policy (attempts, backoff, idempotency) stays in
++// notify.js, and this only maps one message to one POST.
++export function feishuTransport(webhook, { fetch: request = fetch, timeoutMs = SEND_TIMEOUT_MS } = {}) {
++  return { postMessage: message => feishuPost(webhook, message?.text ?? '', { fetch: request, timeoutMs }) }
++}
++
 +const DEFINITIONS = {
 +  [GITHUB]: {
 +    id: GITHUB,
@@ -2869,6 +2979,26 @@ diff --git a/src/host/connectors.js b/src/host/connectors.js
 +    // Keeps the user id: a new key for the same FlyBot finds the apps already signed in.
 +    afterDisconnect: saved => saved?.userId === undefined ? undefined : { userId: saved.userId },
 +  },
++  // Feishu (Lark) is not an MCP server: a custom-bot webhook is one HTTPS POST into the instance's
++  // own group. So it is a *sender* — nothing is mounted, no Bot's tool list changes, and the only
++  // things it has are a status and a send (#1263). The app-credential path slots in behind the same
++  // send, without touching a caller.
++  [FEISHU]: {
++    id: FEISHU,
++    name: 'Feishu',
++    secret: FEISHU_SECRET,
++    purpose: 'Feishu webhook',
++    defaults: FEISHU_DEFAULTS,
++    addresses: options => [options.api],
++    kind: 'sender',
++    paste: 'Paste a webhook URL first',
++    async check({ token, options }) {
++      return feishuCheck(token, { api: options.api })
++    },
++    post: (webhook, text) => feishuPost(webhook, text, { timeoutMs: SEND_TIMEOUT_MS }),
++    mountKey: () => '',
++    account: () => null,
++  },
 +}
 +
  export function install(rt) {
@@ -2909,6 +3039,33 @@ diff --git a/src/host/connectors.js b/src/host/connectors.js
    }
  
 -  // The MCP client wraps the server's answer (a 401, say) as the cause.
++  // A sender's retry policy is notify.js's, not a second one written here: one transport per
++  // sender, reading the saved webhook when it is called, so a reconnect needs no rebuild.
++  const notifiers = new Map(connectors.filter(c => c.def.kind === 'sender').map(c => [c.def.id, createNotifier({
++    channel: c.def.id,
++    log: (format, ...args) => rt.warn(`ds-bot: ${format}`, ...args),
++    transport: {
++      postMessage: (message) => {
++        const webhook = rt.secretValue(c.def.secret)
++        if (webhook === undefined) return { ok: false, error: 'channel_not_found' }
++        return c.def.post(webhook, message?.text ?? '')
++      },
++    },
++  })]))
++  const notifierOf = c => notifiers.get(c.def.id)
++
++  // The connect step of a sender: one test message, then ready or the reason. A sender is "ready"
++  // once this passes, and the failure is a row the owner can read and Try again from.
++  const probe = async (c, token) => {
++    try {
++      await c.def.check({ token, options: c.options })
++      c.status = { state: 'ready' }
++    } catch (error) {
++      c.status = { state: 'error', error: reason(error) }
++      rt.warn('ds-bot: %s connector failed: %s', c.def.name, c.status.error)
++    }
++  }
++
 +  // The MCP client wraps the server's answer (a 401, say) as the cause. The session address of a
 +  // mount in progress is not kept anywhere, so it is also taken out of what is shown or logged.
 +  let addresses = []
@@ -2932,6 +3089,7 @@ diff --git a/src/host/connectors.js b/src/host/connectors.js
 +    await unmount(c)
      if (token === undefined) {
 -      status = { state: 'off' }
++      notifierOf(c)?.setEnabled(false)
 +      c.status = { state: 'off' }
        return
      }
@@ -2941,10 +3099,20 @@ diff --git a/src/host/connectors.js b/src/host/connectors.js
 +    if (c.insecure) {
 +      c.mount = { key }
 +      c.status = { state: 'error', error: INSECURE(def.name) }
++      return
++    }
++    c.status = { state: 'connecting' }
++    // A sender mounts nothing: the test POST belongs to the connect step, so a start-up (or a
++    // secret change) only reports that a webhook is saved — a restart must not post to the group
++    // again. `force` is a person pressing Try again, which is that person asking for the test.
++    if (def.kind === 'sender') {
++      notifierOf(c)?.setEnabled(true)
++      if (force) await probe(c, token)
++      else c.status = { state: 'ready' }
++      c.mount = { key }
        return
      }
 -    status = { state: 'connecting' }
-+    c.status = { state: 'connecting' }
      const loader = ctx.get?.('loader')
      if (typeof loader?.import !== 'function' || typeof ctx.plugin !== 'function') {
 -      mount = { token }
@@ -3017,6 +3185,7 @@ diff --git a/src/host/connectors.js b/src/host/connectors.js
 +    name: c.def.name,
 +    state: c.status.state,
 +    ...(c.status.error !== undefined ? { error: c.status.error } : {}),
++    ...(c.def.kind !== undefined ? { kind: c.def.kind } : {}),
 +    account: rt.secretValue(c.def.secret) !== undefined ? c.def.account(saved(c)) : null,
 +    ...(c.def.extra !== undefined ? c.def.extra(rt.secretValue(c.def.secret) !== undefined ? saved(c) : undefined) : {}),
 +  })
@@ -3047,7 +3216,7 @@ diff --git a/src/host/connectors.js b/src/host/connectors.js
        const token = typeof body.token === 'string' ? body.token.trim() : ''
 -      if (token === '') throw new Error('Paste a token first')
 -      if (insecure) throw new Error(INSECURE)
-+      if (token === '') throw new Error(c.def.id === GITHUB ? 'Paste a token first' : 'Paste a key first')
++      if (token === '') throw new Error(c.def.paste ?? (c.def.id === GITHUB ? 'Paste a token first' : 'Paste a key first'))
 +      if (c.insecure) throw new Error(INSECURE(c.def.name))
        await rt.loadSecrets()
 -      const kept = rt.secretValue(GITHUB_SECRET) !== undefined
@@ -3056,6 +3225,22 @@ diff --git a/src/host/connectors.js b/src/host/connectors.js
 -      state.connectors = { ...state.connectors, [GITHUB]: { login, connectedAt: Date.now() } }
 -      await rt.save()
 -      await sync()
++      // A sender has nothing to mount, so the webhook is saved first and then proved: a webhook
++      // Feishu refuses stays on the row as `error` with Try again beside it, the way a connector
++      // that fails its MCP mount does, instead of losing what the owner pasted.
++      if (c.def.kind === 'sender') {
++        c.saving += 1
++        try {
++          await rt.secretEndpoint('secret-set', { name: c.def.secret, value: token, purpose: c.def.purpose })
++          await keep(c, {})
++        } finally {
++          c.saving -= 1
++        }
++        await probe(c, token)
++        c.mount = { key: `${token}\n${c.def.mountKey(saved(c))}` }
++        notifierOf(c)?.setEnabled(true)
++        return connectorsView()
++      }
 +      const oldToken = rt.secretValue(c.def.secret)
 +      const previous = saved(c)
 +      const record = await c.def.check({ token, options: c.options, saved: previous, body })
@@ -3153,6 +3338,25 @@ diff --git a/src/host/connectors.js b/src/host/connectors.js
        await rt.loadSecrets()
 -      await sync(true)
 +      await sync(c, true)
++      return connectorsView()
++    },
++    // One message, on demand, once. Nothing posts room traffic on its own: that is a spam
++    // decision the owner has not made (#1263).
++    async 'connector-send'(body) {
++      const c = known(body.id)
++      if (c.def.kind !== 'sender') throw new Error('This connector sends no messages')
++      const text = typeof body.text === 'string' ? body.text.trim() : ''
++      if (text === '') throw new Error('Type a message first')
++      if (c.insecure) throw new Error(INSECURE(c.def.name))
++      await rt.loadSecrets()
++      if (rt.secretValue(c.def.secret) === undefined) throw new Error(`Connect ${c.def.name} first`)
++      const notifier = notifierOf(c)
++      // A fresh key per call: two messages with the same text are two messages, not a duplicate.
++      const result = await notifier.send({ key: randomUUID(), text })
++      const sent = result.state === 'sent' || result.state === 'duplicate'
++      const failure = `Feishu refused the message (${result.error ?? result.reason ?? 'no answer'})`
++      await keep(c, { ...saved(c), ...(sent ? { lastOkAt: Date.now() } : { lastError: failure }) })
++      if (!sent) throw new Error(failure)
        return connectorsView()
      },
    }
@@ -6143,12 +6347,12 @@ diff --git a/test/connectors.test.js b/test/connectors.test.js
    await call(ctx, 'connector-connect', { id: 'github', token: fresh() })
    await call(ctx, 'secret-delete', { name: 'GITHUB_TOKEN' })
    const state = await call(ctx, 'state', {})
-@@ -150,13 +150,19 @@ test('deleting GITHUB_TOKEN on the Secrets page unmounts GitHub', async (t) => {
+@@ -150,13 +150,25 @@ test('deleting GITHUB_TOKEN on the Secrets page unmounts GitHub', async (t) => {
    assert.equal(state.value.connectors[0].state, 'off')
  })
  
 -test('github: false hides the connector', async (t) => {
-+test('github: false and composio: false hide the connectors', async (t) => {
++test('github: false, composio: false and feishu: false hide the connectors', async (t) => {
    const home = teamHome()
    const ctx = fakeContext()
    capture(ctx)
@@ -6156,17 +6360,23 @@ diff --git a/test/connectors.test.js b/test/connectors.test.js
 -  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true, maxRetries: 5 }) })
 -  assert.deepEqual((await call(ctx, 'state', {})).value.connectors, [])
 +  t.after(async () => { await ctx.dispose(); await cleanHome(home) })
-+  assert.deepEqual((await call(ctx, 'state', {})).value.connectors.map(entry => entry.id), ['composio'])
++  assert.deepEqual((await call(ctx, 'state', {})).value.connectors.map(entry => entry.id), ['composio', 'feishu'])
 +  const other = teamHome()
 +  const second = fakeContext()
 +  capture(second)
 +  apply(second, { home: other, github: false, composio: false })
 +  t.after(async () => { await second.dispose(); await cleanHome(other) })
-+  assert.deepEqual((await call(second, 'state', {})).value.connectors, [])
++  assert.deepEqual((await call(second, 'state', {})).value.connectors.map(entry => entry.id), ['feishu'])
++  const third = teamHome()
++  const last = fakeContext()
++  capture(last)
++  apply(last, { home: third, github: false, composio: false, feishu: false })
++  t.after(async () => { await last.dispose(); await cleanHome(third) })
++  assert.deepEqual((await call(last, 'state', {})).value.connectors, [])
  })
  
  test('a GitHub address without https refuses to send the token', async (t) => {
-@@ -165,10 +165,614 @@
+@@ -165,10 +165,614 @@ test('a GitHub address without https refuses to send the token', async (t) => {
    let asked = false
    globalThis.fetch = async () => { asked = true; return answer(200, { login: 'octo' }) }
    const { ctx, home, mounts } = setup({ github: { url: 'http://mcp.test/', api: 'https://gh.test' } })
@@ -6370,7 +6580,7 @@ diff --git a/test/connectors.test.js b/test/connectors.test.js
 +  const view = (await call(ctx, 'state', {})).value.connectors
 +  assert.equal(mounts[1].disposed, true)
 +  assert.equal(mounts[0].disposed, false)
-+  assert.deepEqual(view.map(entry => [entry.id, entry.state]), [['github', 'ready'], ['composio', 'off']])
++  assert.deepEqual(view.map(entry => [entry.id, entry.state]), [['github', 'ready'], ['composio', 'off'], ['feishu', 'off']])
 +})
 +
 +test('a Composio address without https refuses to send the key', async (t) => {
