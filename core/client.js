@@ -318,6 +318,12 @@ var ZH = {
   "This DSH cannot load connectors": "这个 DSH 不能加载连接器",
   "No such connector": "没有这个连接器",
   "Gmail, Slack, Calendar, Notion and many more apps, through one Composio key": "Gmail、Slack、日历、Notion 等众多应用，一个 Composio key 就能连",
+  "Posts into one Feishu group through a custom bot webhook": "通过自定义机器人 webhook 发到你的一个飞书群",
+  "Feishu webhook URL": "飞书 webhook 地址",
+  "Get a webhook URL in Feishu": "去飞书获取 webhook 地址",
+  "Message to send to Feishu": "要发到飞书的消息",
+  "Type a message for the Feishu group": "输入要发到飞书群的消息",
+  Send: "发送",
   "Connected: {apps}": "已连接：{apps}",
   "Composio API key": "Composio API key",
   "Get a Composio API key": "去 Composio 获取 API key",
@@ -948,7 +954,6 @@ var ZH = {
   Remove: "删除",
   "Ask or update": "询问或更新",
   "Ask about or update {name}'s memory": "询问或更新 {name} 的记忆",
-  Send: "发送",
   "Added: {text}": "已添加：{text}",
   "Added to team memory: {text}": "已加入团队记忆：{text}",
   "Updated: {text}": "已更新：{text}",
@@ -12313,7 +12318,7 @@ function ownBots(roster) {
   const me = roster?.self?.memberId;
   return (roster?.bots ?? []).filter((bot) => !bot.remote && (me === void 0 || me === null || bot.ownerId === void 0 || bot.ownerId === me));
 }
-var connectedConnectors = (roster) => (roster?.connectors ?? []).filter((connector) => connector.state !== "off");
+var connectedConnectors = (roster) => (roster?.connectors ?? []).filter((connector) => connector.state !== "off" && connector.kind !== "sender");
 var isOn = (bot, id) => bot.connectors?.[id] !== false;
 function ownHint(bot, id) {
   return isOn(bot, id) ? t("On. This Bot can use it on every turn.") : t("Off. This Bot will not use it.");
@@ -15682,6 +15687,7 @@ button.bt-us-row:hover{background:var(--bt-hover)}
 var import_react36 = require("react");
 var TOKEN_URL = "https://github.com/settings/personal-access-tokens/new";
 var COMPOSIO_KEY_URL = "https://platform.composio.dev/";
+var FEISHU_WEBHOOK_URL = "https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot";
 var APPS = [
   ["gmail", "Gmail"],
   ["googlecalendar", "Google Calendar"],
@@ -15717,10 +15723,18 @@ var GitHubMark = () => (0, import_react36.createElement)(
   { width: 20, height: 20, viewBox: "0 0 16 16", fill: "currentColor", "aria-hidden": true },
   (0, import_react36.createElement)("path", { d: "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" })
 );
-var MARKS = { github: GitHubMark, composio: ConnectorIcon };
+var FeishuMark = () => (0, import_react36.createElement)(
+  "svg",
+  { width: 20, height: 20, viewBox: "0 0 20 20", fill: "currentColor", "aria-hidden": true },
+  (0, import_react36.createElement)("path", { d: "M3.2 6.6c3 .1 6.4 1.5 8.6 3.9-1.9.4-3.5 1.4-4.7 2.9-1.9-.6-3.4-1.9-3.9-3.6-.2-.7-.2-1.5 0-3.2z" }),
+  (0, import_react36.createElement)("path", { d: "M16.8 5.4c-2.9.2-5.6 1.5-7.4 3.4 1.7 1.2 3.1 2.8 3.9 4.9 2.2-1.1 3.8-3.2 4-5.6.1-.9-.1-1.9-.4-2.7z" }),
+  (0, import_react36.createElement)("path", { d: "M8.6 12.1c.9.7 1.7 1.6 2.2 2.7-1.1.2-2.3 0-3.3-.6.2-.8.6-1.5 1.1-2.1z" })
+);
+var MARKS = { github: GitHubMark, composio: ConnectorIcon, feishu: FeishuMark };
 var ABOUT = {
   github: () => t("Repositories, issues, and pull requests"),
-  composio: () => t("Gmail, Slack, Calendar, Notion and many more apps, through one Composio key")
+  composio: () => t("Gmail, Slack, Calendar, Notion and many more apps, through one Composio key"),
+  feishu: () => t("Posts into one Feishu group through a custom bot webhook")
 };
 function statusText2(connector) {
   if (connector.state === "connecting") return t("Connecting…");
@@ -15801,6 +15815,7 @@ function ConnectorRow({ connector, roster, actions }) {
   const [picking, setPicking] = (0, import_react36.useState)(false);
   const [busy, setBusy] = (0, import_react36.useState)(false);
   const [error, setError] = (0, import_react36.useState)(null);
+  const [message, setMessage] = (0, import_react36.useState)("");
   const run = (task, after) => {
     setBusy(true);
     setError(null);
@@ -15809,6 +15824,7 @@ function ConnectorRow({ connector, roster, actions }) {
     }, (failure) => setError(failure?.message ?? String(failure))).finally(() => setBusy(false));
   };
   const gateway = connector.id === "composio";
+  const sender = connector.kind === "sender";
   const [statuses, setStatuses] = (0, import_react36.useState)({});
   const appsKey = (connector.apps ?? []).join(",");
   (0, import_react36.useEffect)(() => {
@@ -15871,22 +15887,33 @@ function ConnectorRow({ connector, roster, actions }) {
           setApps(connector.apps ?? []);
           setPicking(true);
         } }, t("Choose apps")) : null,
-        on ? (0, import_react36.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", "aria-expanded": bots, onClick: () => setBots((value) => !value) }, bots ? t("Done") : t("Choose Bots")) : null,
+        on && !sender ? (0, import_react36.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", "aria-expanded": bots, onClick: () => setBots((value) => !value) }, bots ? t("Done") : t("Choose Bots")) : null,
         on ? (0, import_react36.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: () => void run(actions.connectorDisconnect(connector.id)) }, t("Disconnect")) : form ? null : (0, import_react36.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => setForm(true) }, t("Connect"))
       )
     ),
     on && gateway && !picking ? (0, import_react36.createElement)(AppStatusList, { apps: connector.apps ?? [], statuses }) : null,
-    on ? (0, import_react36.createElement)("span", { className: "bt-connector-uses" }, usageText(roster, connector.id)) : null,
+    on && !sender ? (0, import_react36.createElement)("span", { className: "bt-connector-uses" }, usageText(roster, connector.id)) : null,
     on && bots ? (0, import_react36.createElement)(ConnectorBots, { connector, roster, actions, run, SwitchRow }) : null,
+    on && sender ? (0, import_react36.createElement)(
+      "div",
+      { className: "bt-connector-form" },
+      (0, import_react36.createElement)("label", { className: "bt-q-field" }, (0, import_react36.createElement)("input", { className: "bt-input", type: "text", value: message, "aria-label": t("Message to send to Feishu"), placeholder: t("Type a message for the Feishu group"), onChange: (event) => setMessage(event.target.value) })),
+      (0, import_react36.createElement)(
+        "div",
+        { className: "bt-connector-form-row" },
+        (0, import_react36.createElement)("span", { className: "bt-connector-link" }),
+        (0, import_react36.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy || message.trim() === "" || actions.connectorSend === void 0, onClick: () => void run(actions.connectorSend(connector.id, message), () => setMessage("")) }, t("Send"))
+      )
+    ) : null,
     !on && form ? (0, import_react36.createElement)(
       "div",
       { className: "bt-connector-form" },
-      (0, import_react36.createElement)("label", { className: "bt-q-field bt-secret-field" }, (0, import_react36.createElement)(MaskedInput, { value: token, onChange: setToken, onEnter: connect, label: gateway ? t("Composio API key") : t("GitHub token"), autoFocus: true })),
+      (0, import_react36.createElement)("label", { className: "bt-q-field bt-secret-field" }, (0, import_react36.createElement)(MaskedInput, { value: token, onChange: setToken, onEnter: connect, label: sender ? t("Feishu webhook URL") : gateway ? t("Composio API key") : t("GitHub token"), autoFocus: true })),
       gateway ? (0, import_react36.createElement)(AppPicker, { apps, onChange: setApps, search: token.trim() === "" ? void 0 : search }) : null,
       (0, import_react36.createElement)(
         "div",
         { className: "bt-connector-form-row" },
-        (0, import_react36.createElement)("a", { className: "bt-connector-link", href: gateway ? COMPOSIO_KEY_URL : TOKEN_URL, target: "_blank", rel: "noopener noreferrer" }, gateway ? t("Get a Composio API key") : t("Create a token on GitHub")),
+        (0, import_react36.createElement)("a", { className: "bt-connector-link", href: sender ? FEISHU_WEBHOOK_URL : gateway ? COMPOSIO_KEY_URL : TOKEN_URL, target: "_blank", rel: "noopener noreferrer" }, sender ? t("Get a webhook URL in Feishu") : gateway ? t("Get a Composio API key") : t("Create a token on GitHub")),
         (0, import_react36.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: () => {
           setForm(false);
           setToken("");
@@ -19821,6 +19848,7 @@ function apply(ctx) {
     connectorAppStatus: (id) => call("connector-app-status", { id }),
     connectorDisconnect: (id) => after(call("connector-disconnect", { id })),
     connectorRetry: (id) => after(call("connector-retry", { id })),
+    connectorSend: (id, text) => after(call("connector-send", { id, text })),
     saveCapability: (capability) => after(call("capability-save", capability)),
     deleteCapability: (name) => after(call("capability-delete", { name })),
     approveCapability: (name) => after(call("capability-approve", { name })),

@@ -225,13 +225,19 @@ diff --git a/client.js b/client.js
    Connected: "已连接",
    Disconnect: "断开",
    Connect: "连接",
-@@ -141,17 +141,44 @@ var ZH = {
+@@ -141,17 +141,50 @@ var ZH = {
    "GitHub addresses must start with https://": "GitHub 地址必须以 https:// 开头",
    "This DSH cannot load connectors": "这个 DSH 不能加载连接器",
    "No such connector": "没有这个连接器",
 -  "Classic Agent mode": "经典 Agent 模式",
 -  "Switch": "切换",
 +  "Gmail, Slack, Calendar, Notion and many more apps, through one Composio key": "Gmail、Slack、日历、Notion 等众多应用，一个 Composio key 就能连",
++  "Posts into one Feishu group through a custom bot webhook": "通过自定义机器人 webhook 发到你的一个飞书群",
++  "Feishu webhook URL": "飞书 webhook 地址",
++  "Get a webhook URL in Feishu": "去飞书获取 webhook 地址",
++  "Message to send to Feishu": "要发到飞书的消息",
++  "Type a message for the Feishu group": "输入要发到飞书群的消息",
++  Send: "发送",
 +  "Connected: {apps}": "已连接：{apps}",
 +  "Composio API key": "Composio API key",
 +  "Get a Composio API key": "去 Composio 获取 API key",
@@ -566,6 +572,14 @@ diff --git a/client.js b/client.js
    "Save key": "保存密钥",
    "Keys your Bots asked for. Bots never see the values: they use them as ": "你的 Bot 请求过的密钥。Bot 永远看不到值：它们在 shell 里通过 ",
    " in their shell, and every value is replaced by ": " 使用，而且发给模型之前，每个值都会被替换成 ",
+@@ -621,7 +621,6 @@ var ZH = {
+   Remove: "删除",
+   "Ask or update": "询问或更新",
+   "Ask about or update {name}'s memory": "询问或更新 {name} 的记忆",
+-  Send: "发送",
+   "Added: {text}": "已添加：{text}",
+   "Added to team memory: {text}": "已加入团队记忆：{text}",
+   "Updated: {text}": "已更新：{text}",
 @@ -747,11 +747,11 @@ var ZH = {
    "Compared with the {count} days before": "与再往前 {count} 天相比",
    "{share}% of all usage from {span}": "占 {span} 全部用量的 {share}%",
@@ -1512,16 +1526,7 @@ diff --git a/client.js b/client.js
 -    else delete SHAPES[id];
 -    refresh();
 -  };
-+// src/client/cluster-order.js
-+function clusterOrder(people2) {
-+  const list = Array.isArray(people2) ? people2 : [];
-+  const remote = (bot) => Boolean(bot?.remote);
-+  if (!list.some(remote)) return list;
-+  const locals = list.filter((bot) => !remote(bot));
-+  const remotes = list.filter(remote);
-+  if (list.length <= 4) return [...remotes, ...locals];
-+  return [...locals, ...remotes];
- }
+-}
 -function registerTheme(id, theme) {
 -  if (typeof id !== "string" || !/^[a-z][\w-]{0,31}$/.test(id)) throw new Error("Theme ids are lowercase words");
 -  for (const mode of ["light", "dark"]) {
@@ -1535,7 +1540,16 @@ diff --git a/client.js b/client.js
 -    else delete customThemes[id];
 -    registry.set((value) => value + 1);
 -  };
--}
++// src/client/cluster-order.js
++function clusterOrder(people2) {
++  const list = Array.isArray(people2) ? people2 : [];
++  const remote = (bot) => Boolean(bot?.remote);
++  if (!list.some(remote)) return list;
++  const locals = list.filter((bot) => !remote(bot));
++  const remotes = list.filter(remote);
++  if (list.length <= 4) return [...remotes, ...locals];
++  return [...locals, ...remotes];
+ }
 -var allThemes = () => ({ ...THEMES, ...customThemes });
  
  // src/shared/mentions.js
@@ -1545,8 +1559,6 @@ diff --git a/client.js b/client.js
    return spans;
  }
 -
--// src/client/text.js
--var MENTION_ORIGIN = "https://bots.local/";
 +function unmatchedMentions(text, bots, { references = [] } = {}) {
 +  const value = String(text ?? "");
 +  const skip = [
@@ -1569,8 +1581,8 @@ diff --git a/client.js b/client.js
 +  return missing;
 +}
 +
-+// src/client/text.js
-+var MENTION_ORIGIN = "https://bots.local/";
+ // src/client/text.js
+ var MENTION_ORIGIN = "https://bots.local/";
  function linkMentions(text, bots, selfId) {
    if (!text || !text.includes("@")) return text;
 +  const ordered = [...bots ?? []].sort((a, b) => Number(Boolean(a?.remote)) - Number(Boolean(b?.remote)));
@@ -1697,7 +1709,7 @@ diff --git a/client.js b/client.js
    }
    return "";
  }
-@@ -1624,212 +1624,1120 @@ function usageOf(list, ids) {
+@@ -1624,220 +1624,1129 @@ function usageOf(list, ids) {
    const hit = input > 0 ? Math.round(cacheRead / input * 100) : 0;
    return t("{tokens} tok · Cache hit {hit}%", { tokens: formatTokens(input + output), hit });
  }
@@ -1990,6 +2002,8 @@ diff --git a/client.js b/client.js
  }
  
 -// src/client/styles.js
+-var SHELL_CSS = `
+-body{--bt-ink:#141414;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56)}
 +// src/client/mark.js
 +var import_react = require("react");
 +var STATES = ["idle", "thinking", "searching", "working", "sending", "orbit", "alert", "done"];
@@ -3009,10 +3023,11 @@ diff --git a/client.js b/client.js
 +}
 +
 +// src/client/styles.js
- var SHELL_CSS = `
- body{--bt-ink:#141414;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56)}
++var SHELL_CSS = `
++body{--bt-ink:#141414;--bt-ink-2:rgba(20,20,20,.6);--bt-ink-3:rgba(20,20,20,.36);--bt-bubble:#eeeeee;--bt-sidebar:#f7f7f7;--bt-main:#fcfcfc;--bt-line:rgba(20,20,20,.08);--bt-line-2:rgba(20,20,20,.15);--bt-line-weak:rgba(20,20,20,.1);--bt-hover:rgba(119,119,119,.09);--bt-active:rgba(119,119,119,.17);--bt-card:#ffffff;--bt-accent:#4d6bfe;--bt-green:#00c972;--bt-star:#ff9800;--bt-user:#070707;--bt-user-ink:#fcfcfc;--bt-tag-bg:rgba(20,20,20,.06);--bt-tag-ink:rgba(20,20,20,.56)}
  body[data-ds-dark-theme]{--bt-ink:#f2f2f2;--bt-ink-2:rgba(242,242,242,.6);--bt-ink-3:rgba(242,242,242,.36);--bt-bubble:#262626;--bt-sidebar:#1b1b1b;--bt-main:#141414;--bt-line:rgba(255,255,255,.08);--bt-line-2:rgba(255,255,255,.15);--bt-line-weak:rgba(255,255,255,.1);--bt-hover:rgba(160,160,160,.12);--bt-active:rgba(160,160,160,.2);--bt-card:#1f1f1f;--bt-user:#f2f2f2;--bt-user-ink:#141414;--bt-tag-bg:rgba(255,255,255,.09);--bt-tag-ink:rgba(242,242,242,.62)}
-@@ -1838,6 +1838,7 @@ ${Object.entries(INKS).map(([name, [, dark]]) => `body[data-ds-dark-theme]{--bt-
+ ${Object.entries(INKS).map(([name, [light]]) => `body{--bt-ink-${name}:${light}}`).join("")}
+ ${Object.entries(INKS).map(([name, [, dark]]) => `body[data-ds-dark-theme]{--bt-ink-${name}:${dark}}`).join("")}
  .bt-mark{display:inline-block;flex:none;position:relative;line-height:0}
  .bt-mark svg{width:100%;height:100%;overflow:visible}
  .bt-mark-img{width:100%;height:100%;border-radius:50%;object-fit:cover;display:block;box-shadow:inset 0 0 0 1px var(--bt-line)}
@@ -4483,36 +4498,7 @@ diff --git a/client.js b/client.js
 +  const waiting = (roster.secretRequests?.[bot.id] ?? []).filter((entry) => entry.status === "pending" && !drawn(entry));
 +  if (waiting.length === 0) return null;
 +  return (0, import_react7.createElement)("div", { className: "bt-q-dock bt-secret-dock" }, waiting.map((request) => (0, import_react7.createElement)(SecretCard, { key: `${request.id}:${request.kind}`, bot, request, roster, actions })));
- }
--var FIDGETS = ["hop", "sway", "stretch", "look"];
--function BotMark({ bot, look: given, size = 36, state = "idle", live = false, gaze = false, pokeable = false, label }) {
--  const look = given ?? lookOf(bot);
--  const ref = (0, import_react2.useRef)(null);
--  const maskId = (0, import_react2.useRef)("");
--  if (maskId.current === "") maskId.current = `bt-mark-${nextMarkSerial()}`;
--  const [poked, setPoked] = (0, import_react2.useState)(false);
--  useGaze(ref, gaze);
--  const common = {
--    ref,
--    className: poked ? "bt-mark bt-mark-poke" : "bt-mark",
--    "data-shape": look.image ? "image" : shapeId(look.shape),
--    "data-state": STATES.includes(state) ? state : "idle",
--    "data-live": live ? "" : void 0,
--    "data-fidget": live ? FIDGETS[fnv1a(`${bot?.id ?? ""}:fidget`) % FIDGETS.length] : void 0,
--    "data-gaze": gaze ? "" : void 0,
--    "data-poke": pokeable ? "" : void 0,
--    style: { width: size, height: size, ...live ? { "--bt-delay": `${-(fnv1a(String(bot?.id ?? "")) % 5e3) / 1e3}s`, "--bt-fidget-delay": `${-(fnv1a(`${bot?.id ?? ""}:when`) % 9e3) / 1e3}s` } : {} },
--    role: label ? "img" : void 0,
--    "aria-label": label,
--    "aria-hidden": label ? void 0 : true,
--    onClick: pokeable ? () => setPoked(true) : void 0,
--    onAnimationEnd: poked ? (event) => {
--      if (/^bt-poke/.test(event.animationName)) setPoked(false);
--    } : void 0
--  };
--  if (look.image) return (0, import_react2.createElement)("span", common, (0, import_react2.createElement)("img", { className: "bt-mark-img", src: look.image, alt: "", draggable: false }));
--  const box = shapeOf(look.shape).size;
--  return (0, import_react2.createElement)("span", common, (0, import_react2.createElement)("svg", { viewBox: `0 0 ${box} ${box}`, dangerouslySetInnerHTML: { __html: characterMarkup(look.shape, look.color).replaceAll(MASK_ID, maskId.current) } }));
++}
 +var scopeMode = (scope) => scope === "all" ? "all" : scope.length === 0 ? "none" : "some";
 +function ScopeEditor({ secret, roster, onSave }) {
 +  const [mode, setMode] = (0, import_react7.useState)(scopeMode(secret.scope));
@@ -4548,11 +4534,31 @@ diff --git a/client.js b/client.js
 +    )
 +  );
  }
--function StarIcon({ size = 8 }) {
--  return (0, import_react2.createElement)(
--    "svg",
--    { width: size, height: size, viewBox: "0 0 10 10", "aria-hidden": true },
--    (0, import_react2.createElement)("path", { d: "M5 .6l1.3 2.8 3 .3-2.3 2 .7 3L5 7.2 2.3 8.7l.7-3L.7 3.7l3-.3z", fill: "#fff" })
+-var FIDGETS = ["hop", "sway", "stretch", "look"];
+-function BotMark({ bot, look: given, size = 36, state = "idle", live = false, gaze = false, pokeable = false, label }) {
+-  const look = given ?? lookOf(bot);
+-  const ref = (0, import_react2.useRef)(null);
+-  const maskId = (0, import_react2.useRef)("");
+-  if (maskId.current === "") maskId.current = `bt-mark-${nextMarkSerial()}`;
+-  const [poked, setPoked] = (0, import_react2.useState)(false);
+-  useGaze(ref, gaze);
+-  const common = {
+-    ref,
+-    className: poked ? "bt-mark bt-mark-poke" : "bt-mark",
+-    "data-shape": look.image ? "image" : shapeId(look.shape),
+-    "data-state": STATES.includes(state) ? state : "idle",
+-    "data-live": live ? "" : void 0,
+-    "data-fidget": live ? FIDGETS[fnv1a(`${bot?.id ?? ""}:fidget`) % FIDGETS.length] : void 0,
+-    "data-gaze": gaze ? "" : void 0,
+-    "data-poke": pokeable ? "" : void 0,
+-    style: { width: size, height: size, ...live ? { "--bt-delay": `${-(fnv1a(String(bot?.id ?? "")) % 5e3) / 1e3}s`, "--bt-fidget-delay": `${-(fnv1a(`${bot?.id ?? ""}:when`) % 9e3) / 1e3}s` } : {} },
+-    role: label ? "img" : void 0,
+-    "aria-label": label,
+-    "aria-hidden": label ? void 0 : true,
+-    onClick: pokeable ? () => setPoked(true) : void 0,
+-    onAnimationEnd: poked ? (event) => {
+-      if (/^bt-poke/.test(event.animationName)) setPoked(false);
+-    } : void 0
 +function ValueEditor({ secret, onSave }) {
 +  const [value, setValue] = (0, import_react7.useState)("");
 +  const [replaced, setReplaced] = (0, import_react7.useState)(false);
@@ -4565,7 +4571,16 @@ diff --git a/client.js b/client.js
 +        setReplaced(true);
 +      }
 +    });
-+  };
+   };
+-  if (look.image) return (0, import_react2.createElement)("span", common, (0, import_react2.createElement)("img", { className: "bt-mark-img", src: look.image, alt: "", draggable: false }));
+-  const box = shapeOf(look.shape).size;
+-  return (0, import_react2.createElement)("span", common, (0, import_react2.createElement)("svg", { viewBox: `0 0 ${box} ${box}`, dangerouslySetInnerHTML: { __html: characterMarkup(look.shape, look.color).replaceAll(MASK_ID, maskId.current) } }));
+-}
+-function StarIcon({ size = 8 }) {
+-  return (0, import_react2.createElement)(
+-    "svg",
+-    { width: size, height: size, viewBox: "0 0 10 10", "aria-hidden": true },
+-    (0, import_react2.createElement)("path", { d: "M5 .6l1.3 2.8 3 .3-2.3 2 .7 3L5 7.2 2.3 8.7l.7-3L.7 3.7l3-.3z", fill: "#fff" })
 +  const edit = (next) => {
 +    setValue(next);
 +    setReplaced(false);
@@ -5728,22 +5743,11 @@ diff --git a/client.js b/client.js
 +      setBusy("");
      }
 -  });
-+  };
-+  return (0, import_react9.createElement)(
-+    "div",
-+    { className: "bt-file-chips" },
-+    files.map((file) => (0, import_react9.createElement)(
-+      "button",
-+      { key: file.id, type: "button", className: "bt-file-chip", disabled: busy === file.id, title: `Download ${file.name} (untrusted file from a remote Bot)`, onClick: () => download2(file) },
-+      `📎 ${file.name} · ${fileSize(file.size)}`
-+    )),
-+    error ? (0, import_react9.createElement)("span", { className: "bt-file-error", role: "alert" }, error) : null
-+  );
- }
+-}
 -function ScopeSwitch({ value, onChange, bot }) {
 -  const options = [["all", t("All Bots")], ["bot", t("Only {name}", { name: bot.name })]];
 -  return (0, import_react5.createElement)(
-+function GroupEvent({ prefix, room: room2, name, roster, actions }) {
++  };
 +  return (0, import_react9.createElement)(
      "div",
 -    { className: "bt-secret-scope", role: "radiogroup", "aria-label": t("Who may use it") },
@@ -5756,21 +5760,18 @@ diff --git a/client.js b/client.js
 -      className: "bt-secret-seg",
 -      onClick: () => onChange(id)
 -    }, text))
-+    { className: "bt-event" },
-+    (0, import_react9.createElement)("span", null, prefix),
-+    room2 ? (0, import_react9.createElement)("button", { type: "button", onClick: () => actions.openSession(room2.id) }, (0, import_react9.createElement)(RoomAvatar, { room: room2, roster, size: 16 }), room2.name) : name ? (0, import_react9.createElement)("span", null, name) : null
++    { className: "bt-file-chips" },
++    files.map((file) => (0, import_react9.createElement)(
++      "button",
++      { key: file.id, type: "button", className: "bt-file-chip", disabled: busy === file.id, title: `Download ${file.name} (untrusted file from a remote Bot)`, onClick: () => download2(file) },
++      `📎 ${file.name} · ${fileSize(file.size)}`
++    )),
++    error ? (0, import_react9.createElement)("span", { className: "bt-file-error", role: "alert" }, error) : null
    );
  }
 -function SecretHead({ bot, title, detail, name, onClose }) {
 -  return (0, import_react5.createElement)(
-+function MemoryEvent({ sessionId, scope, result, roster, actions, findBot }) {
-+  if (!/^(Saved to|Updated in|Removed from) /.test(result)) return null;
-+  const self = roster.byId[sessionId];
-+  const team = /^(team|团队|共享)$/i.test(String(scope ?? "").trim());
-+  const other = team || !scope ? void 0 : findBot(scope);
-+  const target = other && other.id !== self?.id ? other : self;
-+  if (!target) return null;
-+  const label = team ? t("Team memory updated") : target === self ? t("Memory updated") : t("Updated {name}'s memory", { name: target.name });
++function GroupEvent({ prefix, room: room2, name, roster, actions }) {
 +  return (0, import_react9.createElement)(
      "div",
 -    { className: "bt-q-head bt-secret-head" },
@@ -5783,7 +5784,8 @@ diff --git a/client.js b/client.js
 -    ),
 -    onClose ? (0, import_react5.createElement)("button", { type: "button", className: "bt-q-x", "aria-label": t("Cancel the request"), title: t("Cancel"), onClick: onClose }, (0, import_react5.createElement)(CloseIcon)) : null
 +    { className: "bt-event" },
-+    (0, import_react9.createElement)("button", { type: "button", title: result, onClick: () => actions.openMemory(target.id) }, (0, import_react9.createElement)(MemoryIcon), label)
++    (0, import_react9.createElement)("span", null, prefix),
++    room2 ? (0, import_react9.createElement)("button", { type: "button", onClick: () => actions.openSession(room2.id) }, (0, import_react9.createElement)(RoomAvatar, { room: room2, roster, size: 16 }), room2.name) : name ? (0, import_react9.createElement)("span", null, name) : null
    );
  }
 -function SecretCard({ bot, request, roster, actions }) {
@@ -5806,6 +5808,20 @@ diff --git a/client.js b/client.js
 -  };
 -  const allow = () => {
 -    if (!busy) void run(actions.secretAllow(request.id));
++function MemoryEvent({ sessionId, scope, result, roster, actions, findBot }) {
++  if (!/^(Saved to|Updated in|Removed from) /.test(result)) return null;
++  const self = roster.byId[sessionId];
++  const team = /^(team|团队|共享)$/i.test(String(scope ?? "").trim());
++  const other = team || !scope ? void 0 : findBot(scope);
++  const target = other && other.id !== self?.id ? other : self;
++  if (!target) return null;
++  const label = team ? t("Team memory updated") : target === self ? t("Memory updated") : t("Updated {name}'s memory", { name: target.name });
++  return (0, import_react9.createElement)(
++    "div",
++    { className: "bt-event" },
++    (0, import_react9.createElement)("button", { type: "button", title: result, onClick: () => actions.openMemory(target.id) }, (0, import_react9.createElement)(MemoryIcon), label)
++  );
++}
 +function PartLine({ time }) {
 +  return (0, import_react9.createElement)("div", { className: "bt-part-line", role: "separator" }, Number.isFinite(time) ? (0, import_react9.createElement)("span", null, dayLabel(time)) : null);
 +}
@@ -7465,6 +7481,8 @@ diff --git a/client.js b/client.js
 -var scrollParent = (node) => {
 -  for (let at = node.parentElement; at; at = at.parentElement) {
 -    if (/(auto|scroll)/.test(getComputedStyle(at).overflowY)) return at;
+-  }
+-  return null;
 +var MEMBER_CSS = `
 +.bt-mw-dock-stack{box-sizing:border-box;display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:var(--dsh-chat-content-width,min(960px,100%));margin:0 auto 6px;pointer-events:none}
 +.bt-mw-row{pointer-events:auto;display:flex;align-items:center;gap:10px;min-width:0;max-width:calc(100% + 6px);height:32px;margin-inline-start:-6px;padding:0 12px 0 6px;border:0;border-radius:16px;background:none;color:var(--bt-ink-2);font:inherit;font-size:14px;cursor:pointer;animation:bt-mw-in .32s cubic-bezier(.23,1,.32,1) backwards;transition:background-color .16s ease-out}
@@ -7507,7 +7525,26 @@ diff --git a/client.js b/client.js
 +var line = (d) => (0, import_react13.createElement)("path", { d });
 +var icon = (...paths) => function StatusIcon() {
 +  return (0, import_react13.createElement)("svg", { width: 14, height: 14, viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true }, paths.map(line));
-+};
+ };
+-function EarlierParts({ sessionId, roster, actions }) {
+-  const [view, setView] = (0, import_react6.useState)({ items: [], cursor: void 0, loading: true, failed: false, startedAt: null });
+-  const top = (0, import_react6.useRef)(null);
+-  const busy = (0, import_react6.useRef)(false);
+-  const alive = (0, import_react6.useRef)(true);
+-  const restore = (0, import_react6.useRef)(null);
+-  const load = (cursor) => {
+-    if (busy.current) return;
+-    busy.current = true;
+-    setView((current) => ({ ...current, loading: true, failed: false }));
+-    actions.earlier(sessionId, cursor).then((page) => {
+-      busy.current = false;
+-      if (!alive.current) return;
+-      const scroller = top.current && scrollParent(top.current);
+-      if (scroller) restore.current = { scroller, fromEnd: scroller.scrollHeight - scroller.scrollTop };
+-      setView((current) => ({ items: [...page.items, ...current.items], cursor: page.cursor, loading: false, failed: false, startedAt: page.startedAt ?? current.startedAt }));
+-    }, () => {
+-      busy.current = false;
+-      if (alive.current) setView((current) => ({ ...current, loading: false, failed: true }));
 +var RING = "M10 3.25a6.75 6.75 0 1 1 0 13.5 6.75 6.75 0 0 1 0-13.5z";
 +var InboxIcon = icon("M3.5 11.5l1.9-6.1A1.5 1.5 0 0 1 6.83 4.35h6.34a1.5 1.5 0 0 1 1.43 1.05l1.9 6.1", "M3.5 11.5v3.25a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5V11.5", "M3.5 11.5h3.75l1 1.75h3.5l1-1.75h3.75");
 +var AskIcon = icon(RING, "M10 6.75v3.75", "M10 13.25h.01");
@@ -7551,9 +7588,14 @@ diff --git a/client.js b/client.js
 +    }).catch(() => {
 +    }).finally(() => {
 +      if (!stopped) timer = setTimeout(load, POLL_MS2);
-+    });
+     });
+-  };
+-  (0, import_react6.useEffect)(() => {
+-    alive.current = true;
+-    load(void 0);
 +    load();
-+    return () => {
+     return () => {
+-      alive.current = false;
 +      stopped = true;
 +      clearTimeout(timer);
 +      taskListeners.delete(setTasks);
@@ -7578,29 +7620,9 @@ diff --git a/client.js b/client.js
 +    if (question == null || typeof question !== "object" || roster.roomsById?.[key]) continue;
 +    if (question.question !== text) continue;
 +    if (key === bot.id || key === currentPart(bot)) return bot.id;
-   }
--  return null;
++  }
 +  return void 0;
- };
--function EarlierParts({ sessionId, roster, actions }) {
--  const [view, setView] = (0, import_react6.useState)({ items: [], cursor: void 0, loading: true, failed: false, startedAt: null });
--  const top = (0, import_react6.useRef)(null);
--  const busy = (0, import_react6.useRef)(false);
--  const alive = (0, import_react6.useRef)(true);
--  const restore = (0, import_react6.useRef)(null);
--  const load = (cursor) => {
--    if (busy.current) return;
--    busy.current = true;
--    setView((current) => ({ ...current, loading: true, failed: false }));
--    actions.earlier(sessionId, cursor).then((page) => {
--      busy.current = false;
--      if (!alive.current) return;
--      const scroller = top.current && scrollParent(top.current);
--      if (scroller) restore.current = { scroller, fromEnd: scroller.scrollHeight - scroller.scrollTop };
--      setView((current) => ({ items: [...page.items, ...current.items], cursor: page.cursor, loading: false, failed: false, startedAt: page.startedAt ?? current.startedAt }));
--    }, () => {
--      busy.current = false;
--      if (alive.current) setView((current) => ({ ...current, loading: false, failed: true }));
++};
 +var placeKey = (botId, roomId) => `${botId}|${roomId ?? ""}`;
 +var partOf = (roster, chat) => roster.roomsById?.[chat] || !roster.byId?.[chat] ? chat : currentPart(roster.byId[chat]);
 +var runningIn = (work, botId, roomId) => roomId === void 0 ? work.bots?.[botId]?.roomId === void 0 ? work.bots?.[botId] : void 0 : (work.rooms?.[roomId] ?? []).find((entry) => entry.botId === botId) ?? (work.bots?.[botId]?.roomId === roomId ? work.bots[botId] : void 0);
@@ -7735,13 +7757,7 @@ diff --git a/client.js b/client.js
 +      place: placeOf(roster, entry.roomId),
 +      chat,
 +      ...people(roster, bot.id)
-     });
--  };
--  (0, import_react6.useEffect)(() => {
--    alive.current = true;
--    load(void 0);
--    return () => {
--      alive.current = false;
++    });
 +  }
 +  for (const task of tasks) {
 +    const bot = ownBot(roster, task.ownerBotId);
@@ -11009,21 +11025,32 @@ diff --git a/client.js b/client.js
    );
    const toLatest = () => {
      const scroller = document.querySelector("[data-conversation-scroll]");
-@@ -5704,8 +5704,8 @@ function NewMessagePills({ sessionId, useSessions, useUi, useTurnClock }) {
+@@ -5702,31 +5702,129 @@ function NewMessagePills({ sessionId, useSessions, useUi, useTurnClock }) {
+     if (back) back.click();
+     else scroller?.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
    };
-   const toDivider = () => document.querySelector("[data-conversation-scroll] .bt-new-sep")?.scrollIntoView({ block: "center", behavior: "smooth" });
-   return (0, import_react_dom4.createPortal)(
+-  const toDivider = () => document.querySelector("[data-conversation-scroll] .bt-new-sep")?.scrollIntoView({ block: "center", behavior: "smooth" });
+-  return (0, import_react_dom4.createPortal)(
 -    (0, import_react9.createElement)(
 -      import_react9.Fragment,
+-      null,
+-      showUp ? pill("up", unread, { left: view.center, top: view.top }, toDivider, () => setAbove((state) => ({ ...state, dismissed: true }))) : null,
+-      showDown ? pill("down", fresh, { left: view.center, bottom: view.bottom }, toLatest, () => setRelease((state) => ({ ...state, dismissed: true }))) : null
+-    ),
+-    document.body
+-  );
++  const toDivider = () => document.querySelector("[data-conversation-scroll] .bt-new-sep")?.scrollIntoView({ block: "center", behavior: "smooth" });
++  return (0, import_react_dom4.createPortal)(
 +    (0, import_react18.createElement)(
 +      import_react18.Fragment,
-       null,
-       showUp ? pill("up", unread, { left: view.center, top: view.top }, toDivider, () => setAbove((state) => ({ ...state, dismissed: true }))) : null,
-       showDown ? pill("down", fresh, { left: view.center, bottom: view.bottom }, toLatest, () => setRelease((state) => ({ ...state, dismissed: true }))) : null
-@@ -5714,19 +5714,117 @@ function NewMessagePills({ sessionId, useSessions, useUi, useTurnClock }) {
-   );
- }
- 
++      null,
++      showUp ? pill("up", unread, { left: view.center, top: view.top }, toDivider, () => setAbove((state) => ({ ...state, dismissed: true }))) : null,
++      showDown ? pill("down", fresh, { left: view.center, bottom: view.bottom }, toLatest, () => setRelease((state) => ({ ...state, dismissed: true }))) : null
++    ),
++    document.body
++  );
++}
++
 +// src/client/composer-label.js
 +var ATTRIBUTES = ["aria-label", "data-placeholder"];
 +function holdComposerLabel(doc, label) {
@@ -11120,8 +11147,8 @@ diff --git a/client.js b/client.js
 +    for (const held of slots.values()) held.off();
 +    slots.clear();
 +  };
-+}
-+
+ }
+ 
  // src/client/composer.js
 -var import_react10 = require("react");
 +var import_react19 = require("react");
@@ -11465,23 +11492,10 @@ diff --git a/client.js b/client.js
  // src/client/speech.js
  var VOICE_BUNDLE = "@deepseek-ai/dsh-experimental-voice-input-bundle";
  var USABLE = /* @__PURE__ */ new Set(["ready", "standby", "waking"]);
-@@ -6100,253 +6100,29 @@ async function openCapture() {
-     }
-   };
- }
--async function transcribeWave(speech, catalog, wave, signal) {
--  if (wave.byteLength > catalog.maxAudioBytes) throw captureError("too-long");
--  const result = await speech.transcribe({ audioBase64: base64Of(wave), ...catalog.selection }, signal);
--  if (!result?.ok) throw Object.assign(new Error(result?.error?.message ?? "Transcription failed"), { kind: "service" });
--  return String(result.value?.text ?? "").trim();
--}
--function turnDetector({ loud = 0.12, quiet = 0.06, quietMs = 1200 } = {}) {
--  let spokeAt = 0;
--  let quietSince = 0;
--  return (level, now) => {
--    if (level >= loud) {
--      spokeAt ||= now;
--      quietSince = 0;
+@@ -6113,240 +6113,16 @@ function turnDetector({ loud = 0.12, quiet = 0.06, quietMs = 1200 } = {}) {
+     if (level >= loud) {
+       spokeAt ||= now;
+       quietSince = 0;
 -      return "speech";
 -    }
 -    if (!spokeAt) return "waiting";
@@ -11712,27 +11726,13 @@ diff --git a/client.js b/client.js
 -      )
 -    )
 -  );
--}
-+async function transcribeWave(speech, catalog, wave, signal) {
-+  if (wave.byteLength > catalog.maxAudioBytes) throw captureError("too-long");
-+  const result = await speech.transcribe({ audioBase64: base64Of(wave), ...catalog.selection }, signal);
-+  if (!result?.ok) throw Object.assign(new Error(result?.error?.message ?? "Transcription failed"), { kind: "service" });
-+  return String(result.value?.text ?? "").trim();
-+}
-+function turnDetector({ loud = 0.12, quiet = 0.06, quietMs = 1200 } = {}) {
-+  let spokeAt = 0;
-+  let quietSince = 0;
-+  return (level, now) => {
-+    if (level >= loud) {
-+      spokeAt ||= now;
-+      quietSince = 0;
 +      return "speech";
 +    }
 +    if (!spokeAt) return "waiting";
 +    if (level < quiet) quietSince ||= now;
 +    return quietSince && now - quietSince >= quietMs ? "done" : "speech";
 +  };
-+}
+ }
  
  // src/client/model-menu.js
 -var import_react13 = require("react");
@@ -13040,7 +13040,7 @@ diff --git a/client.js b/client.js
 +  const me = roster?.self?.memberId;
 +  return (roster?.bots ?? []).filter((bot) => !bot.remote && (me === void 0 || me === null || bot.ownerId === void 0 || bot.ownerId === me));
 +}
-+var connectedConnectors = (roster) => (roster?.connectors ?? []).filter((connector) => connector.state !== "off");
++var connectedConnectors = (roster) => (roster?.connectors ?? []).filter((connector) => connector.state !== "off" && connector.kind !== "sender");
 +var isOn = (bot, id) => bot.connectors?.[id] !== false;
 +function ownHint(bot, id) {
 +  return isOn(bot, id) ? t("On. This Bot can use it on every turn.") : t("Off. This Bot will not use it.");
@@ -13715,7 +13715,7 @@ diff --git a/client.js b/client.js
          const file = event.target.files?.[0];
          event.target.value = "";
          upload(file);
-@@ -7982,178 +7982,825 @@ function AvatarEditor({ bot, actions, run, onClose }) {
+@@ -7982,26 +7982,27 @@ function AvatarEditor({ bot, actions, run, onClose }) {
  function MemoryCard({ bot, actions }) {
    const count = useMemoryCount(bot.id, actions);
    const label = count === null ? t("Loading…") : count === 0 ? t("Nothing saved yet") : count === 1 ? t("1 entry") : t("{count} entries", { count });
@@ -13751,41 +13751,49 @@ diff --git a/client.js b/client.js
    const isMainBot = isMainOf(roster, bot.id);
    const onlyMain = isMainBot && (roster.mainBotIds ?? []).length === 1;
    const isTile = roster.mainBotId === bot.id;
-   const save = (patch) => run(actions.updateBot(bot.id, patch));
-   const duplicate = () => run(actions.duplicateBot(bot.id).then((copy2) => actions.openSession(copy2.id)));
-   const remove = () => {
--    if (confirming) void run(actions.deleteBot(bot.id));
--    else setConfirming(true);
-+    if (confirming) void run(actions.deleteBot(bot.id));
-+    else setConfirming(true);
-+  };
+@@ -8011,149 +8011,795 @@ function BotSettingsForm({ bot, roster, actions, run }) {
+     if (confirming) void run(actions.deleteBot(bot.id));
+     else setConfirming(true);
+   };
+-  (0, import_react18.useEffect)(() => {
 +  (0, import_react28.useEffect)(() => {
-+    void actions.refreshModels?.();
-+  }, [bot.id]);
+     void actions.refreshModels?.();
+   }, [bot.id]);
+-  return (0, import_react18.createElement)(
 +  return (0, import_react28.createElement)(
-+    "div",
-+    { className: "bt-bs" },
+     "div",
+     { className: "bt-bs" },
+-    (0, import_react18.createElement)(
 +    (0, import_react28.createElement)(
-+      "div",
-+      { className: "bt-bs-hero" },
+       "div",
+       { className: "bt-bs-hero" },
+-      (0, import_react18.createElement)(
 +      (0, import_react28.createElement)(
-+        "div",
-+        { className: "bt-avatar-anchor" },
+         "div",
+         { className: "bt-avatar-anchor" },
+-        (0, import_react18.createElement)(
 +        (0, import_react28.createElement)(
-+          "button",
-+          { type: "button", className: "bt-avatar-trigger", "aria-label": t("Edit Bot avatar"), "aria-expanded": editing, onClick: () => setEditing((value) => !value) },
+           "button",
+           { type: "button", className: "bt-avatar-trigger", "aria-label": t("Edit Bot avatar"), "aria-expanded": editing, onClick: () => setEditing((value) => !value) },
+-          (0, import_react18.createElement)(BotMark, { bot, size: 64, live: true }),
+-          (0, import_react18.createElement)("span", { className: "bt-avatar-pencil", "aria-hidden": true }, (0, import_react18.createElement)(PencilIcon))
 +          (0, import_react28.createElement)(BotMark, { bot, size: 64, live: true }),
 +          (0, import_react28.createElement)("span", { className: "bt-avatar-pencil", "aria-hidden": true }, (0, import_react28.createElement)(PencilIcon))
-+        ),
+         ),
+-        editing ? (0, import_react18.createElement)(AvatarEditor, { bot, actions, run, onClose: closeEditor }) : null
 +        editing ? (0, import_react28.createElement)(AvatarEditor, { bot, actions, run, onClose: closeEditor }) : null
-+      ),
+       ),
+-      (0, import_react18.createElement)(
 +      (0, import_react28.createElement)(
-+        "div",
-+        { className: "bt-bs-who" },
+         "div",
+         { className: "bt-bs-who" },
+-        (0, import_react18.createElement)("span", { className: "bt-bs-name" }, bot.name),
+-        (0, import_react18.createElement)("span", { className: "bt-bs-sub" }, [bot.role, isMainBot ? t("Main Bot") : ""].filter(Boolean).join(" · ") || t("Bot"))
 +        (0, import_react28.createElement)("span", { className: "bt-bs-name" }, bot.name),
 +        (0, import_react28.createElement)("span", { className: "bt-bs-sub" }, [bot.role, isMainBot ? t("Main Bot") : ""].filter(Boolean).join(" · ") || t("Bot"))
-+      )
-+    ),
+       )
+     ),
+-    (0, import_react18.createElement)(
 +    (0, import_react28.createElement)(
 +      Card,
 +      { title: t("Profile") },
@@ -14076,41 +14084,21 @@ diff --git a/client.js b/client.js
 +    void Promise.resolve(run(actions.deleteRoom(room2.id))).then((done) => {
 +      if (done) onDeleted?.();
 +    });
-   };
--  (0, import_react18.useEffect)(() => {
--    void actions.refreshModels?.();
--  }, [bot.id]);
--  return (0, import_react18.createElement)(
++  };
 +  return (0, import_react29.createElement)(
-     "div",
-     { className: "bt-bs" },
--    (0, import_react18.createElement)(
++    "div",
++    { className: "bt-bs" },
 +    (0, import_react29.createElement)(
-       "div",
-       { className: "bt-bs-hero" },
--      (0, import_react18.createElement)(
--        "div",
--        { className: "bt-avatar-anchor" },
--        (0, import_react18.createElement)(
--          "button",
--          { type: "button", className: "bt-avatar-trigger", "aria-label": t("Edit Bot avatar"), "aria-expanded": editing, onClick: () => setEditing((value) => !value) },
--          (0, import_react18.createElement)(BotMark, { bot, size: 64, live: true }),
--          (0, import_react18.createElement)("span", { className: "bt-avatar-pencil", "aria-hidden": true }, (0, import_react18.createElement)(PencilIcon))
--        ),
--        editing ? (0, import_react18.createElement)(AvatarEditor, { bot, actions, run, onClose: closeEditor }) : null
--      ),
--      (0, import_react18.createElement)(
++      "div",
++      { className: "bt-bs-hero" },
 +      (0, import_react29.createElement)(RoomAvatar, { room: room2, roster, size: 64 }),
 +      (0, import_react29.createElement)(
-         "div",
-         { className: "bt-bs-who" },
--        (0, import_react18.createElement)("span", { className: "bt-bs-name" }, bot.name),
--        (0, import_react18.createElement)("span", { className: "bt-bs-sub" }, [bot.role, isMainBot ? t("Main Bot") : ""].filter(Boolean).join(" · ") || t("Bot"))
++        "div",
++        { className: "bt-bs-who" },
 +        (0, import_react29.createElement)("span", { className: "bt-bs-name" }, room2.name),
 +        (0, import_react29.createElement)("span", { className: "bt-bs-sub" }, roomSubtitle(room2, roster))
-       )
-     ),
--    (0, import_react18.createElement)(
++      )
++    ),
 +    (0, import_react29.createElement)(
        Card,
        { title: t("Profile") },
@@ -14175,22 +14163,36 @@ diff --git a/client.js b/client.js
 -        { label: t("What this Bot does"), hint: t("Its job on the team. Part of the Bot's system prompt."), stack: true },
 -        (0, import_react18.createElement)(InlineText, { label: t("Instructions"), value: bot.instructions, multiline: true, placeholder: t("What this Bot is responsible for…"), onSave: (instructions) => save({ instructions }) })
 -      )
+-    ),
+-    (0, import_react18.createElement)(BotCapabilitiesCard, { bot, roster, actions, run, Card, SwitchRow }),
+-    roster.memory === false ? null : (0, import_react18.createElement)(MemoryCard, { bot, actions }),
+-    (0, import_react18.createElement)(BotSchedules, { bot, roster, actions }),
+-    (0, import_react18.createElement)(
 +      { title: t("Members · {count}", { count: people2.length }) },
 +      people2.map((person) => (0, import_react29.createElement)(FacePersonRow, { key: person.key, person, roster, onOpenBot: openBot, lead: room2.face?.lead?.handle }))
 +    ) : null,
 +    face ? null : (0, import_react29.createElement)(
-+      Card,
+       Card,
+-      { title: t("Main Bot") },
+-      onlyMain ? (0, import_react18.createElement)(
 +      { title: t("Members · {count}", { count: members.length + humans.length + remotes.length }) },
 +      humans.map((person) => (0, import_react29.createElement)(
-+        "div",
+         "div",
+-        { className: "bt-set-row bt-bs-row" },
+-        (0, import_react18.createElement)(
 +        { key: person.id, className: "bt-set-row bt-bs-row bt-gs-member" },
 +        (0, import_react29.createElement)(
-+          "span",
+           "span",
+-          { className: "bt-set-copy" },
+-          (0, import_react18.createElement)("span", { className: "bt-bs-label" }, t("Main Bot")),
+-          (0, import_react18.createElement)("span", { className: "bt-set-hint" }, t("The only Main Bot. To hand the role to another Bot, use Main Bot on the Bots page."))
 +          { className: "bt-gs-who" },
 +          (0, import_react29.createElement)("span", { className: "bt-row-title" }, person.displayName || person.id),
 +          (0, import_react29.createElement)("span", { className: "bt-tag" }, t("Human")),
 +          person.role === "admin" ? (0, import_react29.createElement)("span", { className: "bt-tag" }, t("Admin")) : null
-+        ),
+         ),
+-        (0, import_react18.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => actions.openSettings("bots") }, t("Change"))
+-      ) : (0, import_react18.createElement)(SwitchRow, { label: t("Main Bot"), hint: t("Can create and change Bots, and runs every group chat."), on: isMainBot, onChange: (on) => run(actions.setMain(bot.id, on)) })
 +        humans.length + members.length + remotes.length > 2 && person.id !== roster.self?.memberId ? (0, import_react29.createElement)("button", { type: "button", className: "bt-x", "aria-label": t("Remove {name} from the group", { name: person.displayName || person.id }), title: t("Remove from group"), onClick: () => update({ removeParticipants: [{ kind: "human", id: person.id }] }) }, "×") : null
 +      )),
 +      members.map((member) => {
@@ -14271,24 +14273,28 @@ diff --git a/client.js b/client.js
 +      // the note on who leads, so that note stays with the members it is about (#892).
 +      room2.origin === "face-to-face" || room2.origin === "inbound-share" ? null : (0, import_react29.createElement)(FlyBotRoomMembers, { room: room2, roster, actions })
      ),
--    (0, import_react18.createElement)(BotCapabilitiesCard, { bot, roster, actions, run, Card, SwitchRow }),
--    roster.memory === false ? null : (0, import_react18.createElement)(MemoryCard, { bot, actions }),
--    (0, import_react18.createElement)(BotSchedules, { bot, roster, actions }),
--    (0, import_react18.createElement)(
+-    // The Main Bot tile is always first and always shown, like in the context menu.
+-    isTile ? null : (0, import_react18.createElement)(
 +    (0, import_react29.createElement)(StandingApprovalsCard, { scope: "room", target: room2, roster, actions, run, Card }),
 +    (0, import_react29.createElement)(
        Card,
--      { title: t("Main Bot") },
--      onlyMain ? (0, import_react18.createElement)(
-+      { title: t("Sidebar") },
+       { title: t("Sidebar") },
+-      (0, import_react18.createElement)(SwitchRow, { label: t("Pin"), hint: t("Kept above the other chats."), on: bot.pinned === true, onChange: (pinned) => run(actions.setFlags(bot.id, { pinned })) }),
+-      isMainBot ? null : (0, import_react18.createElement)(SwitchRow, { label: t("Hide from sidebar"), hint: t("Search still finds it."), on: bot.hidden === true, onChange: (hidden) => run(actions.setFlags(bot.id, { hidden })) })
 +      (0, import_react29.createElement)(SwitchRow, { label: t("Pin"), hint: t("Kept above the other chats."), on: room2.pinned === true, onChange: (pinned) => run(actions.setFlags(room2.id, { pinned })) }),
 +      (0, import_react29.createElement)(SwitchRow, { label: t("Hide from sidebar"), hint: t("Search still finds it."), on: room2.hidden === true, onChange: (hidden) => run(actions.setFlags(room2.id, { hidden })) })
-+    ),
+     ),
+-    (0, import_react18.createElement)(
 +    (0, import_react29.createElement)(
-+      Card,
+       Card,
+-      { title: t("Manage") },
+-      (0, import_react18.createElement)(
 +      { title: t("More") },
 +      (0, import_react29.createElement)(
-+        "button",
+         "button",
+-        { type: "button", className: "bt-set-row bt-bs-row", onClick: duplicate },
+-        (0, import_react18.createElement)("span", { className: "bt-set-copy" }, (0, import_react18.createElement)("span", { className: "bt-bs-label" }, t("Duplicate")), (0, import_react18.createElement)("span", { className: "bt-set-hint" }, t("A copy with the same job and model, and fresh memory."))),
+-        (0, import_react18.createElement)("span", { className: "bt-chevron" }, (0, import_react18.createElement)(ChevronRightIcon))
 +        { type: "button", className: "bt-set-row bt-bs-row bt-bs-danger", "data-confirm": confirming || void 0, onClick: remove },
 +        (0, import_react29.createElement)(
 +          "span",
@@ -14513,32 +14519,7 @@ diff --git a/client.js b/client.js
 +      "div",
 +      { className: "bt-palette", role: "dialog", "aria-label": t("Search"), "aria-modal": true },
 +      (0, import_react30.createElement)(
-         "div",
--        { className: "bt-set-row bt-bs-row" },
--        (0, import_react18.createElement)(
--          "span",
--          { className: "bt-set-copy" },
--          (0, import_react18.createElement)("span", { className: "bt-bs-label" }, t("Main Bot")),
--          (0, import_react18.createElement)("span", { className: "bt-set-hint" }, t("The only Main Bot. To hand the role to another Bot, use Main Bot on the Bots page."))
--        ),
--        (0, import_react18.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => actions.openSettings("bots") }, t("Change"))
--      ) : (0, import_react18.createElement)(SwitchRow, { label: t("Main Bot"), hint: t("Can create and change Bots, and runs every group chat."), on: isMainBot, onChange: (on) => run(actions.setMain(bot.id, on)) })
--    ),
--    // The Main Bot tile is always first and always shown, like in the context menu.
--    isTile ? null : (0, import_react18.createElement)(
--      Card,
--      { title: t("Sidebar") },
--      (0, import_react18.createElement)(SwitchRow, { label: t("Pin"), hint: t("Kept above the other chats."), on: bot.pinned === true, onChange: (pinned) => run(actions.setFlags(bot.id, { pinned })) }),
--      isMainBot ? null : (0, import_react18.createElement)(SwitchRow, { label: t("Hide from sidebar"), hint: t("Search still finds it."), on: bot.hidden === true, onChange: (hidden) => run(actions.setFlags(bot.id, { hidden })) })
--    ),
--    (0, import_react18.createElement)(
--      Card,
--      { title: t("Manage") },
--      (0, import_react18.createElement)(
--        "button",
--        { type: "button", className: "bt-set-row bt-bs-row", onClick: duplicate },
--        (0, import_react18.createElement)("span", { className: "bt-set-copy" }, (0, import_react18.createElement)("span", { className: "bt-bs-label" }, t("Duplicate")), (0, import_react18.createElement)("span", { className: "bt-set-hint" }, t("A copy with the same job and model, and fresh memory."))),
--        (0, import_react18.createElement)("span", { className: "bt-chevron" }, (0, import_react18.createElement)(ChevronRightIcon))
++        "div",
 +        { className: "bt-palette-head" },
 +        (0, import_react30.createElement)("span", { className: "bt-palette-glyph", "aria-hidden": true }, (0, import_react30.createElement)(SearchIcon)),
 +        (0, import_react30.createElement)("input", {
@@ -15305,10 +15286,37 @@ diff --git a/client.js b/client.js
        if (stopped) {
          media.getTracks().forEach((track) => track.stop());
          return;
-@@ -8716,18 +8716,18 @@ function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }
-     const entry = Array.isArray(outline) ? outline[outline.length - 1] : void 0;
-     return entry ? `${outline.length}|${entry.response ?? ""}` : "0|";
-   });
+@@ -8689,477 +8689,233 @@ function useMicLevel(enabled) {
+         let sum = 0;
+         for (const value of data) sum += ((value - 128) / 128) ** 2;
+         smooth = smooth * 0.8 + Math.min(1, Math.sqrt(sum / data.length) * 4) * 0.2;
+-        setLevel(Math.round(smooth * 100) / 100);
+-        frame = requestAnimationFrame(tick);
+-      };
+-      tick();
+-    }).catch(() => {
+-    });
+-    return () => {
+-      stopped = true;
+-      cancelAnimationFrame(frame);
+-      stream?.getTracks().forEach((track) => track.stop());
+-      void audio?.close().catch(() => {
+-      });
+-      setLevel(0);
+-    };
+-  }, [enabled]);
+-  return level;
+-}
+-function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }) {
+-  const bot = roster.byId[sessionId];
+-  const room2 = roster.roomsById[sessionId];
+-  const name = bot?.name ?? room2?.name ?? t("Bot");
+-  const running = useSessionStatus((map) => map.get(sessionId)?.running === true);
+-  const lastReply = useSessions((list) => {
+-    const outline = list.projectionsBySession?.[sessionId]?.values?.turnOutline ?? list.byId[sessionId]?.projectionValues?.turnOutline;
+-    const entry = Array.isArray(outline) ? outline[outline.length - 1] : void 0;
+-    return entry ? `${outline.length}|${entry.response ?? ""}` : "0|";
+-  });
 -  const [speech] = (0, import_react22.useState)(() => actions.speech());
 -  const [phase, setPhase] = (0, import_react22.useState)(speech ? "starting" : speechApi() ? "listening" : "unsupported");
 -  const [catalog, setCatalog] = (0, import_react22.useState)(null);
@@ -15319,6 +15327,167 @@ diff --git a/client.js b/client.js
 -  const [cycle, setCycle] = (0, import_react22.useState)(0);
 -  const waiting = (0, import_react22.useRef)(null);
 -  const reply = (0, import_react22.useRef)(lastReply);
+-  reply.current = lastReply;
+-  const turn = (0, import_react22.useRef)(0);
+-  const paneLeft = usePaneLeft();
+-  const close = () => {
+-    turn.current += 1;
+-    window.speechSynthesis?.cancel();
+-    actions.closeVoice();
+-  };
+-  useEscape(close);
+-  const submit = (text) => {
+-    setHeard(text);
+-    setPhase("thinking");
+-    waiting.current = reply.current.split("|")[0];
+-    void actions.send(sessionId, text.trim()).catch(() => setPhase("listening"));
+-  };
+-  const dictation = useDictation((text, final) => {
+-    setHeard(text);
+-    if (!final) return;
+-    dictation.stop();
+-    submit(text);
+-  });
+-  (0, import_react22.useEffect)(() => {
+-    if (!note) return void 0;
+-    const timer = setTimeout(() => setNote(""), 2600);
+-    return () => clearTimeout(timer);
+-  }, [note]);
+-  (0, import_react22.useEffect)(() => {
+-    if (!speech) return void 0;
+-    let live = true;
+-    speechCatalog(speech).then(({ catalog: next, usable }) => {
+-      if (!live) return;
+-      setCatalog(next);
+-      setPhase(usable ? "listening" : "setup");
+-    }, () => {
+-      if (live) setPhase("setup");
+-    });
+-    return () => {
+-      live = false;
+-    };
+-  }, [speech]);
+-  const listen = phase === "listening";
+-  (0, import_react22.useEffect)(() => {
+-    if (speech || !listen || dictation.listening) return void 0;
+-    const timer = setTimeout(() => dictation.start({ continuous: false, onEnd: () => {
+-    } }), 250);
+-    return () => clearTimeout(timer);
+-  }, [listen, dictation.listening]);
+-  (0, import_react22.useEffect)(() => {
+-    if (phase !== "listening") dictation.stop();
+-  }, [phase]);
+-  (0, import_react22.useEffect)(() => {
+-    if (!speech || !catalog || !listen) return void 0;
+-    const own = turn.current;
+-    let capture = null;
+-    let frame = 0;
+-    let stopped = false;
+-    let smooth = 0;
+-    const detect = turnDetector();
+-    const limit = Math.max(1, catalog.maxDurationSeconds - 1) * 1e3;
+-    const finish = async (current) => {
+-      setPhase("transcribing");
+-      try {
+-        const wave = await current.finish(catalog.maxDurationSeconds);
+-        const text = wave ? await transcribeWave(speech, catalog, wave, new AbortController().signal) : "";
+-        if (turn.current !== own) return;
+-        if (text) submit(text);
+-        else setPhase("listening");
+-      } catch (error) {
+-        if (turn.current !== own) return;
+-        setNote(t(CAPTURE_NOTES[error?.kind] ?? "Couldn't hear that"));
+-        setPhase("listening");
+-      }
+-    };
+-    openCapture().then((opened) => {
+-      if (stopped) {
+-        opened.cancel();
+-        return;
+-      }
+-      capture = opened;
+-      const began = performance.now();
+-      const tick = () => {
+-        const now = performance.now();
+-        const level2 = capture.level();
+-        smooth = smooth * 0.8 + level2 * 0.2;
+-        setServiceLevel(Math.round(smooth * 100) / 100);
+-        const state = detect(level2, now);
+-        if (state === "done" || state === "speech" && now - began >= limit) {
+-          const current = capture;
+-          capture = null;
+-          setServiceLevel(0);
+-          void finish(current);
+-          return;
+-        }
+-        if (state === "waiting" && now - began >= limit) {
+-          setCycle((value) => value + 1);
+-          return;
+-        }
++        setLevel(Math.round(smooth * 100) / 100);
+         frame = requestAnimationFrame(tick);
+       };
+       tick();
+-    }, (error) => {
+-      if (stopped) return;
+-      setNote(t(CAPTURE_NOTES[error?.kind] ?? "Couldn't hear that"));
+-      setPhase("paused");
++    }).catch(() => {
+     });
+     return () => {
+       stopped = true;
+       cancelAnimationFrame(frame);
+-      capture?.cancel();
+-      setServiceLevel(0);
++      stream?.getTracks().forEach((track) => track.stop());
++      void audio?.close().catch(() => {
++      });
++      setLevel(0);
+     };
+-  }, [speech, catalog, listen, cycle]);
+-  (0, import_react22.useEffect)(() => {
+-    if (phase !== "thinking" || running || waiting.current === null) return;
+-    const [count, text] = [lastReply.slice(0, lastReply.indexOf("|")), lastReply.slice(lastReply.indexOf("|") + 1)];
+-    if (count === waiting.current || !text.trim()) return;
+-    waiting.current = null;
+-    const spoken = plainSpeech(text);
+-    setSaid(spoken);
+-    setHeard("");
+-    if (!window.speechSynthesis || !spoken) {
+-      setPhase("listening");
+-      return;
+-    }
+-    const utterance = new SpeechSynthesisUtterance(spoken);
+-    utterance.lang = /[\u3400-\u9fff]/.test(spoken) ? "zh-CN" : "en-US";
+-    utterance.onend = () => setPhase((current) => current === "speaking" ? "listening" : current);
+-    utterance.onerror = utterance.onend;
+-    setPhase("speaking");
+-    window.speechSynthesis.cancel();
+-    window.speechSynthesis.speak(utterance);
+-  }, [phase, running, lastReply]);
+-  (0, import_react22.useEffect)(() => () => window.speechSynthesis?.cancel(), []);
+-  const micLevel = useMicLevel(!speech && phase === "listening" && dictation.listening);
+-  const level = speech ? serviceLevel : micLevel;
+-  const markState = phase === "thinking" || phase === "transcribing" ? "thinking" : phase === "speaking" ? "sending" : "idle";
+-  const blocked = phase === "unsupported" || phase === "setup" || phase === "starting";
+-  const togglePause = () => {
+-    if (phase === "paused") {
+-      setPhase("listening");
+-      return;
+-    }
++  }, [enabled]);
++  return level;
++}
++function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }) {
++  const bot = roster.byId[sessionId];
++  const room2 = roster.roomsById[sessionId];
++  const name = bot?.name ?? room2?.name ?? t("Bot");
++  const running = useSessionStatus((map) => map.get(sessionId)?.running === true);
++  const lastReply = useSessions((list) => {
++    const outline = list.projectionsBySession?.[sessionId]?.values?.turnOutline ?? list.byId[sessionId]?.projectionValues?.turnOutline;
++    const entry = Array.isArray(outline) ? outline[outline.length - 1] : void 0;
++    return entry ? `${outline.length}|${entry.response ?? ""}` : "0|";
++  });
 +  const [speech] = (0, import_react34.useState)(() => actions.speech());
 +  const [phase, setPhase] = (0, import_react34.useState)(speech ? "starting" : speechApi() ? "listening" : "unsupported");
 +  const [catalog, setCatalog] = (0, import_react34.useState)(null);
@@ -15329,75 +15498,15 @@ diff --git a/client.js b/client.js
 +  const [cycle, setCycle] = (0, import_react34.useState)(0);
 +  const waiting = (0, import_react34.useRef)(null);
 +  const reply = (0, import_react34.useRef)(lastReply);
-   reply.current = lastReply;
--  const turn = (0, import_react22.useRef)(0);
++  reply.current = lastReply;
 +  const turn = (0, import_react34.useRef)(0);
-   const paneLeft = usePaneLeft();
-   const close = () => {
++  const paneLeft = usePaneLeft();
++  const close = () => {
      turn.current += 1;
-@@ -8747,12 +8747,12 @@ function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }
-     dictation.stop();
-     submit(text);
-   });
--  (0, import_react22.useEffect)(() => {
-+  (0, import_react34.useEffect)(() => {
-     if (!note) return void 0;
-     const timer = setTimeout(() => setNote(""), 2600);
-     return () => clearTimeout(timer);
-   }, [note]);
--  (0, import_react22.useEffect)(() => {
-+  (0, import_react34.useEffect)(() => {
-     if (!speech) return void 0;
-     let live = true;
-     speechCatalog(speech).then(({ catalog: next, usable }) => {
-@@ -8767,16 +8767,16 @@ function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }
-     };
-   }, [speech]);
-   const listen = phase === "listening";
--  (0, import_react22.useEffect)(() => {
-+  (0, import_react34.useEffect)(() => {
-     if (speech || !listen || dictation.listening) return void 0;
-     const timer = setTimeout(() => dictation.start({ continuous: false, onEnd: () => {
-     } }), 250);
-     return () => clearTimeout(timer);
-   }, [listen, dictation.listening]);
--  (0, import_react22.useEffect)(() => {
-+  (0, import_react34.useEffect)(() => {
-     if (phase !== "listening") dictation.stop();
-   }, [phase]);
--  (0, import_react22.useEffect)(() => {
-+  (0, import_react34.useEffect)(() => {
-     if (!speech || !catalog || !listen) return void 0;
-     const own = turn.current;
-     let capture = null;
-@@ -8838,7 +8838,7 @@ function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }
-       setServiceLevel(0);
-     };
-   }, [speech, catalog, listen, cycle]);
--  (0, import_react22.useEffect)(() => {
-+  (0, import_react34.useEffect)(() => {
-     if (phase !== "thinking" || running || waiting.current === null) return;
-     const [count, text] = [lastReply.slice(0, lastReply.indexOf("|")), lastReply.slice(lastReply.indexOf("|") + 1)];
-     if (count === waiting.current || !text.trim()) return;
-@@ -8858,308 +8858,64 @@ function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }
-     window.speechSynthesis.cancel();
-     window.speechSynthesis.speak(utterance);
-   }, [phase, running, lastReply]);
--  (0, import_react22.useEffect)(() => () => window.speechSynthesis?.cancel(), []);
-+  (0, import_react34.useEffect)(() => () => window.speechSynthesis?.cancel(), []);
-   const micLevel = useMicLevel(!speech && phase === "listening" && dictation.listening);
-   const level = speech ? serviceLevel : micLevel;
-   const markState = phase === "thinking" || phase === "transcribing" ? "thinking" : phase === "speaking" ? "sending" : "idle";
-   const blocked = phase === "unsupported" || phase === "setup" || phase === "starting";
-   const togglePause = () => {
-     if (phase === "paused") {
--      setPhase("listening");
--      return;
--    }
--    turn.current += 1;
--    window.speechSynthesis?.cancel();
+     window.speechSynthesis?.cancel();
 -    setPhase("paused");
--  };
++    actions.closeVoice();
+   };
 -  const openSetup = phase === "setup" ? actions.voiceSetup() : null;
 -  const caption = phase === "speaking" ? said : heard;
 -  const shownNote = note || dictation.note;
@@ -15471,37 +15580,160 @@ diff --git a/client.js b/client.js
 -  const openBot = (id) => {
 -    actions.closeSettings();
 -    actions.openSession(id);
--  };
++  useEscape(close);
++  const submit = (text) => {
++    setHeard(text);
++    setPhase("thinking");
++    waiting.current = reply.current.split("|")[0];
++    void actions.send(sessionId, text.trim()).catch(() => setPhase("listening"));
+   };
 -  const remove = () => {
 -    if (!confirming) {
 -      setConfirming(true);
-+      setPhase("listening");
-       return;
-     }
+-      return;
+-    }
 -    void Promise.resolve(run(actions.deleteRoom(room2.id))).then((done) => {
 -      if (done) onDeleted?.();
--    });
++  const dictation = useDictation((text, final) => {
++    setHeard(text);
++    if (!final) return;
++    dictation.stop();
++    submit(text);
++  });
++  (0, import_react34.useEffect)(() => {
++    if (!note) return void 0;
++    const timer = setTimeout(() => setNote(""), 2600);
++    return () => clearTimeout(timer);
++  }, [note]);
++  (0, import_react34.useEffect)(() => {
++    if (!speech) return void 0;
++    let live = true;
++    speechCatalog(speech).then(({ catalog: next, usable }) => {
++      if (!live) return;
++      setCatalog(next);
++      setPhase(usable ? "listening" : "setup");
++    }, () => {
++      if (live) setPhase("setup");
+     });
++    return () => {
++      live = false;
++    };
++  }, [speech]);
++  const listen = phase === "listening";
++  (0, import_react34.useEffect)(() => {
++    if (speech || !listen || dictation.listening) return void 0;
++    const timer = setTimeout(() => dictation.start({ continuous: false, onEnd: () => {
++    } }), 250);
++    return () => clearTimeout(timer);
++  }, [listen, dictation.listening]);
++  (0, import_react34.useEffect)(() => {
++    if (phase !== "listening") dictation.stop();
++  }, [phase]);
++  (0, import_react34.useEffect)(() => {
++    if (!speech || !catalog || !listen) return void 0;
++    const own = turn.current;
++    let capture = null;
++    let frame = 0;
++    let stopped = false;
++    let smooth = 0;
++    const detect = turnDetector();
++    const limit = Math.max(1, catalog.maxDurationSeconds - 1) * 1e3;
++    const finish = async (current) => {
++      setPhase("transcribing");
++      try {
++        const wave = await current.finish(catalog.maxDurationSeconds);
++        const text = wave ? await transcribeWave(speech, catalog, wave, new AbortController().signal) : "";
++        if (turn.current !== own) return;
++        if (text) submit(text);
++        else setPhase("listening");
++      } catch (error) {
++        if (turn.current !== own) return;
++        setNote(t(CAPTURE_NOTES[error?.kind] ?? "Couldn't hear that"));
++        setPhase("listening");
++      }
++    };
++    openCapture().then((opened) => {
++      if (stopped) {
++        opened.cancel();
++        return;
++      }
++      capture = opened;
++      const began = performance.now();
++      const tick = () => {
++        const now = performance.now();
++        const level2 = capture.level();
++        smooth = smooth * 0.8 + level2 * 0.2;
++        setServiceLevel(Math.round(smooth * 100) / 100);
++        const state = detect(level2, now);
++        if (state === "done" || state === "speech" && now - began >= limit) {
++          const current = capture;
++          capture = null;
++          setServiceLevel(0);
++          void finish(current);
++          return;
++        }
++        if (state === "waiting" && now - began >= limit) {
++          setCycle((value) => value + 1);
++          return;
++        }
++        frame = requestAnimationFrame(tick);
++      };
++      tick();
++    }, (error) => {
++      if (stopped) return;
++      setNote(t(CAPTURE_NOTES[error?.kind] ?? "Couldn't hear that"));
++      setPhase("paused");
++    });
++    return () => {
++      stopped = true;
++      cancelAnimationFrame(frame);
++      capture?.cancel();
++      setServiceLevel(0);
++    };
++  }, [speech, catalog, listen, cycle]);
++  (0, import_react34.useEffect)(() => {
++    if (phase !== "thinking" || running || waiting.current === null) return;
++    const [count, text] = [lastReply.slice(0, lastReply.indexOf("|")), lastReply.slice(lastReply.indexOf("|") + 1)];
++    if (count === waiting.current || !text.trim()) return;
++    waiting.current = null;
++    const spoken = plainSpeech(text);
++    setSaid(spoken);
++    setHeard("");
++    if (!window.speechSynthesis || !spoken) {
++      setPhase("listening");
++      return;
++    }
++    const utterance = new SpeechSynthesisUtterance(spoken);
++    utterance.lang = /[\u3400-\u9fff]/.test(spoken) ? "zh-CN" : "en-US";
++    utterance.onend = () => setPhase((current) => current === "speaking" ? "listening" : current);
++    utterance.onerror = utterance.onend;
++    setPhase("speaking");
++    window.speechSynthesis.cancel();
++    window.speechSynthesis.speak(utterance);
++  }, [phase, running, lastReply]);
++  (0, import_react34.useEffect)(() => () => window.speechSynthesis?.cancel(), []);
++  const micLevel = useMicLevel(!speech && phase === "listening" && dictation.listening);
++  const level = speech ? serviceLevel : micLevel;
++  const markState = phase === "thinking" || phase === "transcribing" ? "thinking" : phase === "speaking" ? "sending" : "idle";
++  const blocked = phase === "unsupported" || phase === "setup" || phase === "starting";
++  const togglePause = () => {
++    if (phase === "paused") {
++      setPhase("listening");
++      return;
++    }
 +    turn.current += 1;
 +    window.speechSynthesis?.cancel();
 +    setPhase("paused");
    };
 -  return (0, import_react23.createElement)(
-+  const openSetup = phase === "setup" ? actions.voiceSetup() : null;
-+  const caption = phase === "speaking" ? said : heard;
-+  const shownNote = note || dictation.note;
-+  return (0, import_react34.createElement)(
-     "div",
+-    "div",
 -    { className: "bt-bs" },
 -    (0, import_react23.createElement)(
-+    { className: "bt-pane bt-voice-pane", style: { left: paneLeft } },
-+    (0, import_react34.createElement)(
-       "div",
+-      "div",
 -      { className: "bt-bs-hero" },
 -      (0, import_react23.createElement)(RoomAvatar, { room: room2, roster, size: 64 }),
 -      (0, import_react23.createElement)(
-+      { className: "bt-voice-stage", role: "dialog", "aria-label": t("Voice chat with {name}", { name }), "data-phase": phase === "transcribing" ? "thinking" : phase },
-+      (0, import_react34.createElement)(
-         "div",
+-        "div",
 -        { className: "bt-bs-who" },
 -        (0, import_react23.createElement)("span", { className: "bt-bs-name" }, room2.name),
 -        (0, import_react23.createElement)("span", { className: "bt-bs-sub" }, roomSubtitle(room2, roster))
@@ -15514,11 +15746,7 @@ diff --git a/client.js b/client.js
 -        Row,
 -        { label: t("Name"), hint: t("Leave it empty to name the group after its members.") },
 -        (0, import_react23.createElement)(InlineText, { label: t("Group name"), value: room2.named ? room2.name : "", placeholder: t("Name after members"), maxLength: 60, onSave: (name) => update({ name }) })
-+        { className: "bt-voice-orb", style: { "--bt-level": level } },
-+        (0, import_react34.createElement)("span", { className: "bt-voice-ring", "aria-hidden": true }),
-+        (0, import_react34.createElement)("span", { className: "bt-voice-ring bt-voice-ring-2", "aria-hidden": true }),
-+        bot ? (0, import_react34.createElement)(BotMark, { bot, size: 112, state: markState, live: true, gaze: phase === "listening" }) : room2 ? (0, import_react34.createElement)(RoomAvatar, { room: room2, roster, size: 112 }) : null
-       ),
+-      ),
 -      (0, import_react23.createElement)(
 -        Row,
 -        { label: t("Notice"), hint: t("Every member reads it before speaking in this group."), stack: true },
@@ -15645,14 +15873,20 @@ diff --git a/client.js b/client.js
 -    onClick
 -  }, (0, import_react23.createElement)(BotAvatar, { bot, size: 22, badge: false, live: false }), (0, import_react23.createElement)("span", { className: "bt-ng-name" }, bot.name), on && role === "radio" ? (0, import_react23.createElement)(AdminStar) : null);
 -  return (0, import_react23.createElement)(
--    "div",
++  const openSetup = phase === "setup" ? actions.voiceSetup() : null;
++  const caption = phase === "speaking" ? said : heard;
++  const shownNote = note || dictation.note;
++  return (0, import_react34.createElement)(
+     "div",
 -    { className: "bt-set-card bt-ng" },
 -    (0, import_react23.createElement)(
--      "div",
++    { className: "bt-pane bt-voice-pane", style: { left: paneLeft } },
++    (0, import_react34.createElement)(
+       "div",
 -      { className: "bt-set-row bt-bs-row bt-bs-stack" },
 -      (0, import_react23.createElement)("span", { className: "bt-set-copy" }, (0, import_react23.createElement)("span", { className: "bt-bs-label bt-ng-label" }, (0, import_react23.createElement)(AdminStar), t("Choose the group admin"))),
 -      (0, import_react23.createElement)(
-+      (0, import_react34.createElement)("div", { className: "bt-voice-name" }, name),
++      { className: "bt-voice-stage", role: "dialog", "aria-label": t("Voice chat with {name}", { name }), "data-phase": phase === "transcribing" ? "thinking" : phase },
 +      (0, import_react34.createElement)(
          "div",
 -        { className: "bt-ng-picks", role: "radiogroup", "aria-label": t("Group admin") },
@@ -15664,7 +15898,14 @@ diff --git a/client.js b/client.js
 -      { className: "bt-set-row bt-bs-row bt-bs-stack bt-ng-step" },
 -      (0, import_react23.createElement)("span", { className: "bt-set-copy" }, (0, import_react23.createElement)("span", { className: "bt-bs-label" }, t("Who to chat with…"))),
 -      (0, import_react23.createElement)(
--        "div",
++        { className: "bt-voice-orb", style: { "--bt-level": level } },
++        (0, import_react34.createElement)("span", { className: "bt-voice-ring", "aria-hidden": true }),
++        (0, import_react34.createElement)("span", { className: "bt-voice-ring bt-voice-ring-2", "aria-hidden": true }),
++        bot ? (0, import_react34.createElement)(BotMark, { bot, size: 112, state: markState, live: true, gaze: phase === "listening" }) : room2 ? (0, import_react34.createElement)(RoomAvatar, { room: room2, roster, size: 112 }) : null
++      ),
++      (0, import_react34.createElement)("div", { className: "bt-voice-name" }, name),
++      (0, import_react34.createElement)(
+         "div",
 -        { className: "bt-ng-picks", role: "group", "aria-label": t("Members") },
 -        roster.bots.filter((bot) => bot.id !== admin).map((bot) => chip(bot, members.includes(bot.id), () => toggle(bot.id), "checkbox"))
 -      )
@@ -16417,7 +16658,7 @@ diff --git a/client.js b/client.js
      body
    );
  }
-@@ -10150,33 +10150,135 @@ button.bt-us-row:hover{background:var(--bt-hover)}
+@@ -10150,33 +10150,145 @@ button.bt-us-row:hover{background:var(--bt-hover)}
  @keyframes bt-us-drop{from{opacity:0;transform:translateY(-4px) scale(.96)}}
  @keyframes bt-us-fade{from{opacity:0}}
  @keyframes bt-us-cell{from{opacity:0;transform:scale(.5)}}
@@ -16434,6 +16675,7 @@ diff --git a/client.js b/client.js
  var TOKEN_URL = "https://github.com/settings/personal-access-tokens/new";
 -var GitHubMark = () => (0, import_react25.createElement)(
 +var COMPOSIO_KEY_URL = "https://platform.composio.dev/";
++var FEISHU_WEBHOOK_URL = "https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot";
 +var APPS = [
 +  ["gmail", "Gmail"],
 +  ["googlecalendar", "Google Calendar"],
@@ -16469,13 +16711,21 @@ diff --git a/client.js b/client.js
    { width: 20, height: 20, viewBox: "0 0 16 16", fill: "currentColor", "aria-hidden": true },
 -  (0, import_react25.createElement)("path", { d: "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" })
 +  (0, import_react36.createElement)("path", { d: "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" })
++);
++var FeishuMark = () => (0, import_react36.createElement)(
++  "svg",
++  { width: 20, height: 20, viewBox: "0 0 20 20", fill: "currentColor", "aria-hidden": true },
++  (0, import_react36.createElement)("path", { d: "M3.2 6.6c3 .1 6.4 1.5 8.6 3.9-1.9.4-3.5 1.4-4.7 2.9-1.9-.6-3.4-1.9-3.9-3.6-.2-.7-.2-1.5 0-3.2z" }),
++  (0, import_react36.createElement)("path", { d: "M16.8 5.4c-2.9.2-5.6 1.5-7.4 3.4 1.7 1.2 3.1 2.8 3.9 4.9 2.2-1.1 3.8-3.2 4-5.6.1-.9-.1-1.9-.4-2.7z" }),
++  (0, import_react36.createElement)("path", { d: "M8.6 12.1c.9.7 1.7 1.6 2.2 2.7-1.1.2-2.3 0-3.3-.6.2-.8.6-1.5 1.1-2.1z" })
  );
 -var MARKS = { github: GitHubMark };
 -var ABOUT = { github: () => t("Repositories, issues, and pull requests") };
-+var MARKS = { github: GitHubMark, composio: ConnectorIcon };
++var MARKS = { github: GitHubMark, composio: ConnectorIcon, feishu: FeishuMark };
 +var ABOUT = {
 +  github: () => t("Repositories, issues, and pull requests"),
-+  composio: () => t("Gmail, Slack, Calendar, Notion and many more apps, through one Composio key")
++  composio: () => t("Gmail, Slack, Calendar, Notion and many more apps, through one Composio key"),
++  feishu: () => t("Posts into one Feishu group through a custom bot webhook")
 +};
  function statusText2(connector) {
    if (connector.state === "connecting") return t("Connecting…");
@@ -16561,14 +16811,16 @@ diff --git a/client.js b/client.js
 +  const [picking, setPicking] = (0, import_react36.useState)(false);
 +  const [busy, setBusy] = (0, import_react36.useState)(false);
 +  const [error, setError] = (0, import_react36.useState)(null);
++  const [message, setMessage] = (0, import_react36.useState)("");
    const run = (task, after) => {
      setBusy(true);
      setError(null);
-@@ -10184,72 +10184,128 @@ function ConnectorRow({ connector, actions }) {
+@@ -10184,72 +10184,140 @@ function ConnectorRow({ connector, actions }) {
        after?.();
      }, (failure) => setError(failure?.message ?? String(failure))).finally(() => setBusy(false));
    };
 +  const gateway = connector.id === "composio";
++  const sender = connector.kind === "sender";
 +  const [statuses, setStatuses] = (0, import_react36.useState)({});
 +  const appsKey = (connector.apps ?? []).join(",");
 +  (0, import_react36.useEffect)(() => {
@@ -16643,27 +16895,38 @@ diff --git a/client.js b/client.js
 +          setApps(connector.apps ?? []);
 +          setPicking(true);
 +        } }, t("Choose apps")) : null,
-+        on ? (0, import_react36.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", "aria-expanded": bots, onClick: () => setBots((value) => !value) }, bots ? t("Done") : t("Choose Bots")) : null,
++        on && !sender ? (0, import_react36.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", "aria-expanded": bots, onClick: () => setBots((value) => !value) }, bots ? t("Done") : t("Choose Bots")) : null,
 +        on ? (0, import_react36.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: () => void run(actions.connectorDisconnect(connector.id)) }, t("Disconnect")) : form ? null : (0, import_react36.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => setForm(true) }, t("Connect"))
        )
      ),
 -    !on && form ? (0, import_react25.createElement)(
 +    on && gateway && !picking ? (0, import_react36.createElement)(AppStatusList, { apps: connector.apps ?? [], statuses }) : null,
-+    on ? (0, import_react36.createElement)("span", { className: "bt-connector-uses" }, usageText(roster, connector.id)) : null,
++    on && !sender ? (0, import_react36.createElement)("span", { className: "bt-connector-uses" }, usageText(roster, connector.id)) : null,
 +    on && bots ? (0, import_react36.createElement)(ConnectorBots, { connector, roster, actions, run, SwitchRow }) : null,
++    on && sender ? (0, import_react36.createElement)(
++      "div",
++      { className: "bt-connector-form" },
++      (0, import_react36.createElement)("label", { className: "bt-q-field" }, (0, import_react36.createElement)("input", { className: "bt-input", type: "text", value: message, "aria-label": t("Message to send to Feishu"), placeholder: t("Type a message for the Feishu group"), onChange: (event) => setMessage(event.target.value) })),
++      (0, import_react36.createElement)(
++        "div",
++        { className: "bt-connector-form-row" },
++        (0, import_react36.createElement)("span", { className: "bt-connector-link" }),
++        (0, import_react36.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy || message.trim() === "" || actions.connectorSend === void 0, onClick: () => void run(actions.connectorSend(connector.id, message), () => setMessage("")) }, t("Send"))
++      )
++    ) : null,
 +    !on && form ? (0, import_react36.createElement)(
        "div",
        { className: "bt-connector-form" },
 -      (0, import_react25.createElement)("label", { className: "bt-q-field bt-secret-field" }, (0, import_react25.createElement)(MaskedInput, { value: token, onChange: setToken, onEnter: connect, label: t("GitHub token"), autoFocus: true })),
 -      (0, import_react25.createElement)(
-+      (0, import_react36.createElement)("label", { className: "bt-q-field bt-secret-field" }, (0, import_react36.createElement)(MaskedInput, { value: token, onChange: setToken, onEnter: connect, label: gateway ? t("Composio API key") : t("GitHub token"), autoFocus: true })),
++      (0, import_react36.createElement)("label", { className: "bt-q-field bt-secret-field" }, (0, import_react36.createElement)(MaskedInput, { value: token, onChange: setToken, onEnter: connect, label: sender ? t("Feishu webhook URL") : gateway ? t("Composio API key") : t("GitHub token"), autoFocus: true })),
 +      gateway ? (0, import_react36.createElement)(AppPicker, { apps, onChange: setApps, search: token.trim() === "" ? void 0 : search }) : null,
 +      (0, import_react36.createElement)(
          "div",
          { className: "bt-connector-form-row" },
 -        (0, import_react25.createElement)("a", { className: "bt-connector-link", href: TOKEN_URL, target: "_blank", rel: "noopener noreferrer" }, t("Create a token on GitHub")),
 -        (0, import_react25.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: () => {
-+        (0, import_react36.createElement)("a", { className: "bt-connector-link", href: gateway ? COMPOSIO_KEY_URL : TOKEN_URL, target: "_blank", rel: "noopener noreferrer" }, gateway ? t("Get a Composio API key") : t("Create a token on GitHub")),
++        (0, import_react36.createElement)("a", { className: "bt-connector-link", href: sender ? FEISHU_WEBHOOK_URL : gateway ? COMPOSIO_KEY_URL : TOKEN_URL, target: "_blank", rel: "noopener noreferrer" }, sender ? t("Get a webhook URL in Feishu") : gateway ? t("Get a Composio API key") : t("Create a token on GitHub")),
 +        (0, import_react36.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: busy, onClick: () => {
            setForm(false);
            setToken("");
@@ -19694,7 +19957,7 @@ diff --git a/client.js b/client.js
      stopMemberWork: (roomId, botId) => after(call("stop-member-work", { roomId, botId })),
      // Values go out in these requests and never come back in a response.
      secretSet: (payload) => after(call("secret-set", payload)),
-@@ -13819,15 +13819,28 @@ function apply(ctx) {
+@@ -13819,15 +13819,29 @@ function apply(ctx) {
      secretCancel: (requestId) => after(call("secret-cancel", { requestId })),
      secretUpdate: (name, scope) => after(call("secret-update", { name, scope })),
      secretDelete: (name) => after(call("secret-delete", { name })),
@@ -19705,6 +19968,7 @@ diff --git a/client.js b/client.js
 +    connectorAppStatus: (id) => call("connector-app-status", { id }),
      connectorDisconnect: (id) => after(call("connector-disconnect", { id })),
      connectorRetry: (id) => after(call("connector-retry", { id })),
++    connectorSend: (id, text) => after(call("connector-send", { id, text })),
      saveCapability: (capability) => after(call("capability-save", capability)),
      deleteCapability: (name) => after(call("capability-delete", { name })),
      approveCapability: (name) => after(call("capability-approve", { name })),

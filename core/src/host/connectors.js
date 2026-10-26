@@ -17,11 +17,14 @@
 // without touching the mount.
 
 import { randomUUID } from 'node:crypto'
+import { createNotifier } from './notify.js'
 
 export const GITHUB = 'github'
 export const GITHUB_SECRET = 'GITHUB_TOKEN'
 export const COMPOSIO = 'composio'
 export const COMPOSIO_SECRET = 'COMPOSIO_API_KEY'
+export const FEISHU = 'feishu'
+export const FEISHU_SECRET = 'FEISHU_WEBHOOK'
 // Names a saved capability may not take, because the mount already uses them.
 export const RESERVED_NAMES = [GITHUB, COMPOSIO]
 const MCP_CLIENT = '@deepseek-ai/dsh-mcp-client'
@@ -31,7 +34,15 @@ const GITHUB_DEFAULTS = {
   toolsets: 'context,repos,issues,pull_requests',
 }
 const COMPOSIO_DEFAULTS = { api: 'https://backend.composio.dev/api/v3.1' }
+const FEISHU_DEFAULTS = { api: 'https://open.feishu.cn' }
 const CHECK_TIMEOUT_MS = 15_000
+// A send waits longer than a connect: the connect is one small probe, while a message may sit
+// behind Feishu's own queue. The retry budget is notify.js's, not this deadline.
+const SEND_TIMEOUT_MS = 60_000
+// Feishu's custom-bot webhook answers HTTP 200 with the verdict in the body, so a rate limit has
+// to be read out of `code`; 9499 is the one code that means "the same call may work again".
+export const FEISHU_RATE_LIMITED = 9499
+const FEISHU_TEST_TEXT = 'FlyBot is connected.'
 const INSECURE = name => `${name} addresses must start with https://`
 const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
 const APP_SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/
@@ -237,6 +248,74 @@ async function composioEnsureSession(apiKey, { api, userId, apps, stored, fetch:
   return { id, url, apps }
 }
 
+// The webhook URL is the credential, so it is checked against the API address before anything is
+// sent: https, on the host this instance was configured for. Never another host, never http.
+function webhookAddress(webhook, api) {
+  let url
+  try {
+    url = new URL(String(webhook).trim())
+  } catch {
+    throw new Error('Paste the webhook URL Feishu gave you')
+  }
+  const base = new URL(String(api))
+  if (url.protocol !== 'https:' || url.origin !== base.origin) throw new Error(`A Feishu webhook must be https on ${base.origin}`)
+  return url.href
+}
+
+// A fetch that ignores its abort signal would otherwise hang a connect (or a send) for ever.
+function withDeadline(promise, ms) {
+  let timer
+  const deadline = new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error('deadline')), Math.max(1, ms)) })
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer))
+}
+
+// One text message through a custom-bot webhook, answered in notify.js's vocabulary: `{ ok, ts }`
+// or `{ ok: false, error }`, where `rate_limited` and `service_unavailable` may pass on their own
+// and every other error is a shape Feishu will refuse again. The URL is never part of the answer.
+export async function feishuPost(webhook, text, { fetch: request = fetch, timeoutMs = CHECK_TIMEOUT_MS } = {}) {
+  let response
+  try {
+    response = await withDeadline(request(webhook, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({ msg_type: 'text', content: { text: String(text) } }),
+      redirect: 'error',
+      signal: AbortSignal.timeout(Math.max(1, timeoutMs)),
+    }), timeoutMs)
+  } catch {
+    return { ok: false, error: 'network' }
+  }
+  const body = await response.json().catch(() => ({}))
+  if (response.status === 429) {
+    const asked = Number(response.headers?.get?.('retry-after')) * 1000
+    return { ok: false, error: 'rate_limited', retryAfterMs: Number.isFinite(asked) && asked > 0 ? asked : 0 }
+  }
+  if (!response.ok) return { ok: false, error: response.status >= 500 ? 'service_unavailable' : `feishu/http-${response.status}` }
+  const code = Number(body?.code)
+  if (code === 0) {
+    const id = body?.data?.message_id
+    return { ok: true, ts: typeof id === 'string' && id !== '' ? id : 'sent' }
+  }
+  if (code === FEISHU_RATE_LIMITED) return { ok: false, error: 'rate_limited', retryAfterMs: 0 }
+  return { ok: false, error: `feishu/${Number.isFinite(code) ? code : 'unknown'}` }
+}
+
+// The connect step: one test message, so a webhook that cannot post is caught before it is relied
+// on. It throws a sentence for the row; nothing it says carries the URL.
+export async function feishuCheck(webhook, { api = FEISHU_DEFAULTS.api, fetch: request = fetch, timeoutMs = CHECK_TIMEOUT_MS } = {}) {
+  const answer = await feishuPost(webhookAddress(webhook, api), FEISHU_TEST_TEXT, { fetch: request, timeoutMs })
+  if (answer.ok) return {}
+  if (answer.error === 'network' || answer.error === 'service_unavailable') throw new Error('Could not reach Feishu')
+  if (answer.error === 'rate_limited') throw new Error('Feishu is rate-limiting this webhook; try again in a minute')
+  throw new Error(`Feishu did not accept the webhook (${answer.error})`)
+}
+
+// notify.js's transport for a Feishu webhook: the policy (attempts, backoff, idempotency) stays in
+// notify.js, and this only maps one message to one POST.
+export function feishuTransport(webhook, { fetch: request = fetch, timeoutMs = SEND_TIMEOUT_MS } = {}) {
+  return { postMessage: message => feishuPost(webhook, message?.text ?? '', { fetch: request, timeoutMs }) }
+}
+
 const DEFINITIONS = {
   [GITHUB]: {
     id: GITHUB,
@@ -293,6 +372,26 @@ const DEFINITIONS = {
     // Keeps the user id: a new key for the same FlyBot finds the apps already signed in.
     afterDisconnect: saved => saved?.userId === undefined ? undefined : { userId: saved.userId },
   },
+  // Feishu (Lark) is not an MCP server: a custom-bot webhook is one HTTPS POST into the instance's
+  // own group. So it is a *sender* — nothing is mounted, no Bot's tool list changes, and the only
+  // things it has are a status and a send (#1263). The app-credential path slots in behind the same
+  // send, without touching a caller.
+  [FEISHU]: {
+    id: FEISHU,
+    name: 'Feishu',
+    secret: FEISHU_SECRET,
+    purpose: 'Feishu webhook',
+    defaults: FEISHU_DEFAULTS,
+    addresses: options => [options.api],
+    kind: 'sender',
+    paste: 'Paste a webhook URL first',
+    async check({ token, options }) {
+      return feishuCheck(token, { api: options.api })
+    },
+    post: (webhook, text) => feishuPost(webhook, text, { timeoutMs: SEND_TIMEOUT_MS }),
+    mountKey: () => '',
+    account: () => null,
+  },
 }
 
 export function install(rt) {
@@ -322,6 +421,33 @@ export function install(rt) {
     if (fiber !== undefined) await Promise.resolve().then(() => fiber.dispose()).catch(() => { /* a fiber that fails to dispose must not block unloading */ })
   }
 
+  // A sender's retry policy is notify.js's, not a second one written here: one transport per
+  // sender, reading the saved webhook when it is called, so a reconnect needs no rebuild.
+  const notifiers = new Map(connectors.filter(c => c.def.kind === 'sender').map(c => [c.def.id, createNotifier({
+    channel: c.def.id,
+    log: (format, ...args) => rt.warn(`ds-bot: ${format}`, ...args),
+    transport: {
+      postMessage: (message) => {
+        const webhook = rt.secretValue(c.def.secret)
+        if (webhook === undefined) return { ok: false, error: 'channel_not_found' }
+        return c.def.post(webhook, message?.text ?? '')
+      },
+    },
+  })]))
+  const notifierOf = c => notifiers.get(c.def.id)
+
+  // The connect step of a sender: one test message, then ready or the reason. A sender is "ready"
+  // once this passes, and the failure is a row the owner can read and Try again from.
+  const probe = async (c, token) => {
+    try {
+      await c.def.check({ token, options: c.options })
+      c.status = { state: 'ready' }
+    } catch (error) {
+      c.status = { state: 'error', error: reason(error) }
+      rt.warn('ds-bot: %s connector failed: %s', c.def.name, c.status.error)
+    }
+  }
+
   // The MCP client wraps the server's answer (a 401, say) as the cause. The session address of a
   // mount in progress is not kept anywhere, so it is also taken out of what is shown or logged.
   let addresses = []
@@ -339,6 +465,7 @@ export function install(rt) {
     if (!force && c.mount !== null && c.mount.key === key) return
     await unmount(c)
     if (token === undefined) {
+      notifierOf(c)?.setEnabled(false)
       c.status = { state: 'off' }
       return
     }
@@ -348,6 +475,16 @@ export function install(rt) {
       return
     }
     c.status = { state: 'connecting' }
+    // A sender mounts nothing: the test POST belongs to the connect step, so a start-up (or a
+    // secret change) only reports that a webhook is saved — a restart must not post to the group
+    // again. `force` is a person pressing Try again, which is that person asking for the test.
+    if (def.kind === 'sender') {
+      notifierOf(c)?.setEnabled(true)
+      if (force) await probe(c, token)
+      else c.status = { state: 'ready' }
+      c.mount = { key }
+      return
+    }
     const loader = ctx.get?.('loader')
     if (typeof loader?.import !== 'function' || typeof ctx.plugin !== 'function') {
       c.mount = { key }
@@ -397,6 +534,7 @@ export function install(rt) {
     name: c.def.name,
     state: c.status.state,
     ...(c.status.error !== undefined ? { error: c.status.error } : {}),
+    ...(c.def.kind !== undefined ? { kind: c.def.kind } : {}),
     account: rt.secretValue(c.def.secret) !== undefined ? c.def.account(saved(c)) : null,
     ...(c.def.extra !== undefined ? c.def.extra(rt.secretValue(c.def.secret) !== undefined ? saved(c) : undefined) : {}),
   })
@@ -423,9 +561,25 @@ export function install(rt) {
     async 'connector-connect'(body) {
       const c = known(body.id)
       const token = typeof body.token === 'string' ? body.token.trim() : ''
-      if (token === '') throw new Error(c.def.id === GITHUB ? 'Paste a token first' : 'Paste a key first')
+      if (token === '') throw new Error(c.def.paste ?? (c.def.id === GITHUB ? 'Paste a token first' : 'Paste a key first'))
       if (c.insecure) throw new Error(INSECURE(c.def.name))
       await rt.loadSecrets()
+      // A sender has nothing to mount, so the webhook is saved first and then proved: a webhook
+      // Feishu refuses stays on the row as `error` with Try again beside it, the way a connector
+      // that fails its MCP mount does, instead of losing what the owner pasted.
+      if (c.def.kind === 'sender') {
+        c.saving += 1
+        try {
+          await rt.secretEndpoint('secret-set', { name: c.def.secret, value: token, purpose: c.def.purpose })
+          await keep(c, {})
+        } finally {
+          c.saving -= 1
+        }
+        await probe(c, token)
+        c.mount = { key: `${token}\n${c.def.mountKey(saved(c))}` }
+        notifierOf(c)?.setEnabled(true)
+        return connectorsView()
+      }
       const oldToken = rt.secretValue(c.def.secret)
       const previous = saved(c)
       const record = await c.def.check({ token, options: c.options, saved: previous, body })
@@ -516,6 +670,25 @@ export function install(rt) {
       const c = known(body.id)
       await rt.loadSecrets()
       await sync(c, true)
+      return connectorsView()
+    },
+    // One message, on demand, once. Nothing posts room traffic on its own: that is a spam
+    // decision the owner has not made (#1263).
+    async 'connector-send'(body) {
+      const c = known(body.id)
+      if (c.def.kind !== 'sender') throw new Error('This connector sends no messages')
+      const text = typeof body.text === 'string' ? body.text.trim() : ''
+      if (text === '') throw new Error('Type a message first')
+      if (c.insecure) throw new Error(INSECURE(c.def.name))
+      await rt.loadSecrets()
+      if (rt.secretValue(c.def.secret) === undefined) throw new Error(`Connect ${c.def.name} first`)
+      const notifier = notifierOf(c)
+      // A fresh key per call: two messages with the same text are two messages, not a duplicate.
+      const result = await notifier.send({ key: randomUUID(), text })
+      const sent = result.state === 'sent' || result.state === 'duplicate'
+      const failure = `Feishu refused the message (${result.error ?? result.reason ?? 'no answer'})`
+      await keep(c, { ...saved(c), ...(sent ? { lastOkAt: Date.now() } : { lastError: failure }) })
+      if (!sent) throw new Error(failure)
       return connectorsView()
     },
   }
