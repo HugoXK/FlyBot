@@ -26,31 +26,53 @@ const TEAM = {
 
 // DSH's schedule service, as the host sees it: tasks are stored per Session, and a
 // Session with an active task refuses to be archived unless its activity is stopped.
-function scheduleService({ listDelay = 0, failCreate = false } = {}) {
+function scheduleService({ delay = 0, failPut = false } = {}) {
   const tasks = new Map()
   let next = 1
-  const armedOn = (sessionId) => [...tasks.entries()].filter(([, task]) => task.sessionId === sessionId).map(([id]) => id)
+  let chain = Promise.resolve()
+  const armedOn = (sessionId) => [...tasks.entries()].filter(([, task]) => task.sessionId === sessionId && task.status === 'active').map(([id]) => id)
   return {
     tasks,
-    listDelay,
-    failCreate,
+    delay,
+    failPut,
     armedOn,
     stop(sessionId) {
       for (const id of armedOn(sessionId)) tasks.delete(id)
     },
     arm(sessionId, title = 'nightly check') {
       const id = `schedule-${next++}`
-      tasks.set(id, { sessionId, record: { id, title, prompt: 'Wake up.', kind: 'at', scheduledAt: '2030-01-01T01:00:00.000Z' } })
+      tasks.set(id, { sessionId, status: 'active', record: { id, title, prompt: 'Wake up.', kind: 'at', scheduledAt: '2030-01-01T01:00:00.000Z' }, deliveryHistory: { records: [] } })
       return id
     },
     async list({ sessionId }) {
-      if (listDelay > 0) await new Promise(resolve => setTimeout(resolve, listDelay))
+      if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
       return [...tasks.values()].filter(task => task.sessionId === sessionId).map(task => task.record)
     },
+    // A part move rewrites the stored row (DSH's `getDomain`, inside `serialize`).
+    async getDomain() {
+      return {
+        table(name) {
+          assert.equal(name, 'tasks')
+          return {
+            entries: () => tasks.entries(),
+            get: id => tasks.get(id),
+            put(id, task) {
+              if (failPut) throw new Error('write failed')
+              tasks.set(id, task)
+            },
+          }
+        },
+      }
+    },
+    serialize(work) {
+      // Queued behind whatever DSH is already running, like the real service.
+      const pending = chain.then(() => (delay > 0 ? new Promise(resolve => setTimeout(resolve, delay)) : undefined)).then(work)
+      chain = pending.catch(() => undefined)
+      return pending
+    },
     async create(sessionId, request) {
-      if (failCreate) throw new Error('create failed')
       const id = `schedule-${next++}`
-      tasks.set(id, { sessionId, record: { id, title: request.title, prompt: request.prompt, kind: 'at', scheduledAt: request.at } })
+      tasks.set(id, { sessionId, status: 'active', record: { id, title: request.title, prompt: request.prompt, kind: 'at', scheduledAt: request.at }, deliveryHistory: { records: [] } })
       return tasks.get(id).record
     },
     async delete({ sessionId, id }) {
@@ -179,7 +201,7 @@ const drained = async () => { for (let i = 0; i < 25; i += 1) await settle() }
 const archivedEntry = (archived, sessionId) => archived.find(entry => (Array.isArray(entry) ? entry[0] : entry) === sessionId)
 
 test('#896: a part whose task moved is archived once the move finished', async (t) => {
-  const schedule = scheduleService({ listDelay: 40 })
+  const schedule = scheduleService({ delay: 40 })
   const h = await start({ schedule })
   t.after(h.stop)
   schedule.arm('b')
@@ -195,7 +217,7 @@ test('#896: a part whose task moved is archived once the move finished', async (
 })
 
 test('#896: a failed task move does not leave an armed earlier part active', async (t) => {
-  const schedule = scheduleService({ failCreate: true })
+  const schedule = scheduleService({ failPut: true })
   const h = await start({ schedule })
   t.after(h.stop)
   schedule.arm('b')

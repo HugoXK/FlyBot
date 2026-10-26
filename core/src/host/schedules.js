@@ -519,26 +519,58 @@ export function install(rt) {
     },
   }
 
-  // A fresh part takes over the earlier part's active tasks: each is created again on
-  // the fresh Session before the old one goes, so a failure leaves it where it was.
+  // A fresh part takes over the earlier part's active tasks. A handoff is not an edit, so
+  // each row is rewritten in place with the fresh Session: the id, the delivery history and
+  // the instant it was already due all stay put, and a failed write leaves it where it was.
+  // Creating the task again would re-anchor it (DSH's create sets now + interval, #1245).
+  //
+  // This reaches DSH's storage domain directly: `getDomain()`, `serialize()`,
+  // `table('tasks')`, `put` and the `tasks` row shape are PRIVATE API of
+  // `@deepseek-ai/dsh-schedule@0.2.0-rc.2` (declared in `lib/types/index.d.ts:119` and
+  // `:132`), so re-check them on every DSH upgrade.
+  // A missing or renamed `getDomain()`, `serialize()` or `table('tasks')` throws before the
+  // loop runs: nothing moves, and `moveSchedules` warns `ds-bot: tasks of %s not moved`.
+  // A missing or renamed `record` is not read before the loop: `task.record.kind` throws on the
+  // first row that passes the filter, so rows already written in that call stay moved — a
+  // uniform drift moves nothing, a partial one leaves the move half done, and the outer
+  // `ds-bot: tasks of %s not moved` warn fires even though those earlier rows moved. A missing
+  // or renamed `put` throws per row instead: the per-row catch warns
+  // `ds-bot: task %s stayed with the earlier part`, and only that row stays behind while the
+  // rest of the loop continues. A renamed row field the filter reads (`sessionId`, `status`)
+  // throws nothing and warns nothing: every row is skipped silently, so a fake row carrying
+  // `state` instead of `status` is skipped and a reader who greps either warning finds nothing
+  // — those tasks silently stop firing rather than crash. A present `record` with a renamed
+  // `kind` reads as `kind: undefined`, so the one-shot test is false and an expired one-shot is
+  // moved to the fresh part; a renamed `scheduledAt` reads as undefined, so `Date.parse` gives
+  // NaN and the expiry check passes. Those rows do not stop firing: they move and can fire on
+  // the fresh part, an expired one-shot late. The tests fake the same private shape, so they
+  // do not catch any of it. The archive's schedule-only `stopActivity` removes the skipped rows
+  // only while no job, turn or subagent also holds the Session; when one does, the #901 guard
+  // refuses the archive and the rows leak instead.
+  //
+  // No re-arm is needed after a move at this DSH version: the driver's `drive()` re-scans
+  // storage on every tick and the timer is the global minimum over `scheduledAt`, so the
+  // moved row's due instant is already covered. If DSH ever turns the driver event-driven,
+  // a moved task needs an explicit `emitChanged()`.
   async function moveSchedules(fromId, toId) {
     if (service === null) return
-    let records
     try {
-      records = await service.list({ sessionId: fromId })
+      await service.serialize(async () => {
+        const tasks = (await service.getDomain()).table('tasks')
+        for (const [id, task] of tasks.entries()) {
+          if (task.sessionId !== fromId || task.status !== 'active') continue
+          // A one-shot whose time has passed can never run on the fresh part.
+          const oneShot = task.record.kind === 'at' || task.record.kind === 'after'
+          if (oneShot && Date.parse(task.record.scheduledAt) <= Date.now()) continue
+          try {
+            await tasks.put(id, { ...task, sessionId: toId })
+          } catch (error) {
+            rt.warn('ds-bot: task %s stayed with the earlier part: %s', task.record.title, error?.message ?? error)
+          }
+        }
+      })
     } catch (error) {
       rt.warn('ds-bot: tasks of %s not moved: %s', fromId, error?.message ?? error)
-      return
-    }
-    for (const record of records) {
-      const request = requestOf(record)
-      if (request === null || (request.at !== undefined && Date.parse(request.at) <= Date.now())) continue
-      try {
-        await service.create(toId, request)
-        await service.delete({ sessionId: fromId, id: record.id })
-      } catch (error) {
-        rt.warn('ds-bot: task %s stayed with the earlier part: %s', record.title, error?.message ?? error)
-      }
     }
   }
 
