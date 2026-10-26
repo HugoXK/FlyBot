@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { apply } from '../index.js'
+import { createRuntime, provideFlyBot } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 import { reminderText } from '../src/host/schedules.js'
 
@@ -22,9 +22,11 @@ const TEAM = {
 }
 
 // The record fields DSH stores for each create selector (see dsh-schedule's README).
+// `every_seconds` is the one DSH anchors to the create instant (now + interval), so a
+// move that went through create would re-anchor it; the others keep a fixed instant.
 const KINDS = {
   at: at => ({ kind: 'at', scheduledAt: at }),
-  every_seconds: seconds => ({ kind: 'every', everySeconds: seconds, scheduledAt: '2030-01-01T01:00:00.000Z' }),
+  every_seconds: seconds => ({ kind: 'every', everySeconds: seconds, scheduledAt: new Date(Date.now() + seconds * 1000).toISOString() }),
   daily: ({ time, time_zone }) => ({ kind: 'daily', time, timeZone: time_zone, scheduledAt: '2030-01-01T01:00:00.000Z' }),
   weekly: ({ time, time_zone, weekdays }) => ({ kind: 'weekly', time, timeZone: time_zone, weekdays, scheduledAt: '2030-01-01T01:00:00.000Z' }),
   cron: ({ expression, time_zone }) => ({ kind: 'cron', expression, timeZone: time_zone, scheduledAt: '2030-01-01T01:00:00.000Z' }),
@@ -36,21 +38,45 @@ function scheduleService() {
   const tasks = new Map()
   const updates = []
   let next = 1
-  return {
+  // DSH runs management and delivery through one queue (`serialize`); the fake keeps one too.
+  let chain = Promise.resolve()
+  const service = {
     tasks,
     updates,
     failCreate: false,
     failDelete: false,
+    failPut: false,
     async create(sessionId, request) {
       if (this.failCreate) throw new Error('create failed')
       const id = `schedule-${next++}`
       const kind = Object.keys(request).find(key => !['title', 'prompt'].includes(key))
       const record = { id, title: request.title, prompt: request.prompt, timing: request[kind], ...KINDS[kind](request[kind]) }
-      tasks.set(id, { sessionId, record, status: 'active' })
+      tasks.set(id, { sessionId, record, status: 'active', deliveryHistory: { records: [], earlierRecordsUnavailable: false } })
       return record
     },
     async list({ sessionId }) { return [...tasks.values()].filter(task => task.sessionId === sessionId && task.status === 'active').map(task => task.record) },
     async catalog() { return [...tasks.values()].map(task => ({ ...task.record, sessionId: task.sessionId, status: task.status })) },
+    // DSH's storage domain, as `getDomain()` exposes it: the row itself is what a move rewrites.
+    async getDomain() {
+      return {
+        table(name) {
+          assert.equal(name, 'tasks')
+          return {
+            entries: () => tasks.entries(),
+            get: id => tasks.get(id),
+            put(id, task) {
+              if (service.failPut) throw new Error('write failed')
+              tasks.set(id, task)
+            },
+          }
+        },
+      }
+    },
+    serialize(work) {
+      const pending = chain.then(work)
+      chain = pending.catch(() => undefined)
+      return pending
+    },
     async update(request) {
       updates.push(request)
       const task = tasks.get(request.id)
@@ -68,6 +94,7 @@ function scheduleService() {
       return { id, deleted: true }
     },
   }
+  return service
 }
 
 function setup(services = {}, team = TEAM) {
@@ -76,9 +103,10 @@ function setup(services = {}, team = TEAM) {
   const ctx = fakeContext({ services })
   const register = ctx.connection.fetch.register
   ctx.connection.fetch.register = (route) => { ctx.route = route; return register(route) }
-  apply(ctx, { home })
+  const rt = createRuntime(ctx, { home })
+  provideFlyBot(ctx, rt.flybot)
   const call = async (endpoint, payload) => (await ctx.route.fetch(new Request('http://localhost/api/bot', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))).json()
-  return { ctx, home, call }
+  return { ctx, home, call, rt }
 }
 
 test('without the schedule service the page says so and creating is refused', async (t) => {
@@ -210,6 +238,79 @@ test('editing a task onto another chat creates the new one before deleting the o
   const again = await call('schedule-update', { sessionId: 'g1', id: groupId, target: 'g1', title: 'Standup', prompt: 'Again', when: DAILY })
   assert.equal(again.ok, true, JSON.stringify(again))
   assert.deepEqual(again.value.tasks.map(task => [task.prompt, task.status]), [['Again', 'active']])
+})
+
+// #1245: a handoff is not an edit. The earlier part's task moves to the fresh part with its
+// id, its delivery history and the instant it was already due — not re-anchored to the
+// handoff, which would slip its next run by up to a full interval and hide it.
+test('#1245: a handoff moves an “every” task without re-anchoring it', async (t) => {
+  const schedule = scheduleService()
+  const { ctx, home, rt } = setup({ schedule })
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true, maxRetries: 5 }) })
+  // A handoff happens well after the task was created, so a create-based move would visibly
+  // re-anchor it: the fake's create samples this clock (`now + every_seconds`).
+  let clock = Date.parse('2030-01-01T00:00:00.000Z')
+  t.mock.method(Date, 'now', () => clock)
+
+  const record = await schedule.create('m1', { title: 'Watch', prompt: 'Check the board', every_seconds: 7200 })
+  const row = schedule.tasks.get(record.id)
+  row.deliveryHistory = { records: [{ scheduledAt: '2030-01-01T01:00:00.000Z', deliveredAt: '2030-01-01T01:00:01.000Z', messageId: 'msg-old' }], earlierRecordsUnavailable: false }
+  const anchor = row.record.scheduledAt
+  const history = structuredClone(row.deliveryHistory)
+
+  clock += 45 * 60_000
+  await rt.moveSchedules('m1', 'm1-fresh')
+
+  const moved = [...schedule.tasks.values()].filter(task => task.sessionId === 'm1-fresh')
+  assert.equal(moved.length, 1, 'the task moved to the fresh part')
+  assert.equal(moved[0].record.scheduledAt, anchor, 'the instant it was already due is kept')
+  assert.equal(moved[0].record.id, record.id, 'the task keeps its id')
+  assert.deepEqual(moved[0].deliveryHistory, history, 'the delivery history is kept')
+  assert.equal(moved[0].record.everySeconds, 7200)
+  assert.equal(schedule.tasks.size, 1, 'the row was rewritten, not copied')
+
+  // A failed write leaves the task where it was, with nothing half-deleted (#901).
+  schedule.failPut = true
+  await rt.moveSchedules('m1-fresh', 'm1-newer')
+  schedule.failPut = false
+  const [still] = [...schedule.tasks.values()]
+  assert.equal(still.sessionId, 'm1-fresh', 'a failed move changes nothing')
+  assert.equal(still.record.id, record.id)
+  assert.equal(still.record.scheduledAt, anchor)
+
+  // A one-shot whose time has already passed cannot run on the fresh part, so it stays.
+  const once = await schedule.create('m1-fresh', { title: 'Once', prompt: 'Ping', at: '2030-01-01T00:00:00.000Z' })
+  schedule.tasks.get(once.id).record = { ...schedule.tasks.get(once.id).record, scheduledAt: new Date(Date.now() - 1000).toISOString() }
+  await rt.moveSchedules('m1-fresh', 'm1-newer')
+  const byId = id => [...schedule.tasks.values()].find(task => task.record.id === id)
+  assert.equal(byId(once.id).sessionId, 'm1-fresh', 'a passed one-shot stays where it is')
+  assert.equal(byId(record.id).sessionId, 'm1-newer', 'the recurring task still moved')
+})
+
+// The move only takes active rows: a disabled task and an exhausted one-shot have no next run
+// to follow the handoff, so they stay on the earlier part with their status untouched.
+test('#1245: a handoff leaves a disabled and an exhausted row on the earlier part', async (t) => {
+  const schedule = scheduleService()
+  const { ctx, home, rt } = setup({ schedule })
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true, maxRetries: 5 }) })
+  t.mock.method(Date, 'now', () => Date.parse('2030-01-01T00:00:00.000Z'))
+
+  const disabled = await schedule.create('m1', { title: 'Disabled watch', prompt: 'Switched off', every_seconds: 7200 })
+  const exhausted = await schedule.create('m1', { title: 'Exhausted ping', prompt: 'Ran once', at: '2030-01-01T00:10:00.000Z' })
+  // DSH's only ended state is `inactive`: a disabled task and a finished one-shot both keep it.
+  schedule.tasks.get(disabled.id).status = 'inactive'
+  schedule.tasks.get(exhausted.id).status = 'inactive'
+  const active = await schedule.create('m1', { title: 'Live watch', prompt: 'Moves', every_seconds: 3600 })
+
+  await rt.moveSchedules('m1', 'm1-fresh')
+
+  const row = id => [...schedule.tasks.values()].find(task => task.record.id === id)
+  assert.equal(row(disabled.id).sessionId, 'm1', 'a disabled task stays on the earlier part')
+  assert.equal(row(disabled.id).status, 'inactive', 'its status is untouched')
+  assert.equal(row(exhausted.id).sessionId, 'm1', 'an exhausted task stays on the earlier part')
+  assert.equal(row(exhausted.id).status, 'inactive', 'its status is untouched')
+  assert.equal(row(active.id).sessionId, 'm1-fresh', 'the active task still moves')
+  assert.deepEqual([...schedule.tasks.values()].filter(task => task.sessionId === 'm1-fresh').map(task => task.record.id), [active.id], 'the fresh part gets neither inactive row')
 })
 
 test('pause keeps the task in FlyBot and removes it from DSH; resume brings it back', async (t) => {
