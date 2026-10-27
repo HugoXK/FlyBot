@@ -10,6 +10,7 @@ import { install as installMemberAuth } from '../src/host/member-auth.js'
 import { install as installAuthz } from '../src/host/authz.js'
 import { install as installReach } from '../src/host/reach.js'
 import { install as installRooms, currentParticipants, isCrossOwnerRoom, linesVisibleTo, roomVisibleTo } from '../src/host/room-membership.js'
+import { compactStatus } from '../src/host/room-context.js'
 // Room membership (#50): humans and Chiefs share a room with distinct authorship.
 // Team mode stays disabled — these tests cover the membership surface only.
 
@@ -149,6 +150,31 @@ test('concurrent posts keep order and identity', async (t) => {
   assert.equal(log.length, 2)
   assert.ok(log[0].seq < log[1].seq)
   assert.notEqual(log[0].authorId, log[1].authorId)
+})
+
+// #1251: `appendRoom` in groups.js is not the only writer of `room.log`. A line posted through the
+// channel (`room-post` → postRoomMessage) lands here, so the same store gate runs here: a Bot's status
+// essay is stored as the stub the turn builder shows, while a person's line and a short handoff are
+// stored as written.
+test('#1251: postRoomMessage stores a Bot essay as the stub the room reads back', async (t) => {
+  const { rt } = host(t, TEAM)
+  await rt.load()
+  const { alice } = await signAliceAndBob(rt)
+  const actorA = await rt.authenticate(alice.sessionToken)
+  const essay = `CI on tip abcdef12 is green. tests-ok passed, enqueue when mergeable. ${'The narration repeats itself without a new fact. '.repeat(20)}ESSAY_TAIL`
+  const line = await rt.postRoomMessage('shared', { text: essay, authorId: 'chief-a', authorKind: 'bot' })
+  assert.equal(line.text, compactStatus(essay), 'the line the caller gets back is the stored stub')
+  assert.doesNotMatch(line.text, /ESSAY_TAIL/)
+  assert.ok(line.text.length < 200)
+  assert.equal(rt.state.rooms.shared.log.at(-1).text, compactStatus(essay), 'the log keeps the stub, not the essay')
+  assert.deepEqual([line.seq, line.authorId, line.authorKind, line.botId, line.who], [1, 'chief-a', 'bot', 'chief-a', 'Chief A'])
+  assert.equal(rt.roomHistory('shared', actorA).at(-1).text, compactStatus(essay), 'a reader sees the stub too')
+
+  const person = `CI on tip abcdef12 is green, tests-ok passed, enqueue when mergeable. ${'A person may write a long line. '.repeat(20)}`
+  const human = await rt.postRoomMessage('shared', { text: person }, actorA)
+  assert.equal(human.text, person.trim(), "a person's long line is not collapsed")
+  const handoff = await rt.postRoomMessage('shared', { text: '#1234 PASS @abcdef1 → @Writer', authorId: 'chief-a', authorKind: 'bot' })
+  assert.equal(handoff.text, '#1234 PASS @abcdef1 → @Writer', 'a short Bot handoff stays verbatim')
 })
 
 test('unauthorized history reads fail', async (t) => {

@@ -39,6 +39,7 @@ import { formatFaceRoomTitle, isAutoFaceTitle, faceRoomCreatedAt } from '../shar
 import { HISTORY_MAX, HISTORY_TEXT, ROOM_SHARE_TEXT_MAX, encodeRoomShare, parseRoomInviteLink, parseRoomShare, roomInviteUrl } from '../shared/room-share.js'
 import { cleanFaceLead, cleanRoleLabel, faceLeadOf } from './face-lead.js'
 import { cleanName, fenceUntrusted, isFencedUntrusted, unwrapUntrusted } from './delivery.js'
+import { prepareRoomLine } from './room-context.js'
 import { hasAnyGrant, mayShareRoom } from './reach.js'
 import { mentionSpans } from '../shared/mentions.js'
 
@@ -390,12 +391,19 @@ export function install(rt) {
     room.seen ??= {}
   }
 
+  // #1251: `room.log` has two writers. groups.js `appendRoom` gates the group round; this is the other
+  // one (postRoomMessage, a seat's `line` op, a face-room event), so the same rule runs here. The rule
+  // itself knows a fence now (`room-context.js` `prepareRoomLine`): it collapses the inside and wraps it
+  // again, so a guest's essay is never stored as this home's own text, and both writers share one copy.
+  const storeLine = (line) => prepareRoomLine(line)
+
   const append = (room, line) => {
     ensureLog(room)
     room.seq += 1
     const stamped = { ...(rt.stampHop?.(room, line) ?? line), seq: room.seq }
-    room.log = [...room.log, stamped].slice(-200)
-    return stamped
+    const stored = storeLine(stamped)
+    room.log = [...room.log, stored].slice(-200)
+    return stored
   }
 
   const syncMembers = (room) => {

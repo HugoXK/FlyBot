@@ -1,8 +1,11 @@
-// What a group turn shows the model of the room (#1203). The log on disk stays
-// whole. The turn gets a newer-first slice under a character budget, and a long
-// status essay is collapsed so it cannot fill that slice. Progress for the open
-// job is a compact board snapshot in the same turn, not those essays.
+// What a group turn shows the model of the room (#1203). Both writers of the
+// log store the same stub these turns show (#1251), and a fenced peer line is
+// collapsed inside its wrap, never through it. The turn gets a newer-first slice
+// under a character budget, and a long status essay is collapsed so it cannot
+// fill that slice. Progress for the open job is a compact board snapshot in the
+// same turn, not those essays.
 import { columnOf, compareForWork, progressOf } from '../shared/task-board.js'
+import { fenceUntrusted } from './delivery.js'
 
 // Characters, not a tokenizer. The essays this was measured on are mostly CJK,
 // about one token per character, so a character ceiling is the conservative one:
@@ -95,11 +98,28 @@ export function compactStatus(text) {
   return `[status on the board, ${flat.length} chars] ${head}${more}${called}`
 }
 
+// A room line a writer has already wrapped for another home's Bot (#98): the opener, the sender it
+// names, and the inner text.
+const FENCED_LINE = /^<untrusted-message from="([^"]*)">\n?([\s\S]*?)\n?<\/untrusted-message>$/
+
 // Bot speech only. A person's line, and a short line, stay as stored. The log
 // object is not modified: a collapsed line is a copy.
 export function prepareRoomLine(line) {
   if (line == null || typeof line !== 'object') return line
-  if (line.kind || line.botId === undefined || typeof line.text !== 'string') return line
+  if (typeof line.text !== 'string') return line
+  // A line a writer already fenced for another home's Bot keeps its fence, and while it is fenced
+  // neither `kind` nor `authorKind` is an exemption: both travel from the other home
+  // (room-membership.js copies them), so a peer could otherwise mark an essay `notice` or type it as a
+  // person and store it whole. `compactStatus` flattens `<` and `>` on purpose (#98 review), so the
+  // stub goes back inside the same wrap — one rule for both writers of the log (#1251).
+  const fenced = line.text.match(FENCED_LINE)
+  if (fenced) {
+    if (!statusShaped(fenced[2])) return line
+    return { ...line, text: fenceUntrusted(fenced[1], compactStatus(fenced[2])) }
+  }
+  // Unfenced lines are this home's own: only Bot speech is a status essay, and a person's long line is
+  // stored whole. A short line stays as stored too.
+  if (line.kind || line.botId === undefined) return line
   if (!statusShaped(line.text)) return line
   return { ...line, text: compactStatus(line.text) }
 }

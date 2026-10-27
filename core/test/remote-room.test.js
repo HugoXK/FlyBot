@@ -24,6 +24,7 @@ import { install as installReach, reach, ticketPeers } from '../src/host/reach.j
 import { friendBotOwner, friendBotTitle, remoteBotTitle, sharedRoomTitle } from '../src/shared/remote-label.js'
 import { encodeRoomShare, parseRoomInviteLink, parseRoomShare, roomInviteUrl } from '../src/shared/room-share.js'
 import { fenceUntrusted } from '../src/host/delivery.js'
+import { ROOM_CONTEXT_BUDGET, compactStatus, fitRoomLines, prepareRoomLine } from '../src/host/room-context.js'
 import { mentionRows } from '../src/client/at-menu.js'
 import { indexRoster } from '../src/client/sources.js'
 
@@ -1100,6 +1101,81 @@ test('#98: an inbound-share human line from the other owner is fenced', async (t
   assert.ok(line, 'the human line landed')
   assert.match(String(line.text), /^<untrusted-message from="/)
   assert.equal(String(line.text).match(/<\/untrusted-message>/g).length, 1)
+})
+
+// #1251: a seat's `line` op is the other entry into this home's `room.log` (ingestSeatShare → append).
+// The store gate runs there too, but on the *inside* of the fence: a guest's status essay is stored as
+// the stub the next speaker sees, wrapped again, never as unfenced peer text.
+test('#1251: a seat\'s Bot essay is stored as a fenced stub, not unfenced peer text', async (t) => {
+  const { rt } = host(t, TEAM)
+  await rt.load()
+  const { bob } = await signAliceAndBob(rt)
+  const actorB = await rt.authenticate(bob.sessionToken)
+  const join = encodeRoomShare({
+    op: 'join', roomId: 'alice-war', name: 'War room', inviterName: 'Alice',
+    inviterHome: '@alice.home', inviterHandle: '@chief.alice.home', invitedHandle: '@coder.bob.home', seq: 1,
+  })
+  const first = await rt.applyInboundRoomShare({
+    fromHandle: '@chief.alice.home', fromHome: '@alice.home', fromName: 'Chief',
+    text: join, localBotId: 'spec-b',
+  }, actorB)
+  const essay = `CI on tip abcdef12 is green. tests-ok passed, enqueue when mergeable. ${'The narration repeats itself without a new fact. '.repeat(20)}ESSAY_TAIL`
+  const line = encodeRoomShare({
+    op: 'line', roomId: 'alice-war', name: 'War room', inviterName: 'Alice',
+    inviterHome: '@alice.home', invitedHandle: '@coder.bob.home', seq: 2,
+    who: 'Coder', authorKind: 'bot', text: essay,
+  })
+  await rt.applyInboundRoomShare({ fromHandle: '@chief.alice.home', fromHome: '@alice.home', text: line, localBotId: 'spec-b' }, actorB)
+  const stored = rt.state.rooms[first.room.id].log.at(-1)
+  assert.match(String(stored.text), /^<untrusted-message from="[^"]*">\n[\s\S]*\n<\/untrusted-message>$/, 'the stub stays inside its fence')
+  assert.equal((String(stored.text).match(/<untrusted-message from="/g) || []).length, 1, 'exactly one fence opens')
+  assert.equal((String(stored.text).match(/<\/untrusted-message>/g) || []).length, 1, 'exactly one fence closes')
+  assert.equal(stored.text.replace(/^<untrusted-message from="[^"]*">\n/, '').replace(/\n<\/untrusted-message>$/, ''), compactStatus(essay), 'the fence wraps the same stub the turn builder shows')
+  assert.doesNotMatch(String(stored.text), /ESSAY_TAIL/)
+  assert.ok(String(stored.text).length < 300, 'a 1.5k essay is stored short')
+  assert.deepEqual([stored.seq, stored.authorKind, stored.remote, stored.botId], [1, 'bot', true, '@chief.alice.home'], 'identity fields are kept')
+  assert.equal(rt.roomHistory(first.room.id, actorB).at(-1).text, stored.text, 'a reader sees the fenced stub too')
+})
+
+// #1251 review: `kind` and `authorKind` are the other home's choice, so neither may exempt a seat line
+// from the store gate. The stub goes inside the fence whatever the peer calls the line.
+test('#1251: a peer-chosen kind or authorKind does not exempt a seat line from the stub', async (t) => {
+  const { rt } = host(t, TEAM)
+  await rt.load()
+  const { bob } = await signAliceAndBob(rt)
+  const actorB = await rt.authenticate(bob.sessionToken)
+  const join = encodeRoomShare({
+    op: 'join', roomId: 'alice-war', name: 'War room', inviterName: 'Alice',
+    inviterHome: '@alice.home', inviterHandle: '@chief.alice.home', invitedHandle: '@coder.bob.home', seq: 1,
+  })
+  const first = await rt.applyInboundRoomShare({
+    fromHandle: '@chief.alice.home', fromHome: '@alice.home', fromName: 'Chief',
+    text: join, localBotId: 'spec-b',
+  }, actorB)
+  const essay = `CI on tip abcdef12 is green. tests-ok passed, enqueue when mergeable. ${'The narration repeats itself without a new fact. '.repeat(20)}ESSAY_TAIL`
+  const stored = async (payload) => {
+    const line = encodeRoomShare({
+      op: 'line', roomId: 'alice-war', name: 'War room', inviterName: 'Alice',
+      inviterHome: '@alice.home', invitedHandle: '@coder.bob.home', ...payload,
+    })
+    await rt.applyInboundRoomShare({ fromHandle: '@chief.alice.home', fromHome: '@alice.home', text: line, localBotId: 'spec-b' }, actorB)
+    return rt.state.rooms[first.room.id].log.at(-1)
+  }
+  const notice = await stored({ seq: 2, who: 'Coder', authorKind: 'bot', kind: 'notice', text: essay })
+  assert.equal(notice.kind, 'notice', 'the peer-chosen kind is kept on the line')
+  assert.match(String(notice.text), /^<untrusted-message from="[^"]*">\n[\s\S]*\n<\/untrusted-message>$/, 'kind does not unpack the fence')
+  assert.doesNotMatch(String(notice.text), /ESSAY_TAIL/)
+  assert.ok(String(notice.text).length < 300, `a notice essay is stored short, got ${String(notice.text).length}`)
+  const typed = await stored({ seq: 3, who: 'Alice', authorKind: 'human', authorId: 'alice', text: essay })
+  assert.match(String(typed.text), /^<untrusted-message from="[^"]*">\n[\s\S]*\n<\/untrusted-message>$/, 'a typed line stays fenced')
+  assert.doesNotMatch(String(typed.text), /ESSAY_TAIL/)
+  assert.ok(String(typed.text).length < 300, `a typed essay is stored short, got ${String(typed.text).length}`)
+  // What the next turn reads: the same slice the round builds, prepared by the same rule. A kind-marked
+  // peer essay must not fill it the way it does at this tip.
+  const log = rt.state.rooms[first.room.id].log
+  const turn = fitRoomLines(log, { budget: ROOM_CONTEXT_BUDGET, render: line => line.text, prepare: prepareRoomLine })
+  assert.ok(turn.text.length < 800, `the next turn reads the stub, got ${turn.text.length} chars`)
+  assert.doesNotMatch(turn.text, /ESSAY_TAIL/)
 })
 
 // ---- A group with a friend's Bot and a local Bot the owner has not shared with that friend
