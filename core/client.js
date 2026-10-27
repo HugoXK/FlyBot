@@ -2501,17 +2501,36 @@ function heldReplyOf(bot, sessionId, turn) {
   return found;
 }
 var unsentReplyTurns = (bot, sessionId) => (Array.isArray(bot?.heldReplies) ? bot.heldReplies : []).filter((reply) => reply.sessionId === sessionId && reply.status !== "approved" && reply.status !== "auto").map((reply) => reply.turn);
-function previewOf(list, id, hiddenTurns = [], unsentTurns = []) {
+function previewOf(list, id, hiddenTurns = [], unsentTurns = [], names = []) {
   const outline = list.projectionsBySession?.[id]?.values?.turnOutline ?? list.byId[id]?.projectionValues?.turnOutline;
   if (!Array.isArray(outline)) return "";
   for (let index = outline.length - 1; index >= 0; index -= 1) {
     const entry = outline[index];
     if (hiddenTurns.includes(entry.turn)) continue;
     const text = (unsentTurns.includes(entry.turn) ? "" : entry.response) || entry.prompt || "";
-    if (text !== "") return visibleText(stripTrace(stripHeader(text)).replace(/\s+/g, " ").trim().replace(/^[^\s→]{1,40}(?: → [^\s→]{1,40})+ (?=\S)/, ""));
+    if (text === "") continue;
+    return readableLine(text, names);
   }
   return "";
 }
+function readableLine(text, names = []) {
+  return dropKnownTrace(collapsedLine(text), names);
+}
+function collapsedLine(text) {
+  return visibleText(stripTrace(stripHeader(`${text}`)).replace(/\s+/g, " ").trim());
+}
+function dropKnownTrace(line2, names) {
+  const known = [...new Set((Array.isArray(names) ? names : []).map((name) => String(name ?? "").trim()).filter((name) => name !== ""))].sort((a, b) => b.length - a.length);
+  if (known.length === 0 || line2 === "") return line2;
+  const hop = known.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const whole = `(?:${hop})(?=[ \\t→,，.。:：]|$)`;
+  const trace = new RegExp(`^${whole}(?:[ \\t]*→[ \\t]*${whole})+[ \\t]*(?:[,，.。:：][ \\t]*)?(?:\\d{1,2}:\\d{2}Z?[ \\t]*)?`);
+  const match = trace.exec(line2);
+  if (!match) return line2;
+  const rest = line2.slice(match[0].length);
+  return /^[\s,，.。:：]*$/.test(rest) ? "" : rest;
+}
+var botNames = (roster) => [...roster?.bots ?? [], ...roster?.remoteBots ?? [], ...roster?.agents ?? []].map((entry) => entry?.name).filter((name) => typeof name === "string" && name !== "");
 var formatTokens = (count) => count >= 1e6 ? `${(count / 1e6).toFixed(1)}M` : count >= 1e3 ? `${(count / 1e3).toFixed(1)}K` : String(count);
 function usageOf(list, ids) {
   let input = 0;
@@ -7646,7 +7665,7 @@ function latestActivity(card, { roster, work, sessions }) {
     const entry = card.executingBot ? runningIn(work, card.executingBot, roster.roomsById?.[card.chat] ? card.chat : void 0) : void 0;
     if (entry) options.push(`${workPhrase(entry.tool)}…`);
   }
-  if (sessions?.byId && card.chat) options.push(previewOf(sessions, partOf(roster, card.chat)));
+  if (sessions?.byId && card.chat) options.push(previewOf(sessions, partOf(roster, card.chat), [], [], botNames(roster)));
   return options.find((text) => typeof text === "string" && text !== "" && text !== card.title && text !== card.reason) ?? "";
 }
 function toolCalls(card, { roster, work }) {
@@ -7758,7 +7777,7 @@ function inboxModel({ roster, work = {}, tasks = [], sessions, now = Date.now() 
     const bot = ownBot(roster, entry.botId);
     if (bot === void 0 || entry.failed === void 0 || !fresh(entry.at) || seen.has(key) || waitingAt.has(key)) continue;
     const chat = entry.roomId ?? bot.id;
-    const asked = sessions?.byId ? previewOf(sessions, partOf(roster, chat)) : "";
+    const asked = sessions?.byId ? previewOf(sessions, partOf(roster, chat), [], [], botNames(roster)) : "";
     needs.push({
       id: `turn:${entry.id}`,
       kind: "turn",
@@ -7801,7 +7820,7 @@ function inboxModel({ roster, work = {}, tasks = [], sessions, now = Date.now() 
       const part = currentPart(bot);
       const at = sessions.byId[part]?.updatedAt;
       if (!fresh(at)) continue;
-      const text = previewOf(sessions, part);
+      const text = previewOf(sessions, part, [], [], botNames(roster));
       if (text === "") continue;
       done.push({ id: `chat:${bot.id}`, kind: "chat", status: "done", bot, at, title: text, place: "", chat: bot.id, ...people(roster, bot.id) });
     }
@@ -8853,7 +8872,7 @@ var workLine = (lead, tool, more) => (0, import_react16.createElement)(Shimmer, 
 function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessionRetainInfo, useActivity, useWork, wide, marked, asRow = false }) {
   const id = bot.id;
   const part = currentPart(bot);
-  const preview = useSessions((list) => nameMentions(previewOf(list, part, roster.exchangeTurns[part], unsentReplyTurns(bot, part)), roster));
+  const preview = useSessions((list) => nameMentions(previewOf(list, part, roster.exchangeTurns[part], unsentReplyTurns(bot, part), botNames(roster)), roster));
   const running = useSessionStatus((map) => map.get(part)?.running === true);
   const active = useSessionRetainInfo(part, (info) => (info?.retainedBy?.mainView ?? 0) > 0);
   const unread = useSessionStatus((map) => map.get(part)?.completionUnread === true || map.get(part)?.pendingInteraction !== void 0) || marked && !active;
@@ -8988,7 +9007,7 @@ function FaceMark() {
 }
 function RoomRow({ room: room2, roster, actions, useSessions, useSessionStatus, useSessionRetainInfo, useWork, wide, marked }) {
   const id = room2.id;
-  const fallback = useSessions((list) => nameMentions(previewOf(list, id), roster));
+  const fallback = useSessions((list) => nameMentions(previewOf(list, id, [], [], botNames(roster)), roster));
   const preview = nameMentions(visibleText(room2.preview), roster) || fallback;
   const active = useSessionRetainInfo(id, (info) => (info?.retainedBy?.mainView ?? 0) > 0);
   const unread = useSessionStatus((map) => map.get(id)?.completionUnread === true) || marked && !active;
@@ -13305,6 +13324,7 @@ button.bt-face-bot:hover{color:var(--bt-ink);text-decoration:underline;text-unde
 // src/client/palette.js
 var import_react29 = require("react");
 var import_dsh_client_ui_primitives3 = require("@deepseek-ai/dsh-client-ui-primitives");
+var paletteText = (raw, names) => readableLine(String(raw ?? ""), names);
 var PALETTE_EXIT_MS = 160;
 function CommandPalette({ start, token, roster, actions, useSessions }) {
   const [query, setQuery] = (0, import_react29.useState)(start ?? "");
@@ -13318,6 +13338,7 @@ function CommandPalette({ start, token, roster, actions, useSessions }) {
   };
   useEscape(close);
   const ids = [...roster.bots.map(currentPart), ...roster.rooms.map((item) => item.id)];
+  const names = botNames(roster);
   const found = useSessions((list) => {
     if (wanted.length < 2) return "[]";
     const hits = [];
@@ -13329,7 +13350,7 @@ function CommandPalette({ start, token, roster, actions, useSessions }) {
         const entry = outline[index2];
         if (hidden.includes(entry.turn)) continue;
         for (const raw of [entry.response, entry.prompt]) {
-          const text = stripHeader(raw ?? "").replace(/\s+/g, " ").trim();
+          const text = paletteText(raw, names);
           const at = text.toLowerCase().indexOf(wanted);
           if (at < 0) continue;
           const from = Math.max(0, at - 24);
