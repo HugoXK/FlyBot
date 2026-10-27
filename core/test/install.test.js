@@ -86,6 +86,7 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
     'on agent/pre-step (prepend)',
     'on agent/request-error (prepend)',
     'on agent/request-error (prepend)',
+    'effect ds-bot: archive a part once its job ends',
     'on agent/status',
     'on llm/stream',
     'on llm/stream',

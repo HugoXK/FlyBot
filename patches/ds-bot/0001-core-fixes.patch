@@ -8842,6 +8842,14 @@ diff --git a/test/install.test.js b/test/install.test.js
      'on approval/request (prepend)',
      'on agent/inbox/discarded',
      'on session/event',
+@@ -81,6 +81,7 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
+     'on agent/pre-step (prepend)',
+     'on agent/request-error (prepend)',
+     'on agent/request-error (prepend)',
++    'effect ds-bot: archive a part once its job ends',
+     'on agent/status',
+     'on llm/stream',
+     'on llm/stream',
 @@ -91,12 +91,23 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
      'on llm/stream',
      'effect ds-bot: load secrets',

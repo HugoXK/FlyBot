@@ -796,6 +796,21 @@ export function install(rt) {
   const noteFailures = new Map()
   // Parts the steward is deciding about at the end of a turn.
   const checking = new Set()
+  // Earlier parts whose handoff archive a holder that ends on its own refused: a job, a
+  // turn or a subagent, never a scheduled task. Such a holder is never stopped, so the id
+  // waits here until that end is reported — its job settling, or its Session going idle —
+  // and the archive is asked for once more, with no options (#1433). A refusal that names
+  // no kind at all is not remembered: nothing says what would end.
+  const pendingArchive = new Set()
+  // Ids whose one more attempt is in flight, so a job that settles just as its Session
+  // goes idle is asked for once, not twice.
+  const attemptingArchive = new Set()
+  // The most ids that may wait: a Set keeps insertion order, so the oldest leaves first.
+  // Nothing here retries on a timer — one attempt per id at a time, and only when a
+  // holder-end signal names it — so the table cannot grow by itself. The cap is the
+  // backstop for a host that never reports the end: such a part is dropped, never forced
+  // (#896).
+  const PENDING_ARCHIVE_MAX = 32
 
   const placeOf = (sessionId) => {
     const botId = rt.chatOwners.get(sessionId)
@@ -884,7 +899,14 @@ export function install(rt) {
           // refusal a scheduled task alone caused (#896 review): a job, turn or subagent
           // that holds the part is left to finish, exactly as before this fix.
           const kinds = Array.isArray(error?.activity) ? error.activity.map(entry => entry?.kind) : []
-          if (kinds.length === 0 || kinds.some(kind => kind !== 'schedule')) return
+          if (kinds.length === 0 || kinds.some(kind => kind !== 'schedule')) {
+            // A job, turn or subagent that holds the part is left to finish, and the part
+            // used to stay active for the life of the instance (#1433). Remember it for
+            // one more attempt once its holder ends; a schedule-only refusal takes the
+            // stop below.
+            if (kinds.length > 0) rememberPendingArchive(agent.id)
+            return
+          }
           // A task that could not be moved still holds the part, and leaving it active
           // forever is the leak #896 is about. Stop its activity, the way a deletion does
           // (roster.js:450): a finished part is never left running a task nobody sees.
@@ -1188,11 +1210,74 @@ export function install(rt) {
     if (end !== undefined && end.data?.reason?.kind !== 'error') rescued.delete(agent.id)
   }
 
+  function rememberPendingArchive(sessionId) {
+    pendingArchive.add(sessionId)
+    while (pendingArchive.size > PENDING_ARCHIVE_MAX) pendingArchive.delete(pendingArchive.values().next().value)
+    watchJobSettlements()
+  }
+
+  // A background job ends on its own schedule, and its Session is idle by then: the idle
+  // event came before this attempt and will not come again, and the part that was handed
+  // over never takes another turn (its input goes to the fresh part, `forward`). The job
+  // registry's own settlement is the event that names that moment (#1433), read through
+  // `ctx.get` — no inject asked, and `undefined` when the service is not there yet: a
+  // composition may provide the job registry after this plugin loads, and one without it
+  // has no job to wait for.
+  let jobUnwatch
+  function watchJobSettlements() {
+    if (jobUnwatch !== undefined) return
+    const events = ctx.get('jobs')?.events
+    if (events === undefined) return
+    jobUnwatch = events.subscribe({ owners: 'all' }, (event) => {
+      if (event?.type !== 'settled' || typeof event.job?.owner !== 'string') return
+      attemptPendingArchive(event.job.owner, 'its job')
+    })
+  }
+  ctx.effect(() => () => jobUnwatch?.(), 'ds-bot: archive a part once its job ends')
+
+  // One more archive attempt for a part whose holder has ended, with no options, so a job,
+  // a turn or a subagent is never stopped for it (#896). A refusal that still names one of
+  // those means the holder has not ended after all — the Session reported its idle while
+  // the job ran — so the id stays and the next signal tries again instead of the one
+  // chance being spent. It leaves when the attempt lands, when the refusal names no
+  // activity at all, or when a scheduled task alone names it — that one is answered by the
+  // handoff's own `stopActivity` retry, never by holding the id.
+  function attemptPendingArchive(sessionId, endedBy) {
+    if (!pendingArchive.has(sessionId) || attemptingArchive.has(sessionId)) return
+    attemptingArchive.add(sessionId)
+    void ctx.workspaceRegistry.archiveSession(sessionId)
+      .then(() => pendingArchive.delete(sessionId))
+      .catch(error => {
+        const kinds = Array.isArray(error?.activity) ? error.activity.map(entry => entry?.kind) : []
+        // A holder that ends on its own has not ended after all: keep the id and let the
+        // next signal try again, instead of spending the one chance.
+        if (kinds.some(kind => kind !== 'schedule')) {
+          rt.warn('ds-bot: earlier part %s still held by its %s after %s ended: %s', sessionId, kinds.join(', '), endedBy, error)
+          return
+        }
+        pendingArchive.delete(sessionId)
+        // A scheduled task alone is the one refusal the handoff answers by stopping the
+        // activity (#896): a task that could not be moved still holds the part, and leaving
+        // it active is the leak itself. The retry answers it the same way, and the id is
+        // spent either way — a stop that fails is not asked for again.
+        if (kinds.length > 0) {
+          void ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true })
+            .catch(again => rt.warn('ds-bot: earlier part %s not archived after %s ended, not even stopped: %s', sessionId, endedBy, again))
+          return
+        }
+        rt.warn('ds-bot: earlier part %s not archived after %s ended: %s', sessionId, endedBy, error)
+      })
+      .finally(() => attemptingArchive.delete(sessionId))
+  }
+
   ctx.on('agent/status', ({ agent, status }) => {
-    if (status === 'idle' && rt.isBotSession(agent.id)) {
-      releaseRescued(agent)
-      void checkContext(agent).catch(error => rt.warn('ds-bot: context check for %s failed: %s', agent.id, error))
-    }
+    if (status !== 'idle') return
+    // Before the Bot check: the part that was handed over is no longer this Bot's current
+    // Session, and its holder ends in it all the same.
+    attemptPendingArchive(agent.id, 'its turn')
+    if (!rt.isBotSession(agent.id)) return
+    releaseRescued(agent)
+    void checkContext(agent).catch(error => rt.warn('ds-bot: context check for %s failed: %s', agent.id, error))
   })
 
   // The handoff package opens a part as a turn of its own, so it is the first message
