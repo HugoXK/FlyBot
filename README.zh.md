@@ -102,7 +102,7 @@ npx -y @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add "github:ThinkFlowLab
 
 桌面版：**插件 → 添加插件**，一次粘一个 `github:` 地址，然后**安装**并**立即启用**。
 
-`0.2.0-rc.2` 是 FlyBot 构建与测试所用的 DeepSeek Harness 版本，也正是 `dev/harness` 钉住、CI 在跑的那一版，
+`0.2.0-rc.2` 是 FlyBot 构建与测试所用的 DeepSeek Harness 版本，也正是 `core/dev/harness` 钉住、CI 在跑的那一版，
 四条命令保持一致。
 
 **3. 跑起来**

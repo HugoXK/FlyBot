@@ -115,7 +115,7 @@ The first line is the FlyBot core (package `ds-bot`); the two plugins are what t
 
 On DSH Desktop: **Plugins → Add plugin**, paste one `github:` address at a time, then **Install** and **Enable now**.
 
-`0.2.0-rc.2` is the DeepSeek Harness release FlyBot is built and tested against — the same version `dev/harness`
+`0.2.0-rc.2` is the DeepSeek Harness release FlyBot is built and tested against — the same version `core/dev/harness`
 pins and CI runs, so keep it in all four commands.
 
 **3. Run it**
