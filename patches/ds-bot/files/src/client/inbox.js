@@ -72,7 +72,10 @@ export function useTasks(actions) {
     taskListeners.add(setTasks)
     let stopped = false
     let timer
-    const load = () => Promise.resolve(actions?.tasks?.())
+    // #1252: the default read is active work only, but this inbox classifies finished and failed
+    // cards too (Done, and Needs you after a failure). It asks for the archive so those rows reach
+    // it; the board's own bounded read is a separate call.
+    const load = () => Promise.resolve(actions?.tasks?.({ archive: true }))
       .then((list) => { if (!stopped && list !== undefined) publishTasks(list) })
       // A host that cannot list tasks (a reading host, an older core) shows none.
       .catch(() => {})

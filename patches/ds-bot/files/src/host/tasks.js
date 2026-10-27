@@ -57,6 +57,20 @@ const refuse = (code, message) => Object.assign(new Error(`${code}: ${message}`)
 const WALK = ['open', 'claimed', 'working', 'result-ready', 'accepted']
 const TERMINAL_MATCH = new Set(['accepted', 'cancelled', 'failed'])
 
+const ARCHIVE_LIMIT_MAX = 200
+const readArchiveLimit = (value) => {
+  if (value === undefined || value === null) return undefined
+  // A number, not something that coerces into one: `true` is not "the first card", and "20" is a
+  // wrong request a reader should see refused rather than quietly honoured.
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw invalid('A task list limit must be a whole number of at least 1')
+  }
+  return Math.min(value, ARCHIVE_LIMIT_MAX)
+}
+// Newest work first for the bounded archive: a card finished a minute ago has an old `createdAt`
+// and a fresh `updatedAt`, and it is the one a member is looking for (#1252).
+const newestFirst = (a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || (b.createdAt ?? 0) - (a.createdAt ?? 0)
+
 const readPriority = (value) => {
   if (value === undefined || value === null || value === '') return undefined
   const priority = String(value)
@@ -292,7 +306,28 @@ export function install(rt) {
       transition(task, next, actor, extra)
       if (next === 'result-ready') task.result = { kind: 'summary', summary: (task.note || 'Completed').slice(0, 2000) }
     }
+    if (target === 'accepted') settleOverall(task)
     return true
+  }
+
+  // #1252: a group whose last child finishes otherwise leaves its overall card working forever,
+  // so the room board keeps a card nobody can close. When every child has ended, the overall card
+  // completes: `accepted` if each child was accepted or cancelled, `failed` if any child failed —
+  // a failed part is not hidden behind a green overall card. Both go through `transition` /
+  // `applyColumn`, the same writes a person's own move makes, so history and actors stay honest.
+  function settleOverall(child) {
+    const parent = child?.parentId ? store()[child.parentId] : undefined
+    if (parent === undefined || parent.kind !== 'group' || !openTask(parent)) return false
+    if (!['open', 'claimed', 'working'].includes(parent.status)) return false
+    const children = Object.values(store()).filter(task => task.parentId === parent.id)
+    if (children.length === 0 || children.some(task => !TERMINAL_MATCH.has(task.status))) return false
+    if (children.some(task => task.status === 'failed')) {
+      transition(parent, 'failed', null, { why: 'a part of this group failed' })
+      return true
+    }
+    const moved = applyColumn(parent, 'done', null, 'last child completed')
+    if (moved) parent.progress = 100
+    return moved
   }
 
   function applyFields(task, body) {
@@ -716,6 +751,7 @@ export function install(rt) {
       if (waitingForInput(task) && task.inputApprovalIds?.includes(approval.id)) {
         if (decision !== 'approve') {
           transition(task, 'cancelled', { memberId: approval.ownerId }, { approvalId: approval.id, by: 'owner decision' })
+          settleOverall(task)
           continue
         }
         task.inputApprovalIds = task.inputApprovalIds.filter(id => id !== approval.id)
@@ -727,6 +763,8 @@ export function install(rt) {
       if (task.status !== 'blocked' || task.approvalId !== approval.id) continue
       delete task.approvalId
       transition(task, decision === 'approve' ? 'working' : 'cancelled', { memberId: approval.ownerId }, { by: 'owner decision' })
+      // A rejection is one of the doors a child ends through, so the overall card settles here too.
+      settleOverall(task)
     }
     return save()
   }
@@ -735,6 +773,8 @@ export function install(rt) {
     for (const task of Object.values(store())) {
       if (!ACTIVE.has(task.status) || (task.ownerBotId !== botId && task.workBotId !== botId)) continue
       transition(task, 'failed', null, { why: 'the responsible Bot was deleted' })
+      // Deletion is another door a child ends through; its overall card must not stay working.
+      settleOverall(task)
     }
     return save()
   }
@@ -764,7 +804,20 @@ export function install(rt) {
           // the room query, so a plain list never becomes a group-admin view.
           rows = all.filter(task => mayAct(task, actor) || ancestorOwned(actor, task.ownerBotId))
         }
-        return rows.sort((a, b) => a.createdAt - b.createdAt).map(view)
+        // #1252: the board lists active work; the archive is the same read with a flag, so a
+        // group that has finished hundreds of cards does not ship them on every poll. A caller
+        // that asks for a bounded archive gets the newest rows; without `limit` every row stays
+        // readable, because a lookup by id must still find a card outside the newest page.
+        const archived = body.archive === true
+        const limit = archived ? readArchiveLimit(body.limit) : undefined
+        if (limit !== undefined) {
+          // The page exists for the Done column, so its budget is spent on finished rows only: a
+          // busy room's freshly updated working cards must not push the finished ones off it.
+          const settled = rows.filter(task => !openTask(task)).sort(newestFirst).slice(0, limit)
+          return settled.map(view)
+        }
+        const shown = archived ? rows : rows.filter(openTask)
+        return shown.sort((a, b) => a.createdAt - b.createdAt).map(view)
       }
       case 'task-create': {
         const botId = String(body.botId ?? '')
@@ -866,6 +919,7 @@ export function install(rt) {
         if (task === undefined) throw stale(`no task ${String(body.id ?? '')}`)
         requireRequester(task, actor)
         transition(task, 'accepted', actor)
+        settleOverall(task)
         requestWriteBack(task, 'accepted', undefined, actor)
         await save()
         return view(task)
@@ -888,6 +942,7 @@ export function install(rt) {
         if (task === undefined) throw stale(`no task ${String(body.id ?? '')}`)
         requireRequester(task, actor)
         transition(task, 'cancelled', actor)
+        settleOverall(task)
         await save()
         return view(task)
       }

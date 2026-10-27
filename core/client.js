@@ -7427,7 +7427,7 @@ function useTasks(actions) {
     taskListeners.add(setTasks);
     let stopped = false;
     let timer;
-    const load = () => Promise.resolve(actions?.tasks?.()).then((list) => {
+    const load = () => Promise.resolve(actions?.tasks?.({ archive: true })).then((list) => {
       if (!stopped && list !== void 0) publishTasks(list);
     }).catch(() => {
     }).finally(() => {
@@ -8904,6 +8904,11 @@ function shortId(id) {
   const hex = String(id ?? "").replace(/^task-/, "");
   return `#${hex.slice(-6)}`;
 }
+var ARCHIVE_SHOWN = 20;
+function boardTasksFor(tasks, archive, limit = ARCHIVE_SHOWN) {
+  const newest = [...archive ?? []].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || (b.createdAt ?? 0) - (a.createdAt ?? 0));
+  return [...tasks ?? [], ...newest.slice(0, limit)];
+}
 function boardColumns(tasks) {
   const columns = { "not-started": [], "in-progress": [], done: [] };
   for (const task of tasks ?? []) {
@@ -9024,18 +9029,27 @@ function lanesOf(tasks, roster) {
   }
   return order.map((id) => ({ id, name: botName(roster, map.get(id)[0]) || id, tasks: map.get(id) }));
 }
+var upsert = (list, task) => list.some((item) => item.id === task.id) ? list.map((item) => item.id === task.id ? task : item) : [...list, task];
+var without = (list, id) => list.filter((item) => item.id !== id);
 function useBoardTasks(actions, scope) {
   const [own, setOwn] = (0, import_react17.useState)([]);
   const [groupTasks, setGroupTasks] = (0, import_react17.useState)([]);
+  const [archive, setArchive] = (0, import_react17.useState)([]);
   const key = scope?.kind === "group" ? `group:${scope.roomId}` : "own";
   (0, import_react17.useEffect)(() => {
     let stopped = false;
     const load = () => {
-      const job = scope?.kind === "group" ? Promise.resolve(actions?.tasks?.({ roomId: scope.roomId })) : Promise.resolve(actions?.tasks?.());
+      const query = scope?.kind === "group" ? { roomId: scope.roomId } : {};
+      const archiveQuery = scope?.kind === "bot" ? { botId: scope.botId } : query;
+      const job = scope?.kind === "group" ? Promise.resolve(actions?.tasks?.(query)) : Promise.resolve(actions?.tasks?.());
       void job.then((list) => {
         if (stopped || !Array.isArray(list)) return;
         if (scope?.kind === "group") setGroupTasks(list);
         else setOwn(list);
+      }).catch(() => void 0);
+      void Promise.resolve(actions?.tasks?.({ ...archiveQuery, archive: true, limit: ARCHIVE_SHOWN })).then((list) => {
+        if (stopped || !Array.isArray(list)) return;
+        setArchive(list.filter((task) => columnOf(task) === "done"));
       }).catch(() => void 0);
     };
     load();
@@ -9047,11 +9061,13 @@ function useBoardTasks(actions, scope) {
   }, [key]);
   const tasks = scope?.kind === "group" ? groupTasks : own.filter((task) => !scope?.botId || task.ownerBotId === scope.botId);
   const replace = (task) => {
-    const write = (list) => list.some((item) => item.id === task.id) ? list.map((item) => item.id === task.id ? task : item) : [...list, task];
-    if (scope?.kind === "group") setGroupTasks(write);
-    else setOwn(write);
+    const done2 = columnOf(task) === "done";
+    if (scope?.kind === "group") setGroupTasks((list) => done2 ? without(list, task.id) : upsert(list, task));
+    else setOwn((list) => done2 ? without(list, task.id) : upsert(list, task));
+    setArchive((list) => done2 ? [task, ...without(list, task.id)] : without(list, task.id));
   };
-  return { own, tasks, replace };
+  const done = scope?.kind === "group" ? archive : archive.filter((task) => !scope?.botId || task.ownerBotId === scope.botId);
+  return { own, tasks, archive: done, replace };
 }
 function RailButton({ row, selected, meta, onSelect }) {
   return (0, import_react17.createElement)(
@@ -9260,11 +9276,12 @@ function KanbanDialog({ roster, actions, leaving = false }) {
   const [dragging, setDragging] = (0, import_react17.useState)(null);
   const [error, setError] = (0, import_react17.useState)("");
   const [draft, setDraft] = (0, import_react17.useState)("");
-  const { own, tasks, replace } = useBoardTasks(actions, scope);
+  const { own, tasks, archive, replace } = useBoardTasks(actions, scope);
+  const boardTasks = boardTasksFor(tasks, archive);
   const close = (0, import_react17.useCallback)(() => actions.closeBoard(), []);
   useEscape(close);
   const counts2 = {};
-  for (const task of own) {
+  for (const task of [...own, ...archive]) {
     const id = task.ownerBotId;
     const bucket = counts2[id] ?? (counts2[id] = { done: 0, total: 0 });
     if (task.status === "cancelled" || task.status === "failed") continue;
@@ -9316,7 +9333,7 @@ function KanbanDialog({ roster, actions, leaving = false }) {
       ),
       view === "delivery" ? (0, import_react17.createElement)(DeliveryView, { actions }) : (0, import_react17.createElement)(BoardView, {
         roster,
-        tasks,
+        tasks: boardTasks,
         rail,
         scope,
         counts: counts2,

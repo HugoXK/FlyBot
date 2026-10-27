@@ -91,7 +91,7 @@ async function start(t, config = {}) {
 }
 
 const statusOf = async (call, token, id) => {
-  const list = await call('tasks', {}, token)
+  const list = await call('tasks', { archive: true }, token)
   assert.equal(list.ok, true, JSON.stringify(list))
   return list.value.find(task => task.id === id)
 }
