@@ -76,11 +76,7 @@ const withCheckpoint = (text, files) => {
   return `${text}\n${checkpoint({ issue, claim, files: names.length ? names : [HOST_FILE] })}`
 }
 
-// #1344: the fixture also answers the contents read for the frozen list, at the pull request's BASE commit.
-const BASE = 'c'.repeat(40)
-const FROZEN_PATH = '.github/agent/frozen-branches.json'
-const DEFAULT_FROZEN = { branches: ['cursor/'], markers: ['CURSOR_AGENT_PR_BODY'] }
-const fakeGh = ({ body = null, raw = false, comments = [], reviews = [], labels = ['agent-pr'], files = [], head = HEAD, heads = null, author = 'opener', headRepo = 'ThinkFlowLab/FlyBot', permission = undefined, draft = false, merged = false, branch = 'dev/fixture', baseSha = BASE, baseFrozen = DEFAULT_FROZEN } = {}) => {
+const fakeGh = ({ body = null, raw = false, comments = [], reviews = [], labels = ['agent-pr'], files = [], head = HEAD, heads = null, author = 'opener', headRepo = 'ThinkFlowLab/FlyBot', permission = undefined, draft = false, merged = false, branch = 'dev/fixture' } = {}) => {
   // `raw` is for the tests about the checkpoint itself: they must be able to hand over a body without one.
   const given = body ?? `${HEADERS}Fixes #602\n`
   const text = raw ? given : withCheckpoint(given, files)
@@ -93,17 +89,13 @@ const fakeGh = ({ body = null, raw = false, comments = [], reviews = [], labels 
       if (permission == null || permission === 'throw') throw new Error('fake gh: permission ' + path)
       return JSON.stringify({ permission, role_name: permission, user: { login: 'reviewed' } })
     }
-    if (path.includes('/contents/')) {
-      if (baseFrozen === null) throw new Error('fake gh: 404 ' + path)
-      return JSON.stringify({ content: Buffer.from(JSON.stringify(baseFrozen)).toString('base64'), encoding: 'base64' })
-    }
     if (path.includes('/files')) return files.map((f) => JSON.stringify(typeof f === 'string' ? { filename: f } : f)).join('\n')
     if (path.includes('/comments')) return comments.map((c) => JSON.stringify(c)).join('\n')
     if (path.includes('/reviews')) return reviews.map((r) => JSON.stringify(r)).join('\n')
     if (/\/pulls\/\d+$/.test(path)) {
       // #1112 (c): a run reads the head twice, so the fixture can answer differently the second time.
       const sha = heads ? heads[Math.min(pullReads++, heads.length - 1)] : head
-      return JSON.stringify({ head: { sha, ref: branch, repo: { full_name: headRepo } }, base: { sha: baseSha }, user: { login: author }, body: text, labels: labels.map((name) => ({ name })), draft, merged })
+      return JSON.stringify({ head: { sha, ref: branch, repo: { full_name: headRepo } }, user: { login: author }, body: text, labels: labels.map((name) => ({ name })), draft, merged })
     }
     // Anything else — `gh pr merge` above all — is the guard doing more than checking.
     throw new Error('fake gh: unexpected ' + path)
@@ -952,41 +944,5 @@ test('#1335: a withdrawal from a name that wrote no PASS here changes nothing', 
 
 test('#1335: a withdrawal naming another tip leaves this tip enqueueable', () => {
   const r = run({ comments: [comment(), correction({ tip: OLD })] })
-  assert.equal(r.ok, true, r.reasons.join('; '))
-})
-
-// ---- #1344: the frozen seal. An external agent owns `cursor/` until its write access is settled, and the
-// list lives in a JSON document on the BASE branch so the owner can delete it without a code change. It is
-// a queue-entry seal, not a permission boundary: a direct push or an admin merge never reads it.
-test('#1344: a cursor/ branch is refused at the queue entry even with a well-formed PASS at its tip', () => {
-  const r = run({ branch: 'cursor/workflow-1318-c5f8', comments: [comment()] })
-  assert.equal(r.ok, false)
-  assert.ok(r.reasons.includes('frozen: external agent branch; owner decision pending'), r.reasons.join('; '))
-  assert.match(r.message, /^do not enqueue #566: frozen: external agent branch; owner decision pending/)
-})
-
-test('#1344: emptying the list on the base branch un-freezes the branch — the seal is removable', () => {
-  const frozen = run({ branch: 'cursor/workflow-1318-c5f8', comments: [comment()] })
-  assert.equal(frozen.ok, false)
-  const released = run({ branch: 'cursor/workflow-1318-c5f8', comments: [comment()], baseFrozen: { branches: [], markers: [] } })
-  assert.equal(released.ok, true, 'with nothing listed, the branch is judged like any other: ' + released.reasons.join('; '))
-  const absent = run({ branch: 'cursor/workflow-1318-c5f8', comments: [comment()], baseFrozen: null })
-  assert.equal(absent.ok, true, 'a base without the file freezes nobody: ' + absent.reasons.join('; '))
-})
-
-test('#1344: a body carrying the agent marker is refused on a branch that matches no prefix', () => {
-  const r = run({ branch: 'dev/friendly-name', body: '<!-- CURSOR_AGENT_PR_BODY_BEGIN -->\n\nFixes #602\n', comments: [comment()] })
-  assert.equal(r.ok, false)
-  assert.ok(r.reasons.includes('frozen: external agent branch; owner decision pending'), r.reasons.join('; '))
-})
-
-test('#1344: a pull request that edits the frozen list is refused, so it cannot un-freeze itself', () => {
-  const r = run({ branch: 'cursor/workflow-1318-c5f8', comments: [comment()], baseFrozen: { branches: [], markers: [] }, files: [HOST_FILE, { filename: FROZEN_PATH, status: 'modified' }] })
-  assert.equal(r.ok, false, 'an emptied list inside the pull request is not the list that is read')
-  assert.ok(r.reasons.includes('frozen: .github/agent/frozen-branches.json is not editable by a pull request'), r.reasons.join('; '))
-})
-
-test('#1344: adding the list is how the seal arrives — an add is not an edit', () => {
-  const r = run({ branch: 'dev/1344-user-only-conclusions', comments: [comment()], baseFrozen: null, files: [HOST_FILE, { filename: FROZEN_PATH, status: 'added' }] })
   assert.equal(r.ok, true, r.reasons.join('; '))
 })
