@@ -133,8 +133,9 @@ test('a failed step tears the instances down, a fail-once step keeps them, and r
   assert.equal(held.workflows.find(item => item.id === retry.id).run.status, 'running')
   assert.equal(again.released.length, 0)
   const cancelled = await again.svc.reset({ workflowId: retry.id })
-  assert.equal(cancelled.workflows.find(item => item.id === retry.id).run.status, 'idle')
-  assert.equal(cancelled.workflows.find(item => item.id === retry.id).run.ephemeral, undefined)
+  const cleared = cancelled.workflows.find(item => item.id === retry.id)
+  assert.equal(cleared.run, null)
+  assert.equal(cleared.activeCount, 0)
   assert.deepEqual(again.released.sort(), again.spawned.map(item => item.id).sort())
 })
 
@@ -429,8 +430,7 @@ test('a finished run stays done, and a run with no ephemeral Bots is not touched
     assert.equal(kept.status, 'done')
     assert.equal(kept.updatedAt, finishedAt)
     const bare = after.state().workflows.find(item => item.id === idle.id).run
-    assert.equal(bare.status, 'running')
-    assert.equal(bare.updatedAt, 6)
+    assert.equal(bare, null)
     // Nothing to release means nothing is written: the file it loaded is intact.
     assert.equal(readFileSync(join(dir, 'workflows.json'), 'utf8'), written)
   } finally {

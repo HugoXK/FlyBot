@@ -128,7 +128,8 @@ function delivery() {
     name: '发布交付流水线',
     description: 'Ship a notice',
     chain: 'Planner → Writer → Coder → Reviewer ‖ Tester → Deployer',
-    preview: 'Coder 正在处理 #1280…',
+    preview: '等待任务',
+    activeCount: 0,
     trigger: 'manual',
     layers: [['planner'], ['writer'], ['coder'], ['reviewer', 'tester'], ['deployer']],
     nodes: [
@@ -149,8 +150,10 @@ function delivery() {
     ],
     messages: [{ id: 'm1', kind: 'user', text: SCRIPT }],
     run: {
+      live: true,
       status: 'running',
       task: { id: '#1280', title: '缩短交付组群 notice' },
+      taskSummary: '#1280 · 缩短交付组群 notice',
       nodeStatus: { planner: 'done', writer: 'done', coder: 'running', reviewer: 'queued', tester: 'queued', deployer: 'queued' },
       running: ['coder'],
       doneCount: 2,
@@ -180,7 +183,7 @@ test('the sidebar opens the flowchart, and a drag, a wire and a dropped Bot are 
   await settle()
   assert.ok(calls.some(item => item.name === 'workflow/state'))
   assert.ok(textOf(view.tree).includes('发布交付流水线'))
-  assert.ok(textOf(view.tree).includes('Coder 正在处理 #1280…'))
+  assert.ok(textOf(view.tree).includes('Waiting for a task'))
 
   findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
   findAll(view.tree, node => node.type === 'button' && textOf(node) === 'Flow')[0].props.onClick()
@@ -387,6 +390,43 @@ test('settings can add a loop edge and a condition edge', async () => {
   settings.unmount()
 })
 
+test('sidebar preview ignores a stale busy preview when nothing is live', async () => {
+  const graph = delivery()
+  graph.preview = 'Coder 正在处理 #1280…'
+  graph.activeCount = 0
+  graph.run = null
+  const call = async (name) => {
+    if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+    return { ok: true, workflows: [graph] }
+  }
+  const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+  await settle()
+  assert.ok(textOf(view.tree).includes('Waiting for a task'))
+  assert.equal(textOf(view.tree).includes('Coder 正在处理'), false)
+  view.unmount()
+})
+
+test('a live run shows pause, resume, and progress controls', async () => {
+  const graph = delivery()
+  graph.activeCount = 1
+  const calls = []
+  const call = async (name, body) => {
+    calls.push({ name, body })
+    if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+    return { ok: true, workflows: [graph] }
+  }
+  const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+  await settle()
+  findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
+  const labels = findAll(view.tree, node => node.type === 'button').map(node => textOf(node))
+  assert.ok(labels.includes('Pause'))
+  assert.ok(labels.includes('Progress'))
+  button(view.tree, 'Pause').props.onClick()
+  await settle()
+  assert.ok(calls.some(item => item.name === 'workflow/pause' && item.body.workflowId === 'delivery'))
+  view.unmount()
+})
+
 test('the stage has no canned demo controls', async () => {
   const graph = delivery()
   const call = async (name) => {
@@ -452,6 +492,49 @@ test('the flowchart canvas CSS clips overflow inside its panel', () => {
   assert.match(source, /\.wf-stage\{[^}]*overflow:hidden/)
 })
 
+test('delivery workflow rows are deletable even when template ids match', async () => {
+  const graph = delivery()
+  const calls = []
+  let workflows = [graph]
+  const call = async (name, body) => {
+    calls.push({ name, body })
+    if (name === 'workflow/state') {
+      return {
+        workflows,
+        templates: [{ id: 'delivery', name: '发布交付流水线' }, { id: 'weekly', name: '周报汇总流程' }],
+      }
+    }
+    if (name === 'workflow/delete' && body.workflowId === 'delivery') {
+      workflows = []
+      return { workflows }
+    }
+    return { ok: true, workflows }
+  }
+  const prevBody = document.body
+  document.body = { nodeType: 1 }
+  try {
+    const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+    await settle()
+    const row = findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0]
+    assert.ok(row)
+    row.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 40, clientY: 40 })
+    await settle()
+    const deleteBtn = findAll(view.tree, node => node.type === 'button' && textOf(node) === 'Delete')[0]
+    assert.ok(deleteBtn, 'context menu Delete')
+    deleteBtn.props.onClick()
+    await settle()
+    const confirm = findAll(view.tree, node => node.type === 'button' && node.props.className === 'wf-btn wf-danger')[0]
+    assert.ok(confirm, 'delete confirm')
+    confirm.props.onClick()
+    await settle()
+    assert.ok(calls.some(item => item.name === 'workflow/delete' && item.body.workflowId === 'delivery'))
+    assert.equal(textOf(view.tree).includes('发布交付流水线'), false)
+    view.unmount()
+  } finally {
+    document.body = prevBody
+  }
+})
+
 test('a sidebar workflow row can be deleted from the context menu', async () => {
   const graph = { ...delivery(), id: 'lane-a', name: 'Lane A' }
   const calls = []
@@ -464,7 +547,7 @@ test('a sidebar workflow row can be deleted from the context menu', async () => 
   const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
   await settle()
   const row = findAll(view.tree, node => node.type === 'button' && textOf(node).includes('Lane A'))[0]
-  row.props.onContextMenu({ preventDefault() {}, clientX: 40, clientY: 40 })
+  row.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 40, clientY: 40 })
   await settle()
   const deleteBtn = findAll(view.tree, node => node.type === 'button' && textOf(node) === 'Delete')[0]
   assert.ok(deleteBtn)
