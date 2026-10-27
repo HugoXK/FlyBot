@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { ROOM_CONTEXT_BUDGET, ROOM_PRESENCE_BUDGET, boardCoversCue, compactStatus, fitRoomLines, formatRoomBoard, formatRoomPresence, prepareRoomLine, statusShaped } from '../src/host/room-context.js'
+import { fenceUntrusted } from '../src/host/delivery.js'
 
 const render = line => `${line.who}: ${line.text}`
 const essay = (tail) => `CI on tip abcdef12 is green. tests-ok passed. enqueue when mergeable. merge_group is next. PASS at abcdef12. @Chief ${'detail '.repeat(80)}${tail}`
@@ -45,6 +46,33 @@ test('the transcript stays inside the budget and prefers a newer short line over
   assert.match(fitted.text, /\[status on the board/)
   assert.doesNotMatch(fitted.text, /marker-/)
   assert.equal(fitted.entries.at(-1).line.seq, 9)
+})
+
+// #1251: both writers of `room.log` run this one function. A line a writer already fenced for another
+// home's Bot must stay fenced: `compactStatus` flattens the angle brackets, so compacting the whole wrap
+// stores a guest's essay as this home's own text — the defect the fence exists to prevent.
+test('a fenced peer essay is collapsed inside its wrap, never unwrapped (#1251)', () => {
+  const fenced = fenceUntrusted('Guest Bot', essay('GUEST_TAIL'))
+  const stored = { seq: 4, who: 'Guest Bot', botId: 'guest', text: fenced }
+  const next = prepareRoomLine(stored)
+  assert.match(next.text, /^<untrusted-message from="Guest Bot">\n/)
+  assert.match(next.text, /\n<\/untrusted-message>$/)
+  assert.equal(next.text, fenceUntrusted('Guest Bot', compactStatus(essay('GUEST_TAIL'))))
+  assert.doesNotMatch(next.text, /GUEST_TAIL/)
+  assert.equal(stored.text, fenced, 'the stored line is not rewritten')
+  // `kind` and `authorKind` come from the other home (room-membership.js copies them), so while the
+  // line is fenced neither is an exemption: a peer marking the essay `notice`, or typing it as a person,
+  // still gets the stub inside the same wrap.
+  const notice = { seq: 6, who: 'Guest Bot', botId: 'guest', kind: 'notice', text: fenced }
+  assert.equal(prepareRoomLine(notice).text, next.text)
+  const typed = { seq: 7, who: 'Guest', authorKind: 'human', text: fenced }
+  assert.equal(prepareRoomLine(typed).text, next.text)
+  // A short fenced line stays exactly as stored.
+  const short = { seq: 5, who: 'Guest Bot', botId: 'guest', text: fenceUntrusted('Guest Bot', 'hello') }
+  assert.equal(prepareRoomLine(short), short)
+  // An unfenced kind line is this home's own and stays verbatim.
+  const ownNotice = { seq: 8, who: 'Dev', botId: 'dev', kind: 'notice', text: essay('TAIL') }
+  assert.equal(prepareRoomLine(ownNotice), ownNotice)
 })
 
 test('a non-status flood is cut newest-first instead of being collapsed', () => {

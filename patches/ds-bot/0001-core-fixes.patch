@@ -8288,6 +8288,14 @@ diff --git a/test/group-status.test.js b/test/group-status.test.js
 diff --git a/test/group-work.test.js b/test/group-work.test.js
 --- a/test/group-work.test.js
 +++ b/test/group-work.test.js
+@@ -6,6 +6,7 @@ import { test } from 'node:test'
+ import { apply } from '../index.js'
+ import { fakeContext } from './fake-ctx.js'
+ import { ROOM_LATE_ROUNDS, ROOM_WORK_GRACE_MS } from '../src/host/constants.js'
++import { compactStatus, prepareRoomLine } from '../src/host/room-context.js'
+ 
+ // Chief, the admin of group 'r1', speaks there from 'ga'; Writer from 'gb'; Tester from 'gc'.
+ const seed = (room = {}) => ({
 @@ -113,6 +113,7 @@ const settle = async (check) => {
    while (!check() && Date.now() < until) await new Promise(resolve => setImmediate(resolve))
    assert.ok(check(), 'condition not reached')
@@ -8296,7 +8304,7 @@ diff --git a/test/group-work.test.js b/test/group-work.test.js
  const text = message => message.content.map(block => block.text ?? '').join('\n')
  const kinds = result => result.replies.map(reply => [reply.kind ?? 'message', reply.name])
  
-@@ -287,3 +287,103 @@ test('members still at work show in the team view and in the prompts of the othe
+@@ -287,3 +287,169 @@ test('members still at work show in the team view and in the prompts of the othe
    host.finish('gc', '没问题。')
    await settle(() => result() !== undefined)
  })
@@ -8399,6 +8407,72 @@ diff --git a/test/group-work.test.js b/test/group-work.test.js
 +  const added = host.agentOf('c').calls.slice(before)
 +  assert.deepEqual(added.map(call => [call.source.role, call.source.senderRoomId]), [['request', 'r1']])
 +  assert.match(text(added[0]), /Answer: the release branch/)
++})
++
++// #1251: the room log accepted whatever a Bot posted, so the next speaker (and every later
++// first look) paid for a 1-2k CI/merge essay until it aged out of the 60-line ring, even
++// though #1204 already collapsed that essay when building the turn. The store now keeps the
++// same stub the turn builder showed, so log and prompt agree by construction.
++const STATUS_ESSAY = `CI on tip abcdef12 is green. tests-ok passed. enqueue when mergeable. merge_group is next. PASS at abcdef12. ${'detail '.repeat(200)}ESSAY_TAIL`
++
++test('a Bot status essay is stored as the stub the next speaker sees (#1251)', async (t) => {
++  const host = await start(t)
++  const log = () => JSON.parse(readFileSync(join(host.home, 'state.json'), 'utf8')).rooms.r1.log
++  const result = host.round('c1', host.say('@Writer 汇报一下'))
++  await settle(() => host.agentOf('gb').calls.length === 1)
++  host.begin('gb')
++  host.finish('gb', STATUS_ESSAY)
++  await settle(() => result() !== undefined)
++  await settle(() => log().length === 2)
++  const stored = log().at(-1)
++  assert.equal(stored.botId, 'b')
++  assert.equal(stored.text, compactStatus(STATUS_ESSAY))
++  assert.ok(!stored.text.includes('ESSAY_TAIL'), 'the essay body is not in the store')
++  assert.ok(stored.text.length < 220, `stored ${stored.text.length} chars`)
++  // What the next member reads is the same text, because the turn builder prepares the stored line.
++  const turn = await host.call('state', {})
++  assert.equal(turn.ok, true)
++})
++
++test('a person\'s long line is stored whole, never stubbed (#1251)', async (t) => {
++  const host = await start(t)
++  const log = () => JSON.parse(readFileSync(join(host.home, 'state.json'), 'utf8')).rooms.r1.log
++  const person = `@Writer 这段是用户写的长文。${'word '.repeat(120)}PERSON_TAIL`
++  const result = host.round('c1', host.say(person))
++  await settle(() => log().length === 1)
++  assert.equal(log()[0].text, person)
++  assert.equal(log()[0].botId, undefined)
++  await settle(() => host.agentOf('gb').calls.length === 1)
++  host.begin('gb')
++  host.finish('gb', '[PASS]')
++  await settle(() => result() !== undefined)
++})
++
++test('a short Bot handoff is stored verbatim, not collapsed (#1251)', async (t) => {
++  const host = await start(t)
++  const log = () => JSON.parse(readFileSync(join(host.home, 'state.json'), 'utf8')).rooms.r1.log
++  const handoff = '#1234 PASS @abcdef1 → @Writer'
++  const result = host.round('c1', host.say('@Writer 报一句'))
++  await settle(() => host.agentOf('gb').calls.length === 1)
++  host.begin('gb')
++  host.finish('gb', handoff)
++  await settle(() => result() !== undefined)
++  await settle(() => log().at(-1)?.text === handoff)
++  assert.equal(log().at(-1).text, handoff)
++})
++
++test('a kind-carrying room line stays verbatim in the store (#1251)', async (t) => {
++  const host = await start(t)
++  const log = () => JSON.parse(readFileSync(join(host.home, 'state.json'), 'utf8')).rooms.r1.log
++  const query = 'the merge queue and the review verdict on the last tip'
++  await host.tool('read_own_chat', { query }, 'gb')
++  await settle(() => log().length === 1)
++  assert.deepEqual([log()[0].kind, log()[0].text], ['lookup', query])
++  // A real post from this home cannot carry a long kind line (a lookup query is capped at 80 characters
++  // and an event line carries ''); a peer-chosen kind arrives on a fenced line, and the fence is decided
++  // before this exemption (room-context.js). So the exemption itself is pinned on the gate's own decision.
++  const long = { who: 'Writer', botId: 'b', kind: 'notice', text: STATUS_ESSAY }
++  assert.equal(prepareRoomLine(long), long)
 +})
 diff --git a/test/history.test.js b/test/history.test.js
 --- a/test/history.test.js

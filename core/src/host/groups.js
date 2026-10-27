@@ -76,15 +76,18 @@ const ensureRoomLog = (room) => {
 }
 
 let fanoutRoomLine = async () => {}
-// Every room line passes here before it is stored, so a Bot's line can carry the hop of the room it
-// answers in (#825). A no-op until install() wires the host in, like fanoutRoomLine.
+// Every group-round line passes here before it is stored, so a Bot's line can carry the hop of the room
+// it answers in (#825); the channel and seat lines take the other writer, `room-membership.js` `append`,
+// which applies the same store gate (#1251). A no-op until install() wires the host in, like fanoutRoomLine.
 let stampRoomLine = (room, line) => line
 const appendRoom = (room, line) => {
   room.seq += 1
   const stamped = { ...stampRoomLine(room, line), seq: room.seq }
-  room.log = [...room.log, stamped].slice(-ROOM_LOG_MAX)
-  void fanoutRoomLine(room, stamped)
-  return stamped
+  // The same stub the turn builder shows, so the stored log and the prompt cannot disagree (#1251).
+  const stored = prepareRoomLine(stamped)
+  room.log = [...room.log, stored].slice(-ROOM_LOG_MAX)
+  void fanoutRoomLine(room, stored)
+  return stored
 }
 
 // One answer per Bot to a person's plain line in a face-to-face room (#295, #456). The room keeps the
@@ -385,7 +388,7 @@ export function install(rt) {
     const earlierLines = lines.filter(line => line.seq < round.startSeq).slice(-ROOM_EARLIER_MAX)
     const currentLines = lines.filter(line => line.seq >= round.startSeq)
     // Count caps first, then a character budget. Long status essays collapse
-    // inside the budget; the stored log is unchanged (#1203).
+    // inside the budget, and the store keeps the same stub (#1203, #1251).
     const fitted = fitRoomLines([...earlierLines, ...currentLines], {
       budget: ROOM_CONTEXT_BUDGET,
       render: lineText,
