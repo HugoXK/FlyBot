@@ -121,7 +121,7 @@ The tool schemas are **79%** of the fixed block's characters. The group notice p
 
 ## 5. Tool results
 
-`node dev/turn-split.mjs --stats` prints the `## Tool results` block: the `tool/result` count, the characters added across the turn, the largest single result, the share by tool, what is still on the last call's surface, and the derived tokens carried.
+`node core/dev/turn-split.mjs --stats` prints the `## Tool results` block: the `tool/result` count, the characters added across the turn, the largest single result, the share by tool, what is still on the last call's surface, and the derived tokens carried.
 
 | Measure | Value | Source |
 | --- | --- | --- |
@@ -162,7 +162,7 @@ A checkpoint buys back roughly twenty minutes of growth at this rate; the fixed 
 
 ## 7. Fan-out in the group
 
-`node dev/turn-split.mjs --stats --room <room session id>` prints the `## Fan-out` block: per-message member-Bot and member-turn counts (10-minute window), the day totals of the member Sessions that name the room, and the fixed block per user message.
+`node core/dev/turn-split.mjs --stats --room <room session id>` prints the `## Fan-out` block: per-message member-Bot and member-turn counts (10-minute window), the day totals of the member Sessions that name the room, and the fixed block per user message.
 
 FlyBot 交付组, 2026-10-25, 511 user messages in the room (one per `turn/start` of the room's own relay Session):
 
@@ -179,7 +179,7 @@ One message in the delivery group costs its members **21.7 calls** and **1.17 mi
 
 ## 8. Retries and repeated work
 
-`node dev/turn-split.mjs --stats` prints the `## Retries` block: `llm/retry` and `assistant/attempt` counts by local day, and how many attempts carried a non-zero usage chunk.
+`node core/dev/turn-split.mjs --stats` prints the `## Retries` block: `llm/retry` and `assistant/attempt` counts by local day, and how many attempts carried a non-zero usage chunk.
 
 | Measure | 2026-10-25 | 2026-10-26 (partial) | Source |
 | --- | --- | --- | --- |
