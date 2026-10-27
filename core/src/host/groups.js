@@ -31,6 +31,7 @@ import { faceMentions } from './face-mentions.js'
 import { cleanName, stripSessionChips, unwrapUntrusted } from './delivery.js'
 import { createRoomParticipants } from './room-participant.js'
 import { ROOM_CONTEXT_BUDGET, boardCoversCue, fitRoomLines, formatRoomBoard, formatRoomPresence, prepareRoomLine } from './room-context.js'
+import { workDispatch } from './work-dispatch.js'
 
 // #1253: how long an identical claim line keeps a card quiet after it was posted. A claim is a
 // beacon, not a heartbeat; a re-claim inside this window says nothing new to the room.
@@ -811,11 +812,18 @@ export function install(rt) {
       const references = posts.flatMap(post => post.references ?? [])
       // The members the opening line names: a Bot's post calls them to work for that Bot, a person's
       // line addresses them. The report keeps that apart from a plain pass (#913).
-      const named = mentionsIn(opener.text ?? '', room.members.map(rt.botOf).filter(Boolean), opener.references ?? []).found
+      const said = mentionsIn(opener.text ?? '', room.members.map(rt.botOf).filter(Boolean), opener.references ?? [])
+      const named = said.found
+      // A task lead's @ dispatch is a card, not a turn (#1254): the member is woken in its own chat
+      // and its place in this round is empty.
+      const dispatch = dispatchOf(room, opener, named, said.all)
+      // A card that could not be written is not a reason to leave the member uncalled: the dispatch
+      // only replaces the turn once the board actually took it (#1254).
+      const wrote = dispatch ? await assignDispatch(room, dispatch, opener.botId) : undefined
       // A person's plain line (not @all) in a face-to-face room: the Bots decide who answers (#299). The
       // owner's own line is never left unanswered; a friend's attested line is answered by their home too.
       const route = routeFor(room, opener, startSeq)
-      const speakers = lastFirst(openingSpeakers(room, opener), route)
+      const speakers = dispatch && wrote !== undefined ? [] : lastFirst(openingSpeakers(room, opener), route)
       const round = {
         roomId: room.id,
         members: room.members,
@@ -1018,6 +1026,30 @@ export function install(rt) {
     return !said.all && said.bots.length === 0 && said.friends.length === 0
   }
 
+  // #1254: the room's task lead naming one member with an issue id and an imperative is a board
+  // dispatch, not a round — the host writes that member's card and the drive wakes it in its own
+  // chat (#1205). A person's line, a member that does not divide the board, a question, a remark,
+  // `@all`, a face-to-face room (no board), and a line a running round already answered all keep
+  // the turn they had.
+  function dispatchOf(room, opener, named, all) {
+    if (isFaceRoom(room) || all || opener.quiet === true) return undefined
+    if (opener.botId === undefined || opener.called === true || opener.displayOnly === true) return undefined
+    if (isEvent(opener)) return undefined
+    if (typeof rt.taskLeadOf !== 'function' || rt.taskLeadOf(room) !== opener.botId) return undefined
+    return workDispatch(opener.text ?? '', { callees: named.filter(bot => bot.id !== opener.botId) })
+  }
+
+  // The board write one dispatch makes. A failure is the room's problem to log, never the relay's:
+  // the line is already in the log, and a card that could not be written must not stop the round.
+  async function assignDispatch(room, dispatch, by) {
+    try {
+      return await rt.assignFromDispatch?.({ roomId: room.id, by, ...dispatch })
+    } catch (error) {
+      rt.warn('ds-bot: the dispatch in %s was not written to the board: %s', room.name, error)
+      return undefined
+    }
+  }
+
   function openingSpeakers(room, opener) {
     // A line already in the log, posted so the pane can draw it. `@` in it is not a new call.
     if (opener.displayOnly === true) return []
@@ -1122,10 +1154,20 @@ export function install(rt) {
     round.replies.push({ botId: sender.id, name: sender.name, color: rt.botOf(sender.id)?.color, text, time: Date.now(), ...(posted?.seq === undefined ? {} : { seq: posted.seq }) })
     // The members this line names are called by the round that is running (#932): drawing the bubble alone
     // left them uncalled until the held post opened a round after the report. `called` keeps the re-delivery
-    // of the held post from calling them a second time.
-    const callees = mentionsIn(text, room.members.map(rt.botOf).filter(Boolean)).found.filter(bot => bot.id !== sender.id)
+    // of the held post from calling them a second time. A task lead's dispatch is the board's instead
+    // (#1254): it is written here so the round does not call the member it assigned.
+    const everyone = room.members.map(rt.botOf).filter(Boolean)
+    const said = mentionsIn(text, everyone)
+    const callees = said.found.filter(bot => bot.id !== sender.id)
     if (callees.length > 0) {
-      round.calls = [...(round.calls ?? []), { by: sender.id, name: sender.name, callees, text }]
+      const dispatch = dispatchOf(room, { botId: sender.id, text }, callees, said.all)
+      if (dispatch) {
+        // The round's own call is the fallback, taken only when the board refused the write: a failed
+        // card must never be a member left uncalled (#1254).
+        void assignDispatch(room, dispatch, sender.id).then(wrote => {
+          if (wrote === undefined) round.calls = [...(round.calls ?? []), { by: sender.id, name: sender.name, callees, text }]
+        })
+      } else round.calls = [...(round.calls ?? []), { by: sender.id, name: sender.name, callees, text }]
       extra.called = true
     }
     return true

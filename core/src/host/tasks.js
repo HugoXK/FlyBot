@@ -18,6 +18,7 @@
 import { randomBytes } from 'node:crypto'
 import { columnOf, compareForQueue, compareForWork, sameRole } from '../shared/task-board.js'
 import { currentParticipants, deriveParticipants } from './room-membership.js'
+import { namesIssue } from './work-dispatch.js'
 
 const ACTIVE = new Set(['open', 'claimed', 'working', 'blocked'])
 // result-ready still waits for the requester: prune must not evict it with terminals (#111).
@@ -497,6 +498,66 @@ export function install(rt) {
     } catch (error) {
       rt.warn('ds-bot: the claim line for %s was not posted: %s', task.id, error)
     }
+  }
+
+  // #1254: the room's task lead naming one member with an issue id and an imperative is an assign,
+  // not a round (`groups.js` `dispatchOf`). The card that member already holds for that issue is
+  // updated; otherwise one is opened, owned by that member and still `open` — the host assigns, and
+  // the member claims on its own turn, where #1253's claim line is posted in its own voice. The save
+  // drives the wake into that member's own chat (#1205), so the room opens no part.
+  rt.assignFromDispatch = async function assignFromDispatch({ roomId, botId, issue, title, note, by } = {}) {
+    const room = state.rooms?.[String(roomId ?? '')]
+    if (!room || room.origin === 'face-to-face') return undefined
+    const bot = botRecord(botId)
+    if (!bot || bot.remote !== undefined) return undefined
+    if (!(room.members ?? []).includes(bot.id)) return undefined
+    const text = oneLine(note ?? title, 300)
+    if (text === '') return undefined
+    const at = stamp()
+    const open = Object.values(store()).filter(task =>
+      sameRoom(task, room.id) && task.ownerBotId === bot.id && task.kind !== 'group'
+      && openTask(task))
+    const held = issue === undefined || issue === null || String(issue).trim() === ''
+      ? undefined
+      : open.filter(task => namesIssue(`${task.title ?? ''} ${task.note ?? ''} ${task.target?.href ?? ''}`, issue)).sort(newestFirst)[0]
+    if (held) {
+      held.note = text
+      // Both paths below append to `actors`, and `record()` pushes without a guard, so a card
+      // stored before the field existed would throw after the note moved and before the save
+      // (#1254).
+      held.actors ??= []
+      // A card the drive does not read is restarted through an edge the state machine already has
+      // (`result-ready → working`, `blocked → working`): rewriting the note alone saved a card that
+      // `task-drive` never wakes for, so the member never saw the dispatch. A blocked card is reused
+      // for the same reason one issue is one card — the dispatch answers the wait, it never adds a
+      // second card beside it (#1254).
+      if (held.status === 'result-ready' || held.status === 'blocked') {
+        transition(held, 'working', null, { by: 'dispatch', ...(by ? { botId: by } : {}) })
+      } else {
+        held.updatedAt = at
+        // A stored card may predate `actors`: the append starts the list instead of throwing after the
+        // note already moved, which `groups.js` swallowed and left a half-written card (#1254).
+        held.actors = [...(held.actors ?? []), { status: held.status, at, by: 'dispatch', ...(by ? { botId: by } : {}) }]
+      }
+      await save()
+      return view(held)
+    }
+    const task = {
+      id: `task-${randomBytes(8).toString('hex')}`,
+      status: 'open',
+      createdAt: at,
+      updatedAt: at,
+      requesterId: bot.ownerId ?? null,
+      ownerBotId: bot.id,
+      title: oneLine(title ?? text, 300),
+      note: text,
+      source: 'conversation',
+      origin: { roomId: room.id },
+      actors: [{ status: 'open', at, by: 'dispatch', ...(by ? { botId: by } : {}) }],
+    }
+    store()[task.id] = task
+    await save()
+    return view(task)
   }
 
   // A member claims from the room's queue (#1247). The claim is a board write: it sets the
