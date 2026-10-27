@@ -8580,6 +8580,71 @@ var DELIVERY_CHART_CSS = `
 }
 `;
 
+// src/shared/issue-ref.js
+var ISSUE_REF = /#(\d{1,7})(?![0-9])|github\.com\/[\w.-]+\/[\w.-]+\/(?:issues|pull)\/(\d{1,7})(?![0-9])/gi;
+function issueRefs(text) {
+  const keys = [];
+  for (const match of String(text ?? "").matchAll(new RegExp(ISSUE_REF.source, "gi"))) {
+    const key = `#${match[1] ?? match[2]}`;
+    if (!keys.includes(key)) keys.push(key);
+  }
+  return keys;
+}
+function namesIssue(text, issue) {
+  const number = String(issue ?? "").replace(/^#/, "");
+  if (!/^\d+$/.test(number)) return false;
+  return issueRefs(text).includes(`#${number}`);
+}
+function cardNamesIssue(task, wanted) {
+  const own = `${task?.title ?? ""} ${task?.target?.href ?? ""}`;
+  if (namesIssue(own, wanted)) return true;
+  return issueRefs(own).length === 0 && namesIssue(task?.note ?? "", wanted);
+}
+var issueRefPattern = () => new RegExp(ISSUE_REF.source, "gi");
+var MENTION = /(?:github\.com\/)?([\w.-]+)\/([\w.-]+)#(\d{1,7})(?![0-9])|github\.com\/([\w.-]+)\/([\w.-]+)\/(?:issues|pull)\/(\d{1,7})(?![0-9])|#(\d{1,7})(?![0-9])/gi;
+var mentionOf = (match) => {
+  if (match[3]) return { repo: `${match[1]}/${match[2]}`, number: match[3] };
+  if (match[6]) return { repo: `${match[4]}/${match[5]}`, number: match[6] };
+  if (match[7]) return { repo: null, number: match[7] };
+  return null;
+};
+function cardMentions(task) {
+  const own = `${task?.title ?? ""} ${task?.target?.href ?? ""}`;
+  const text = issueRefs(own).length > 0 ? own : `${own} ${task?.note ?? ""}`;
+  const mentions = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const match of text.matchAll(new RegExp(MENTION.source, "gi"))) {
+    const mention = mentionOf(match);
+    if (!mention) continue;
+    const key = `${mention.repo ?? ""}#${mention.number}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    mentions.push(mention);
+  }
+  return mentions;
+}
+var asNumber = (value) => value == null || value === "" ? null : String(value);
+function issueCardForTask(task, issues) {
+  const mentions = cardMentions(task);
+  if (mentions.length === 0) return null;
+  const list = (issues ?? []).filter((issue) => asNumber(issue?.card?.number ?? issue?.number) != null);
+  const numberOf = (issue) => asNumber(issue?.card?.number ?? issue?.number);
+  const linkedOf = (issue) => asNumber(issue?.card?.linked ?? issue?.linked);
+  const repoOf2 = (issue) => typeof issue?.repo === "string" ? issue.repo : "";
+  const qualified = list.filter((issue) => mentions.some((mention) => mention.repo != null && mention.repo === repoOf2(issue) && (mention.number === numberOf(issue) || mention.number === linkedOf(issue))));
+  if (qualified.length === 1) return qualified[0];
+  if (qualified.length > 1) {
+    const byNumber2 = qualified.filter((issue) => mentions.some((mention) => mention.repo === repoOf2(issue) && mention.number === numberOf(issue)));
+    return byNumber2.length === 1 ? byNumber2[0] : null;
+  }
+  const bare2 = new Set(mentions.filter((mention) => mention.repo == null).map((mention) => mention.number));
+  if (bare2.size === 0) return null;
+  const bareHits = list.filter((issue) => bare2.has(numberOf(issue)) || linkedOf(issue) != null && bare2.has(linkedOf(issue)));
+  if (bareHits.length === 1) return bareHits[0];
+  const byNumber = bareHits.filter((issue) => bare2.has(numberOf(issue)));
+  return byNumber.length === 1 ? byNumber[0] : null;
+}
+
 // src/client/delivery-view.js
 var import_react16 = require("react");
 var POLL_MS3 = 6e4;
@@ -8973,41 +9038,121 @@ function BoardFilters({ filter, onFilter }) {
 }
 var stageOf = (card, column) => card?.stage ?? column;
 var matchesFilter = (card, column, filter) => filter === "all" || stageOf(card, column) === filter;
+var TERMINAL_TASK = /* @__PURE__ */ new Set(["accepted", "cancelled", "failed"]);
+var newestTask = (a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || (b.createdAt ?? 0) - (a.createdAt ?? 0);
+var cardRepoOf = (card, fallback) => {
+  const own = typeof card?.repo === "string" ? card.repo.trim() : "";
+  if (own !== "") return own;
+  return typeof fallback === "string" ? fallback.trim() : "";
+};
+var recordKey = (repo, number) => githubCardKey(repo, number) ?? `#${Number(number)}`;
+function hangRecords(columns, tasks, repo) {
+  const issues = [];
+  for (const cards of Object.values(columns ?? {})) {
+    for (const card of cards ?? []) {
+      if (card?.kind !== "issue" || card.number == null) continue;
+      issues.push({ card, repo: cardRepoOf(card, repo) });
+    }
+  }
+  const nested = /* @__PURE__ */ new Map();
+  const taken = /* @__PURE__ */ new Set();
+  const open = (tasks ?? []).filter((task) => task && task.kind !== "group" && !TERMINAL_TASK.has(task.status) && task.id != null);
+  for (const task of open) {
+    const best = issueCardForTask(task, issues);
+    if (!best) continue;
+    const key = recordKey(best.repo, best.card.number);
+    const list = nested.get(key) ?? [];
+    list.push(task);
+    nested.set(key, list);
+  }
+  const chosen = /* @__PURE__ */ new Map();
+  for (const [key, list] of nested) {
+    const [first, ...rest] = [...list].sort(newestTask);
+    chosen.set(key, first);
+    taken.add(first.id);
+    for (const extra of rest) taken.add(extra.id);
+  }
+  return { nested: chosen, loose: (tasks ?? []).filter((task) => task && !taken.has(task.id)) };
+}
 function DeliveryColumns({ view, repo = null, placed = null, tasks = [], filter = "all", roster = null, dragging = null, onMove = null, onDrag = null }) {
   const columns = view?.columns ?? {};
   const drawn = placed === null || placed === void 0 ? null : new Set(placed);
   const deliveryCards = (id) => (columns[id] ?? []).filter((card) => drawn === null || !drawn.has(`${repo ?? card.repo ?? ""}#${card.kind}${card.number}`)).filter((card) => matchesFilter(card, id, filter));
-  const tasksByColumn = { "not-started": [], "in-progress": [], "done": [] };
-  for (const task of filter === "all" ? tasks ?? [] : []) {
+  const shown = {};
+  for (const column of stagesOf(view)) shown[column.id] = deliveryCards(column.id);
+  const hung = hangRecords(shown, filter === "all" ? tasks ?? [] : [], repo);
+  const looseByColumn = {};
+  for (const task of hung.loose) {
     const col = taskColumnOf(task);
-    if (tasksByColumn[col]) tasksByColumn[col].push(task);
+    (looseByColumn[col] ??= []).push(task);
   }
-  const allCards = (id) => {
-    const delivery = deliveryCards(id);
-    const taskList = tasksByColumn[id] ?? [];
-    return [...taskList, ...delivery];
+  const taskNode = (task) => (0, import_react16.createElement)(BoardCard2, {
+    task,
+    roster,
+    movable: canMoveTask(roster, task),
+    onMove,
+    onDrag
+  });
+  const rowsOf = (id) => {
+    const cards = shown[id] ?? [];
+    const linked = /* @__PURE__ */ new Set();
+    for (const card of cards) {
+      if (card?.kind !== "issue" || card.linked == null) continue;
+      linked.add(recordKey(cardRepoOf(card, repo), card.linked));
+    }
+    const rows = [];
+    for (const task of looseByColumn[id] ?? []) rows.push((0, import_react16.createElement)(BoardCard2, {
+      key: task.id,
+      task,
+      roster,
+      movable: canMoveTask(roster, task),
+      onMove,
+      onDrag
+    }));
+    for (const card of cards) {
+      const where = cardRepoOf(card, repo);
+      if (card?.kind === "pr" && linked.has(recordKey(where, card.number))) continue;
+      const key = `${where}-${card.kind}-${card.number}`;
+      if (card?.kind === "issue") {
+        const issueKey = recordKey(where, card.number);
+        const task = hung.nested.get(issueKey);
+        if (task) {
+          rows.push((0, import_react16.createElement)(
+            "div",
+            { key: `nest-${issueKey}`, className: "bt-board-nest", "data-issue": issueKey },
+            (0, import_react16.createElement)(DeliveryCard, { card, repo: where || null }),
+            (0, import_react16.createElement)("div", { className: "bt-board-subtask", "data-parent": issueKey }, taskNode(task))
+          ));
+          continue;
+        }
+      }
+      rows.push((0, import_react16.createElement)(DeliveryCard, { key, card, repo: where || null }));
+    }
+    return rows;
   };
-  const taskIds = new Set((tasks ?? []).map((task) => task?.id));
-  const isTask = (item) => taskIds.has(item?.id);
+  const drawnCount = (rows) => rows.reduce((count, row) => count + (row?.props?.className === "bt-board-nest" ? 2 : 1), 0);
   return (0, import_react16.createElement)(
     "div",
     { className: "bt-del-columns" },
-    stagesOf(view).map((column) => (0, import_react16.createElement)(
-      "section",
-      {
-        key: column.id,
-        className: "bt-del-column",
-        "data-column": column.id,
-        ...dropProps(column.id, { dragging, onMove, onDrag })
-      },
-      (0, import_react16.createElement)(
-        "h3",
-        { className: "bt-board-column-head" },
-        (0, import_react16.createElement)("span", null, t(column.label)),
-        (0, import_react16.createElement)("span", { className: "bt-board-count" }, String(allCards(column.id).length))
-      ),
-      allCards(column.id).length === 0 ? (0, import_react16.createElement)("p", { className: "bt-board-empty" }, t("Nothing here.")) : allCards(column.id).map((item) => isTask(item) ? (0, import_react16.createElement)(BoardCard2, { key: item.id, task: item, roster, movable: canMoveTask(roster, item), onMove, onDrag }) : (0, import_react16.createElement)(DeliveryCard, { key: `${repo ?? item.repo ?? ""}-${item.kind}-${item.number}`, card: item, repo: repo ?? item.repo ?? null }))
-    ))
+    stagesOf(view).map((column) => {
+      const rows = rowsOf(column.id);
+      return (0, import_react16.createElement)(
+        "section",
+        {
+          key: column.id,
+          className: "bt-del-column",
+          "data-column": column.id,
+          ...dropProps(column.id, { dragging, onMove, onDrag })
+        },
+        (0, import_react16.createElement)(
+          "h3",
+          { className: "bt-board-column-head" },
+          (0, import_react16.createElement)("span", null, t(column.label)),
+          (0, import_react16.createElement)("span", { className: "bt-board-count" }, String(drawnCount(rows)))
+        ),
+        rows.length === 0 ? (0, import_react16.createElement)("p", { className: "bt-board-empty" }, t("Nothing here.")) : rows
+      );
+    })
   );
 }
 function DeliveryWorkflowSections({ sections, repo = null, filter = "all" }) {
