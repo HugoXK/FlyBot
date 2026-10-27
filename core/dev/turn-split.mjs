@@ -3,7 +3,7 @@
 // and the task (the message that opened the turn).
 //
 //   node dev/turn-split.mjs [--sessions <dir>] [--session <id>] [--turn <n>]
-//                           [--tz <zone>] [--top <n>] [--json]
+//                           [--tz <zone>] [--top <n>] [--stats] [--room <session-id>] [--json]
 //
 // `--sessions` is the DSH session root (default `$DSH_HOME/sessions`); the script walks it
 // for `session.v4.jsonl.zstd` files. Every Session log carries, per call, the provider's own
@@ -27,7 +27,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { zstdDecompressSync } from 'node:zlib'
 
-const USAGE = 'usage: node dev/turn-split.mjs [--sessions <dir>] [--session <id>] [--turn <n>] [--tz <zone>] [--days] [--top <n>] [--json]'
+const USAGE = 'usage: node dev/turn-split.mjs [--sessions <dir>] [--session <id>] [--turn <n>] [--tz <zone>] [--days] [--top <n>] [--stats] [--room <session-id>] [--json]'
 const ZSTD_MAGIC = 4247762216
 
 function die(message) {
@@ -36,7 +36,7 @@ function die(message) {
 }
 
 function parseArgs(argv) {
-  const flags = { sessions: null, session: null, turn: null, tz: 'UTC', days: false, top: 5, json: false }
+  const flags = { sessions: null, session: null, turn: null, tz: 'UTC', days: false, top: 5, json: false, stats: false, room: null }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     const value = () => {
@@ -52,6 +52,8 @@ function parseArgs(argv) {
       case '--tz': flags.tz = value(); break
       case '--top': flags.top = Number(value()); break
       case '--days': flags.days = true; break
+      case '--stats': flags.stats = true; break
+      case '--room': flags.room = value(); break
       case '--json': flags.json = true; break
       case '--help': case '-h': console.log(USAGE); process.exit(0); break
       default: die(`unknown argument ${arg}\n${USAGE}`)
@@ -59,6 +61,14 @@ function parseArgs(argv) {
   }
   if (!Number.isSafeInteger(flags.top) || flags.top < 1) die('--top must be a whole number')
   if (flags.turn !== null && !Number.isSafeInteger(flags.turn)) die('--turn must be a whole number')
+  // A zone the runtime does not know would otherwise reach `Intl.DateTimeFormat` and throw an
+  // uncaught RangeError from inside `localDay`, after the whole sample has been read.
+  try {
+    new Intl.DateTimeFormat('en-CA', { timeZone: flags.tz })
+  } catch {
+    die(`unknown time zone ${flags.tz}`)
+  }
+  if (flags.stats && flags.days) die('--stats and --days measure different things; pass one of them')
   return flags
 }
 
@@ -144,6 +154,11 @@ export function foldSessionEvents(events) {
   let toolCallNames = new Map()
   const largestTool = new Map()
   const toolTotal = new Map()
+  const toolCount = new Map()
+  const toolAddedByName = new Map()
+  const turnStarts = []
+  const retries = []
+  const attempts = []
   for (const event of events) {
     const data = event?.data ?? {}
     switch (event?.type) {
@@ -155,6 +170,7 @@ export function foldSessionEvents(events) {
         break
       case 'turn/start':
         turn = data.turn ?? null
+        turnStarts.push({ turn, time: event.time })
         open = true
         for (let index = messages.length - pending; index < messages.length; index += 1) messages[index].turn = turn
         pending = 0
@@ -179,8 +195,13 @@ export function foldSessionEvents(events) {
         const callId = data.message?.toolCallId ?? data.message?.source?.callId
         const resultTurn = open ? turn : (data.turn ?? null)
         const resultChars = textOf(data.message?.content).length
+        const resultName = toolCallNames.get(callId) ?? data.message?.toolName ?? ''
         largestTool.set(resultTurn, Math.max(largestTool.get(resultTurn) ?? 0, resultChars))
         toolTotal.set(resultTurn, (toolTotal.get(resultTurn) ?? 0) + resultChars)
+        toolCount.set(resultTurn, (toolCount.get(resultTurn) ?? 0) + 1)
+        const byName = toolAddedByName.get(resultTurn) ?? {}
+        byName[resultName] = (byName[resultName] ?? 0) + resultChars
+        toolAddedByName.set(resultTurn, byName)
         messages.push({
           role: 'tool',
           turn: open ? turn : (data.turn ?? null),
@@ -189,6 +210,12 @@ export function foldSessionEvents(events) {
         })
         break
       }
+      case 'llm/retry':
+        retries.push({ time: event.time })
+        break
+      case 'assistant/attempt':
+        attempts.push({ time: event.time, usage: usageOf(data.stream) })
+        break
       case 'assistant/message': {
         const usage = usageOf(data.stream)
         const current = data.turn ?? null
@@ -241,7 +268,7 @@ export function foldSessionEvents(events) {
         break
     }
   }
-  return { steps, turns: [...turns.values()], largestTool, toolTotal, systemChars: system.length, toolsChars: tools.length }
+  return { steps, turns: [...turns.values()], largestTool, toolTotal, toolCount, toolAddedByName, turnStarts, retries, attempts, systemChars: system.length, toolsChars: tools.length }
 }
 
 // The fixed block is constant for every call of one Session, so it is that Session's
@@ -290,18 +317,22 @@ export function splitStep(step, fit) {
   return { fixed, task: share(step.chars.task), history: share(step.chars.history), tool: share(step.chars.tool) }
 }
 
-export function readSessionFile(file) {
+// The decoded artifact: its events, and the text they came from, which is how the fan-out
+// statistic learns that a Session names a room.
+export function decodeSession(file) {
   const buffer = readFileSync(file)
   const { frames } = scanZstdFrames(buffer)
   const events = []
+  let text = ''
   for (const { start, end } of frames) {
-    let text
+    let frame
     try {
-      text = zstdDecompressSync(buffer.subarray(start, end)).toString('utf8')
+      frame = zstdDecompressSync(buffer.subarray(start, end)).toString('utf8')
     } catch {
       continue
     }
-    for (const line of text.split('\n')) {
+    text += frame
+    for (const line of frame.split('\n')) {
       if (!line.trim()) continue
       try {
         events.push(JSON.parse(line))
@@ -310,7 +341,11 @@ export function readSessionFile(file) {
       }
     }
   }
-  return events
+  return { events, text }
+}
+
+export function readSessionFile(file) {
+  return decodeSession(file).events
 }
 
 export function findSessionFiles(root) {
@@ -341,6 +376,139 @@ const localDay = (time, tz) => {
 }
 const integer = (value) => Math.round(value).toLocaleString('en-US')
 
+// The statistics §5, §7 and §8 of the report quote, so each number there has one command
+// behind it. Every figure is either counted in the log or derived by the formula printed
+// beside it; nothing here estimates.
+const FANOUT_WINDOW = 10 * 60_000
+
+function printStats({ flags, sessions, rows, root }) {
+  const percentile = (values, q) => {
+    if (values.length === 0) return 0
+    const sorted = values.slice().sort((a, b) => a - b)
+    return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * q))]
+  }
+  const dayOf = (time) => localDay(time, flags.tz)
+  const out = { sample: { root: resolve(root), sessions: sessions.length, tz: flags.tz }, toolResults: null, fanout: null, retries: [] }
+  const lines = []
+
+  // §5: the tool results of one turn — the one with the most tool text unless --turn names it.
+  const sampleTurn = flags.turn !== null
+    ? rows.find((row) => row.turn === flags.turn)
+    : rows.slice().sort((a, b) => b.toolTotal - a.toolTotal)[0]
+  lines.push('## Tool results')
+  if (sampleTurn) {
+    const added = sampleTurn.toolTotal
+    const bash = sampleTurn.addedByName.bash ?? 0
+    const share = added > 0 ? bash / added * 100 : 0
+    out.toolResults = {
+      session: sampleTurn.session,
+      turn: sampleTurn.turn,
+      results: sampleTurn.toolCount,
+      characters: added,
+      onLastSurface: sampleTurn.toolAdded,
+      largest: sampleTurn.largestTool,
+      bash,
+      bashShare: share,
+      carried: sampleTurn.tool,
+    }
+    lines.push(`${sampleTurn.session} turn ${sampleTurn.turn} (the turn with the most tool text): `
+      + `results ${integer(sampleTurn.toolCount)}; characters added ${integer(added)}; largest single result ${integer(sampleTurn.largestTool)}; `
+      + `bash ${integer(bash)} chars (${share.toFixed(1)}%); still on the last call's surface ${integer(sampleTurn.toolAdded)} chars; `
+      + `carried in the turn's prompts ${integer(sampleTurn.tool)} tokens`)
+  } else {
+    lines.push('not measured: no turn in the sample could be split (every Session needs 8 calls)')
+  }
+  lines.push('')
+
+  // §7: fan-out around one room's own Session — how many member Bots a single room message
+  // wakes within the window, and what their calls cost that day.
+  lines.push('## Fan-out')
+  if (flags.room === null) {
+    lines.push('not measured: pass --room <session-id>')
+  } else {
+    const room = sessions.find((session) => session.id.startsWith(flags.room))
+    if (!room) die(`no Session matching --room ${flags.room}`)
+    const members = sessions.filter((session) => session.id !== room.id && session.text.includes(room.id))
+    const messages = room.turnStarts.map((start) => start.time).filter((time) => Number.isFinite(time))
+    if (messages.length === 0) die(`no room message in ${room.id}`)
+    const bots = []
+    const turns = []
+    for (const time of messages) {
+      const waking = []
+      for (const session of members) {
+        for (const start of session.turnStarts) {
+          if (start.time > time && start.time <= time + FANOUT_WINDOW) waking.push(session.id)
+        }
+      }
+      bots.push(new Set(waking).size)
+      turns.push(waking.length)
+    }
+    const days = new Map()
+    for (const session of members) {
+      for (const step of session.steps) {
+        const day = dayOf(step.time)
+        const row = days.get(day) ?? { day, calls: 0, prompt: 0, fixed: 0 }
+        row.calls += 1
+        row.prompt += step.prompt
+        row.fixed += session.fixed ? splitStep(step, session.fixed).fixed : 0
+        days.set(day, row)
+      }
+    }
+    const rowsOut = [...days.values()].sort((a, b) => a.day.localeCompare(b.day))
+    const fixed = rowsOut.reduce((sum, row) => sum + row.fixed, 0)
+    out.fanout = {
+      room: room.id,
+      windowMinutes: FANOUT_WINDOW / 60_000,
+      messages: messages.length,
+      members: members.length,
+      bots: { p50: percentile(bots, 0.5), p90: percentile(bots, 0.9), max: Math.max(0, ...bots) },
+      turns: { p50: percentile(turns, 0.5), p90: percentile(turns, 0.9), max: Math.max(0, ...turns) },
+      days: rowsOut,
+      fixedPerMessage: messages.length === 0 ? 0 : fixed / messages.length,
+    }
+    lines.push(`${room.id}: ${integer(messages.length)} user messages; ${integer(members.length)} member Sessions name it; window ${FANOUT_WINDOW / 60_000} minutes`)
+    lines.push(`member Bots per message p50/p90/max ${percentile(bots, 0.5)}/${percentile(bots, 0.9)}/${Math.max(0, ...bots)}`)
+    lines.push(`member turns per message p50/p90/max ${percentile(turns, 0.5)}/${percentile(turns, 0.9)}/${Math.max(0, ...turns)}`)
+    lines.push('day         calls        prompt       fixed  fixed share')
+    for (const row of rowsOut) {
+      lines.push(`${row.day} ${String(row.calls).padStart(6)} ${integer(row.prompt).padStart(13)} ${integer(row.fixed).padStart(12)} ${(row.prompt > 0 ? row.fixed / row.prompt * 100 : 0).toFixed(1).padStart(11)}%`)
+    }
+    lines.push(`fixed block per user message: ${integer(fixed / messages.length)} tokens (${integer(fixed)} / ${integer(messages.length)} messages)`)
+  }
+  lines.push('')
+
+  // §8: retries and attempts — how many, and how many attempts ever reported usage.
+  const retryDays = new Map()
+  const row = (time) => {
+    const day = dayOf(time)
+    const found = retryDays.get(day) ?? { day, retries: 0, attempts: 0, used: 0 }
+    retryDays.set(day, found)
+    return found
+  }
+  for (const session of sessions) {
+    for (const retry of session.retries) row(retry.time).retries += 1
+    for (const attempt of session.attempts) {
+      const found = row(attempt.time)
+      found.attempts += 1
+      const usage = attempt.usage ?? {}
+      if (['inputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'outputTokens'].some((key) => Number.isFinite(usage[key]) && usage[key] > 0)) found.used += 1
+    }
+  }
+  const retryRows = [...retryDays.values()].sort((a, b) => a.day.localeCompare(b.day))
+  out.retries = retryRows
+  lines.push('## Retries')
+  lines.push('day         llm/retry   attempts  attempts with non-zero usage')
+  for (const values of retryRows) {
+    lines.push(`${values.day} ${String(values.retries).padStart(9)} ${String(values.attempts).padStart(10)} ${String(values.used).padStart(27)}`)
+  }
+
+  if (flags.json) {
+    console.log(JSON.stringify(out, null, 2))
+    return
+  }
+  for (const line of lines) console.log(line)
+}
+
 function main(argv) {
   const flags = parseArgs(argv)
   const root = flags.sessions === null ? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'sessions') : flags.sessions
@@ -356,9 +524,10 @@ function main(argv) {
   for (const file of files) {
     const id = file.split('/').at(-2)
     if (flags.session !== null && !id.startsWith(flags.session)) continue
-    const folded = foldSessionEvents(readSessionFile(file))
+    const { events, text } = decodeSession(file)
+    const folded = foldSessionEvents(events)
     if (folded.steps.length === 0) continue
-    sessions.push({ id, file, ...folded, fixed: fitFixed(folded.steps) })
+    sessions.push({ id, file, text, ...folded, fixed: fitFixed(folded.steps) })
   }
   if (sessions.length === 0) die('no Session in the sample carried a provider usage report')
   const rows = []
@@ -385,6 +554,8 @@ function main(argv) {
         prompt: total.prompt,
         output: turn.output,
         toolAdded: steps.at(-1).chars.tool,
+        toolCount: session.toolCount?.get(turn.turn) ?? 0,
+        addedByName: session.toolAddedByName?.get(turn.turn) ?? {},
         largestTool: session.largestTool?.get(turn.turn) ?? 0,
         toolTotal: session.toolTotal?.get(turn.turn) ?? 0,
         fixed: total.fixed,
@@ -438,6 +609,10 @@ function main(argv) {
     }
     return
   }
+  if (flags.stats) {
+    printStats({ flags, sessions, rows, root })
+    return
+  }
   if (rows.length === 0) die('no turn in the sample could be split (every Session needs 8 calls)')
   if (flags.turn !== null) {
     const only = rows.filter((row) => row.turn === flags.turn)
@@ -454,8 +629,12 @@ function main(argv) {
   console.log(`sample: ${sessions.length} Sessions under ${resolve(root)}, zone ${flags.tz}`)
   console.log('')
   console.log('## Fixed block per call (measured: the intercept of each Session\'s prompt fit)')
+  // A Session whose prompt falls as its messages grow has a fixed block but no
+  // characters-per-token figure; the median is taken over the Sessions that have one.
+  const perToken = fits.map((fit) => fit.charsPerToken).filter((value) => Number.isFinite(value))
   console.log(`Sessions with a fit: ${fits.length}; fixed tokens p50 ${integer(median(fits.map((fit) => fit.fixedTokens)))}; `
-    + `fixed chars p50 ${integer(median(fits.map((fit) => fit.fixedChars)))}; message chars/token p50 ${median(fits.map((fit) => fit.charsPerToken)).toFixed(2)}; `
+    + `fixed chars p50 ${integer(median(fits.map((fit) => fit.fixedChars)))} (first call's surface); `
+    + `message chars/token p50 ${perToken.length === 0 ? 'n/a' : median(perToken).toFixed(2)}; `
     + `R2 p50 ${median(fits.map((fit) => fit.r2)).toFixed(3)}`)
   console.log('')
   console.log('## Top turns by prompt')
@@ -469,9 +648,13 @@ function main(argv) {
   const first = top[0]
   if (first) {
     console.log('')
-    console.log(`## Turn ${first.turn} of ${first.session}: one call's surface`)
-    console.log(`system prompt ${integer(first.systemChars)} chars; tool schemas ${integer(first.toolsChars)} chars; `
-      + `fixed block ${integer(first.fit.fixedTokens)} tokens (${(first.fit.fixedChars / first.fit.fixedTokens).toFixed(2)} chars/token)`)
+    // §4 of the report is the turn's LAST call, not its first: the surface grows inside a
+    // turn, so the two are not interchangeable.
+    const surface = first.steps.at(-1)
+    const surfaceChars = surface.systemChars + surface.toolsChars
+    console.log(`## Turn ${first.turn} of ${first.session}: the turn's last call's surface`)
+    console.log(`system prompt ${integer(surface.systemChars)} chars; tool schemas ${integer(surface.toolsChars)} chars; `
+      + `fixed block ${integer(first.fit.fixedTokens)} tokens (${(surfaceChars / first.fit.fixedTokens).toFixed(2)} chars/token)`)
     console.log(`calls ${first.calls}; provider prompt ${integer(first.prompt)} tokens (${integer(first.prompt / first.calls)} per call); output ${integer(first.output)} tokens`)
     console.log(`tool text added by the turn ${integer(first.toolTotal)} chars; still on the last call's surface ${integer(first.toolAdded)} chars; largest single result ${integer(first.largestTool)} chars`)
     if (first.toolNames.size > 0) {
