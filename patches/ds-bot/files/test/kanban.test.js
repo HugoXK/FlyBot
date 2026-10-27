@@ -15,21 +15,23 @@ const bundle = await build({
 const module = { exports: {} }
 // Preset state for the next useState calls; KanbanDialog's first hook is the view.
 const states = []
+// A hook's effects are collected, never run: a test that drives a load calls the one it needs.
+const effects = []
 runInNewContext(bundle.outputFiles[0].text, {
-  module, exports: module.exports, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise,
+  module, exports: module.exports, setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {}, Date, Promise,
   require: (name) => {
     const platform = {
       react: {
         createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
         useState: initial => [states.length > 0 ? states.shift() : (typeof initial === 'function' ? initial() : initial), () => {}],
-        useEffect: () => {}, useCallback: fn => fn, useRef: current => ({ current }),
+        useEffect: fn => { effects.push(fn) }, useCallback: fn => fn, useRef: current => ({ current }),
       },
     }
     if (!(name in platform)) throw new Error(`no platform module ${name}`)
     return platform[name]
   },
 })
-const { BoardView, KanbanDialog, boardColumns, boardRail, canMoveTask, columnTree, shortId } = module.exports
+const { ARCHIVE_SHOWN, BoardView, KanbanDialog, boardColumns, boardTasksFor, boardRail, canMoveTask, columnTree, shortId, useBoardTasks } = module.exports
 
 const expand = (node) => {
   if (Array.isArray(node)) return node.flatMap(expand)
@@ -212,4 +214,68 @@ test('a delivery read with no token leaves the task cards and their tab in place
   assert.match(textOf(tasksView), /Draft the note/)
   assert.equal(byClass(tasksView, 'bt-board-card').length, 1)
   assert.deepEqual(all(tasksView).filter(node => node.props?.role === 'tab').map(node => node.props['data-view']), ['tasks', 'delivery'])
+})
+
+// #1252: the Done column is archive, not the board, and the slice has to be the *newest* finished
+// cards — a card a member just finished has an old `createdAt`, so ordering by it would hide exactly
+// the card they are looking for.
+test('#1252: a group board renders the newest finished cards, not the oldest', () => {
+  const active = [{ id: 'task-live', ownerBotId: 'a', title: 'Live', status: 'working', updatedAt: 1000 }]
+  const archive = Array.from({ length: 37 }, (_, i) => ({
+    id: `task-done-${i}`, ownerBotId: 'a', title: `Done ${i}`, status: 'accepted', progress: 100, createdAt: i, updatedAt: i,
+  }))
+  const merged = boardTasksFor(active, archive)
+  assert.equal(merged.length, 1 + ARCHIVE_SHOWN)
+  const columns = boardColumns(merged)
+  assert.equal(columns['in-progress'].length, 1)
+  assert.equal(columns.done.length, 20, 'the column is a literal twenty cards')
+  assert.equal(columns.done.length, ARCHIVE_SHOWN)
+  assert.equal(columns.done[0].id, 'task-done-36', 'the column starts at the newest finished card')
+  assert.equal(columns.done.some(card => card.id === 'task-done-0'), false, 'the oldest finished card is outside the slice')
+
+  // The card just finished: old `createdAt`, fresh `updatedAt`. It must be first, not cut off.
+  const justFinished = { id: 'task-just-finished', ownerBotId: 'a', title: 'Just finished', status: 'accepted', progress: 100, createdAt: 1, updatedAt: 99 }
+  const withFresh = boardColumns(boardTasksFor(active, [...archive, justFinished]))
+  assert.equal(withFresh.done[0].id, 'task-just-finished', 'the card finished just now leads the column')
+  assert.equal(withFresh.done.length, ARCHIVE_SHOWN)
+
+  // The host's bounded page now carries finished rows only; the client still draws them.
+  const settledPage = Array.from({ length: 5 }, (_, i) => ({
+    id: `task-settled-${i}`, ownerBotId: 'a', title: `Settled ${i}`, status: 'accepted', progress: 100, createdAt: i, updatedAt: 100 + i,
+  }))
+  const fromBoundedPage = boardColumns(boardTasksFor(active, settledPage))
+  assert.equal(fromBoundedPage.done.length, 5, 'a finished-only page still fills the Done column')
+})
+
+// #1252: the Bot-scoped archive read has to name the Bot. The host cuts the newest finished rows
+// before the board filters by Bot, so a request that only carries `{ archive, limit }` spends the
+// whole page on other Bots' cards and this Bot's Done column empties.
+test('#1252: a Bot board asks the host for that Bot\'s archive, not the whole scope', async () => {
+  const calls = []
+  const otherBotCard = { id: 'task-a-old', ownerBotId: 'a', title: 'Mine', status: 'accepted', progress: 100, createdAt: 1, updatedAt: 2 }
+  const actions = { tasks: (...args) => { calls.push(args); return Promise.resolve([]) } }
+  effects.length = 0
+  states.length = 0
+  useBoardTasks(actions, { kind: 'bot', botId: 'a' })
+  assert.equal(effects.length, 1, 'the board loads through one effect')
+  effects.pop()()
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(calls[0].length, 0, 'the default read stays the unfiltered active list')
+  const archiveCall = calls.find(args => args[0]?.archive === true)
+  assert.deepStrictEqual({ ...archiveCall?.[0] }, { botId: 'a', archive: true, limit: ARCHIVE_SHOWN }, 'the archive read names the Bot')
+
+  // A group board has no Bot to name; its read stays scoped to the room.
+  calls.length = 0
+  effects.length = 0
+  states.length = 0
+  useBoardTasks(actions, { kind: 'group', roomId: 'war' })
+  effects.pop()()
+  await new Promise(resolve => setImmediate(resolve))
+  const groupArchive = calls.find(args => args[0]?.archive === true)
+  assert.deepStrictEqual({ ...groupArchive?.[0] }, { roomId: 'war', archive: true, limit: ARCHIVE_SHOWN }, 'the group archive read stays room-scoped')
+
+  // The page the host returns for that query still fills the Done column after the Bot filter.
+  const done = boardColumns(boardTasksFor([], [otherBotCard].filter(task => task.ownerBotId === 'a'))).done
+  assert.equal(done.length, 1, 'the Bot\'s own finished card fills the Done column')
 })

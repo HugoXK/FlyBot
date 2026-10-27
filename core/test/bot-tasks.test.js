@@ -138,7 +138,7 @@ test('a Bot records conversation tasks and the owner moves them across the board
   await first.stop({ keepHome: true })
   const restored = await start(t, { home: first.home })
   app = restored
-  const saved = (await list(restored.call, alice.sessionToken, { botId: 's' })).find(task => task.id === open.id)
+  const saved = (await list(restored.call, alice.sessionToken, { botId: 's', archive: true })).find(task => task.id === open.id)
   assert.equal(saved.status, 'accepted')
   assert.equal(saved.progress, 100)
   assert.equal(saved.priority, 'high')
@@ -433,4 +433,237 @@ test('the board asks the owning Bot for the comment a decision needs, and takes 
   assert.equal(late.writeBack.state, "posted")
   assert.equal(late.writeBack.wakes, 2, "the count stays with the record")
   assert.equal(late.status, "accepted")
+})
+
+// #1252: a finished card leaves the active list, or a long-lived group's board grows without
+// bound; the archive is the same read with a flag, not a second endpoint.
+test('#1252: a room board lists active work only, and the archive is explicit', async (t) => {
+  const app = await start(t)
+  t.after(() => app.stop())
+  const alice = await app.signIn('Alice')
+  await app.track('a', { tasks: [
+    { title: 'Keep this moving', group: 'War', column: 'in-progress', progress: 30 },
+    { title: 'This one is done', group: 'War', column: 'in-progress', progress: 10 },
+  ] })
+  const before = await list(app.call, alice.sessionToken, { roomId: 'war' })
+  const finished = before.find(task => task.title === 'This one is done')
+  const done = await app.call('task-update', { id: finished.id, column: 'done' }, alice.sessionToken)
+  assert.equal(done.ok, true, JSON.stringify(done))
+
+  const active = await list(app.call, alice.sessionToken, { roomId: 'war' })
+  assert.equal(active.some(task => task.id === finished.id), false, 'a done card leaves the room board by default')
+  assert.equal(active.some(task => task.title === 'Keep this moving'), true, 'unfinished work stays')
+
+  const all = await list(app.call, alice.sessionToken, { roomId: 'war', archive: true })
+  assert.equal(all.some(task => task.id === finished.id), true, 'the archive still carries the finished card')
+  assert.equal(all.length, active.length + 1)
+})
+
+// #1252: an overall card with no open child left has to be able to complete, or a group keeps a
+// card working that nobody can close.
+test('#1252: the last child completing completes the overall card instead of leaving it working', async (t) => {
+  const app = await start(t)
+  t.after(() => app.stop())
+  const alice = await app.signIn('Alice')
+  await app.track('a', { tasks: [
+    { title: 'Ship the note', overall: true, group: 'War' },
+    { title: 'Write it', parent: 'Ship the note', assignee: 'Writer', group: 'War' },
+    { title: 'Review it', parent: 'Ship the note', assignee: 'ChiefA', group: 'War' },
+  ] })
+  const room = await list(app.call, alice.sessionToken, { roomId: 'war' })
+  const overall = room.find(task => task.kind === 'group')
+  const write = room.find(task => task.title === 'Write it')
+  const review = room.find(task => task.title === 'Review it')
+
+  const firstMove = await app.call('task-update', { id: write.id, column: 'done' }, alice.sessionToken)
+  assert.equal(firstMove.ok, true, JSON.stringify(firstMove))
+  const afterOne = (await list(app.call, alice.sessionToken, { roomId: 'war' })).find(task => task.id === overall.id)
+  assert.equal(afterOne.status, 'open', 'one child still open keeps the overall card where it was')
+
+  const lastMove = await app.call('task-update', { id: review.id, column: 'done' }, alice.sessionToken)
+  assert.equal(lastMove.ok, true, JSON.stringify(lastMove))
+  const parent = (await list(app.call, alice.sessionToken, { roomId: 'war', archive: true })).find(task => task.id === overall.id)
+  assert.equal(parent.status, 'accepted', 'the overall card completes with its last child')
+  assert.equal(columnOf(parent), 'done')
+  assert.equal(parent.progress, 100)
+})
+
+// #1252: a failed part is not hidden behind an accepted overall card. The card completes `accepted`
+// only when every child ended accepted or cancelled, and `failed` when any child ended failed.
+test('#1252: an overall card fails when one of its children failed', async (t) => {
+  const at = Date.now()
+  const state = team()
+  state.tasks = {
+    'task-overall': {
+      id: 'task-overall', status: 'working', kind: 'group', createdAt: at - 60_000, updatedAt: at - 5000,
+      requesterId: 'owner-1', ownerBotId: 'a', title: 'Ship the note', source: 'conversation',
+      origin: { roomId: 'war' }, actors: [{ status: 'working', at: at - 5000, memberId: 'owner-1' }],
+    },
+    'task-child-ok': {
+      id: 'task-child-ok', status: 'working', createdAt: at - 50_000, updatedAt: at - 4000,
+      requesterId: 'owner-1', ownerBotId: 's', title: 'Write it', parentId: 'task-overall',
+      source: 'conversation', origin: { roomId: 'war' }, actors: [{ status: 'working', at: at - 4000, memberId: 'owner-1' }],
+    },
+    'task-child-failed': {
+      id: 'task-child-failed', status: 'failed', createdAt: at - 40_000, updatedAt: at - 3000,
+      requesterId: 'owner-1', ownerBotId: 'a', title: 'Review it', parentId: 'task-overall',
+      source: 'conversation', origin: { roomId: 'war' }, actors: [{ status: 'failed', at: at - 3000, memberId: 'owner-1' }],
+    },
+  }
+  const app = await start(t, { state })
+  t.after(() => app.stop())
+  const alice = await app.signIn('Alice')
+  const moved = await app.call('task-update', { id: 'task-child-ok', column: 'done' }, alice.sessionToken)
+  assert.equal(moved.ok, true, JSON.stringify(moved))
+  const parent = (await list(app.call, alice.sessionToken, { roomId: 'war', archive: true })).find(task => task.id === 'task-overall')
+  assert.equal(parent.status, 'failed', 'a failed child makes the overall card fail, not pass')
+})
+
+// #1252: the wire must not carry the whole archive. A requested `limit` bounds the finished rows,
+// while a read without one still returns every row, so lookups by id keep working.
+test('#1252: an archive read can ask for the newest rows, and an unbounded read still sees them all', async (t) => {
+  const at = Date.now()
+  const state = team()
+  state.tasks = {}
+  for (let i = 0; i < 200; i++) {
+    state.tasks[`task-settled-${i}`] = {
+      id: `task-settled-${i}`, status: 'accepted', createdAt: at - 200_000 + i, updatedAt: at - 100_000 + i,
+      requesterId: 'owner-1', ownerBotId: 'a', title: `Settled ${i}`, source: 'conversation',
+      origin: { roomId: 'war' }, actors: [{ status: 'accepted', at: at - 100_000 + i, memberId: 'owner-1' }],
+    }
+  }
+  const app = await start(t, { state })
+  t.after(() => app.stop())
+  const alice = await app.signIn('Alice')
+
+  const bounded = await list(app.call, alice.sessionToken, { roomId: 'war', archive: true, limit: 20 })
+  assert.equal(bounded.length, 20, 'the requested limit bounds the payload')
+  assert.equal(bounded.some(task => task.id === 'task-settled-199'), true, 'the newest finished card is in the slice')
+  assert.equal(bounded.some(task => task.id === 'task-settled-0'), false, 'the oldest finished card is not')
+
+  const unbounded = await list(app.call, alice.sessionToken, { roomId: 'war', archive: true })
+  assert.equal(unbounded.length, 200, 'a read with no limit still returns every settled row')
+  assert.equal(unbounded.some(task => task.id === 'task-settled-0'), true, 'including the oldest, so an id lookup still finds it')
+})
+
+// #1252: a bounded archive read is finished rows only. With the budget spent on every row, a busy
+// room returns twenty working cards and an empty Done column — the exact row the client asked for.
+test('#1252: a bounded archive read carries the newest finished rows and no active ones', async (t) => {
+  const at = Date.now()
+  const state = team()
+  state.tasks = {}
+  const row = (id, status, updatedAt) => ({
+    id, status, createdAt: at - 500_000, updatedAt,
+    requesterId: 'owner-1', ownerBotId: 'a', title: id, source: 'conversation',
+    origin: { roomId: 'war' }, actors: [{ status, at: updatedAt, memberId: 'owner-1' }],
+  })
+  for (let i = 0; i < 25; i++) state.tasks[`task-active-${i}`] = row(`task-active-${i}`, 'working', at - i)
+  for (let i = 0; i < 5; i++) state.tasks[`task-settled-${i}`] = row(`task-settled-${i}`, 'accepted', at - 100 - i)
+
+  const app = await start(t, { state })
+  t.after(() => app.stop())
+  const alice = await app.signIn('Alice')
+
+  const bounded = await list(app.call, alice.sessionToken, { roomId: 'war', archive: true, limit: 20 })
+  assert.equal(bounded.every(task => ['accepted', 'cancelled', 'failed'].includes(task.status)), true, 'the bounded archive carries finished rows only')
+  assert.equal(bounded.some(task => task.id === 'task-settled-0'), true, 'the newest finished card is present')
+  assert.equal(bounded.some(task => task.id.startsWith('task-active-')), false, 'no active row is in the bounded payload')
+  assert.equal(bounded.length, 5, 'all five finished cards, since five is under the limit')
+
+  // `limit` is a number or nothing: a coerced `true` or "20" is a wrong request, not a page.
+  for (const limit of [true, '20', 0, -3, 1.5, 'abc', {}]) {
+    const refused = await app.call('tasks', { roomId: 'war', archive: true, limit }, alice.sessionToken)
+    assert.equal(refused.ok, false, `limit ${JSON.stringify(limit)} is refused`)
+    assert.equal(refused.error.code, 'bot/invalid', `limit ${JSON.stringify(limit)} is bot/invalid`)
+  }
+})
+
+// #1252: a child does not only end through a column move. Deleting its Bot fails it, and an owner
+// rejecting the send it waits on cancels it; both leave the overall card working unless the same
+// settle runs on those doors too. Read the parent back through the archive — that is the card a
+// person sees, not the write's return value.
+test('#1252: deleting a child\'s Bot fails the overall card, read back from the archive', async (t) => {
+  const app = await start(t)
+  t.after(() => app.stop())
+  const alice = await app.signIn('Alice')
+  await app.track('a', { tasks: [
+    { title: 'Ship the note', overall: true, group: 'War' },
+    { title: 'Write it', parent: 'Ship the note', assignee: 'Writer', group: 'War' },
+  ] })
+  const room = await list(app.call, alice.sessionToken, { roomId: 'war' })
+  const overall = room.find(task => task.kind === 'group')
+  const child = room.find(task => task.title === 'Write it')
+  const started = await app.call('task-update', { id: child.id, column: 'in-progress' }, alice.sessionToken)
+  assert.equal(started.ok, true, JSON.stringify(started))
+  const removed = await app.call('delete-bot', { id: 's' }, alice.sessionToken)
+  assert.equal(removed.ok, true, JSON.stringify(removed))
+
+  const after = await list(app.call, alice.sessionToken, { archive: true })
+  const failedChild = after.find(task => task.id === child.id)
+  assert.equal(failedChild?.status, 'failed', 'the deleted Bot\'s child fails')
+  const parent = after.find(task => task.id === overall.id)
+  assert.equal(parent?.status, 'failed', 'a failed child closes the overall card as failed')
+  assert.equal(columnOf(parent), 'done')
+})
+
+test('#1252: a rejected approval cancels the child and completes the overall card, read back', async (t) => {
+  const app = await start(t)
+  t.after(() => app.stop())
+  const alice = await app.signIn('Alice')
+  await app.track('a', { tasks: [
+    { title: 'Ship the note', overall: true, group: 'War' },
+    { title: 'Write it', parent: 'Ship the note', assignee: 'Writer', group: 'War' },
+  ] })
+  const room = await list(app.call, alice.sessionToken, { roomId: 'war' })
+  const overall = room.find(task => task.kind === 'group')
+  const child = room.find(task => task.title === 'Write it')
+  const started = await app.call('task-update', { id: child.id, column: 'in-progress' }, alice.sessionToken)
+  assert.equal(started.ok, true, JSON.stringify(started))
+
+  app.ctx.flybot.bot.send.use({ name: 'gate', handle: msg => msg.meta?.hold ? { action: 'hold', reason: 'held by test' } : undefined })
+  const held = await app.ctx.flybot.bot.send({ from: 's', to: 'a', text: 'send this out', meta: { hold: true } })
+  assert.equal(held.action, 'hold', JSON.stringify(held))
+  const blocked = (await list(app.call, alice.sessionToken, { roomId: 'war' })).find(task => task.id === child.id)
+  assert.equal(blocked.status, 'blocked', 'the held send blocks the child')
+
+  const rejected = await app.call('flybot/decide', { id: held.approvalId, decision: 'reject' }, alice.sessionToken)
+  assert.equal(rejected.ok, true, JSON.stringify(rejected))
+  const after = await list(app.call, alice.sessionToken, { roomId: 'war', archive: true })
+  const cancelled = after.find(task => task.id === child.id)
+  assert.equal(cancelled.status, 'cancelled', 'the rejected send cancels the child')
+  const parent = after.find(task => task.id === overall.id)
+  assert.equal(parent.status, 'accepted', 'a cancelled child completes the overall card as accepted')
+  assert.equal(parent.progress, 100)
+  assert.equal(columnOf(parent), 'done')
+})
+
+// #1252: the Bot filter runs before the bounded page is cut. Twenty newer cards on another Bot
+// must not push this Bot's only finished card off the page — that is the read a Bot board makes.
+test('#1252: a Bot-scoped archive page is cut after the Bot filter', async (t) => {
+  const at = Date.now()
+  const state = team()
+  state.tasks = {}
+  const row = (id, ownerBotId, updatedAt) => ({
+    id, status: 'accepted', createdAt: updatedAt, updatedAt,
+    requesterId: 'owner-1', ownerBotId, title: id, source: 'conversation',
+    origin: { roomId: 'war' }, actors: [{ status: 'accepted', at: updatedAt, memberId: 'owner-1' }],
+  })
+  for (let i = 0; i < 20; i++) state.tasks[`task-writer-${i}`] = row(`task-writer-${i}`, 's', at - i)
+  state.tasks['task-chief-old'] = row('task-chief-old', 'a', at - 10_000)
+  const app = await start(t, { state })
+  t.after(() => app.stop())
+  const alice = await app.signIn('Alice')
+
+  const mine = await list(app.call, alice.sessionToken, { botId: 'a', archive: true, limit: 20 })
+  assert.equal(mine.length, 1, 'the page is cut after the Bot filter, so the older card survives')
+  assert.equal(mine[0].id, 'task-chief-old')
+
+  const writers = await list(app.call, alice.sessionToken, { botId: 's', archive: true, limit: 20 })
+  assert.equal(writers.length, 20)
+  assert.equal(writers.every(task => task.ownerBotId === 's'), true)
+
+  // The unfiltered page is the defect's precondition: its whole budget goes to the newer Bot.
+  const scope = await list(app.call, alice.sessionToken, { archive: true, limit: 20 })
+  assert.equal(scope.length, 20)
+  assert.equal(scope.some(task => task.id === 'task-chief-old'), false, 'the unfiltered page spends the budget on the newer Bot')
 })

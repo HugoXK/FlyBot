@@ -24,6 +24,17 @@ export function shortId(id) {
   return `#${hex.slice(-6)}`
 }
 
+// #1252: the board lists active work; the Done column reads a bounded slice of the archive,
+// so a room with hundreds of finished cards still renders a column, not the whole history.
+export const ARCHIVE_SHOWN = 20
+
+export function boardTasksFor(tasks, archive, limit = ARCHIVE_SHOWN) {
+  // Newest first before the cut: a card finished a minute ago has an old `createdAt`, so ordering
+  // by it would drop exactly the card a member just finished (#1252).
+  const newest = [...(archive ?? [])].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || (b.createdAt ?? 0) - (a.createdAt ?? 0))
+  return [...(tasks ?? []), ...newest.slice(0, limit)]
+}
+
 export function boardColumns(tasks) {
   const columns = { 'not-started': [], 'in-progress': [], done: [] }
   for (const task of tasks ?? []) {
@@ -150,15 +161,26 @@ function lanesOf(tasks, roster) {
   return order.map(id => ({ id, name: botName(roster, map.get(id)[0]) || id, tasks: map.get(id) }))
 }
 
+const upsert = (list, task) => (list.some(item => item.id === task.id) ? list.map(item => item.id === task.id ? task : item) : [...list, task])
+const without = (list, id) => list.filter(item => item.id !== id)
+
 export function useBoardTasks(actions, scope) {
   const [own, setOwn] = useState([])
   const [groupTasks, setGroupTasks] = useState([])
+  const [archive, setArchive] = useState([])
   const key = scope?.kind === 'group' ? `group:${scope.roomId}` : 'own'
   useEffect(() => {
     let stopped = false
     const load = () => {
+      const query = scope?.kind === 'group' ? { roomId: scope.roomId } : {}
+      // #1252: the host cuts the archive page before the board can see it, so a Bot board has to
+      // name the Bot it asks for — an unfiltered page spends its whole budget on other Bots' newer
+      // cards and this Bot's Done column empties. The default read stays unfiltered on purpose: it
+      // is active work, a superset the board filters below without losing a card.
+      const archiveQuery = scope?.kind === 'bot' ? { botId: scope.botId } : query
+      // #1252: the default list is active work, so the Done column asks for the archive.
       const job = scope?.kind === 'group'
-        ? Promise.resolve(actions?.tasks?.({ roomId: scope.roomId }))
+        ? Promise.resolve(actions?.tasks?.(query))
         : Promise.resolve(actions?.tasks?.())
       // A reading host or an older core has no board; keep the list already shown.
       void job.then((list) => {
@@ -166,18 +188,25 @@ export function useBoardTasks(actions, scope) {
         if (scope?.kind === 'group') setGroupTasks(list)
         else setOwn(list)
       }).catch(() => undefined)
+      void Promise.resolve(actions?.tasks?.({ ...archiveQuery, archive: true, limit: ARCHIVE_SHOWN })).then((list) => {
+        if (stopped || !Array.isArray(list)) return
+        setArchive(list.filter(task => columnOf(task) === 'done'))
+      }).catch(() => undefined)
     }
     load()
     const timer = setInterval(load, POLL_MS)
     return () => { stopped = true; clearInterval(timer) }
   }, [key])
   const tasks = scope?.kind === 'group' ? groupTasks : own.filter(task => !scope?.botId || task.ownerBotId === scope.botId)
+  // A finished card moves off the active list into the archive immediately, before the next poll.
   const replace = (task) => {
-    const write = (list) => (list.some(item => item.id === task.id) ? list.map(item => item.id === task.id ? task : item) : [...list, task])
-    if (scope?.kind === 'group') setGroupTasks(write)
-    else setOwn(write)
+    const done = columnOf(task) === 'done'
+    if (scope?.kind === 'group') setGroupTasks(list => done ? without(list, task.id) : upsert(list, task))
+    else setOwn(list => done ? without(list, task.id) : upsert(list, task))
+    setArchive(list => done ? [task, ...without(list, task.id)] : without(list, task.id))
   }
-  return { own, tasks, replace }
+  const done = scope?.kind === 'group' ? archive : archive.filter(task => !scope?.botId || task.ownerBotId === scope.botId)
+  return { own, tasks, archive: done, replace }
 }
 
 function RailButton({ row, selected, meta, onSelect }) {
@@ -338,11 +367,12 @@ export function KanbanDialog({ roster, actions, leaving = false }) {
   const [dragging, setDragging] = useState(null)
   const [error, setError] = useState('')
   const [draft, setDraft] = useState('')
-  const { own, tasks, replace } = useBoardTasks(actions, scope)
+  const { own, tasks, archive, replace } = useBoardTasks(actions, scope)
+  const boardTasks = boardTasksFor(tasks, archive)
   const close = useCallback(() => actions.closeBoard(), [])
   useEscape(close)
   const counts = {}
-  for (const task of own) {
+  for (const task of [...own, ...archive]) {
     const id = task.ownerBotId
     const bucket = counts[id] ?? (counts[id] = { done: 0, total: 0 })
     if (task.status === 'cancelled' || task.status === 'failed') continue
@@ -385,7 +415,7 @@ export function KanbanDialog({ roster, actions, leaving = false }) {
       view === 'delivery'
         ? h(DeliveryView, { actions })
         : h(BoardView, {
-            roster, tasks, rail, scope, counts, dragging, error, draft,
+            roster, tasks: boardTasks, rail, scope, counts, dragging, error, draft,
             onDraft: setDraft, onSelect: setScope, onMove: move, onDrag: setDragging, onCreate: create,
           })))
 }

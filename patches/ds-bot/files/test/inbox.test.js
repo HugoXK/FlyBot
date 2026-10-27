@@ -14,14 +14,17 @@ const bundle = await build({
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
 })
 const module = { exports: {} }
+// A hook's effects are collected, never run: a test that drives a load calls the one it needs.
+// Timers are stubs so a driven load does not arm a background poll.
+const effects = []
 runInNewContext(bundle.outputFiles[0].text, {
-  module, exports: module.exports, setTimeout, clearTimeout, setInterval, clearInterval, Date, Promise,
+  module, exports: module.exports, setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {}, Date, Promise,
   require: (name) => {
     const platform = {
       react: {
         createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
         useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}],
-        useEffect: () => {}, useLayoutEffect: () => {}, useRef: current => ({ current }), useCallback: fn => fn, useMemo: fn => fn(), Fragment: 'fragment',
+        useEffect: fn => { effects.push(fn) }, useLayoutEffect: () => {}, useRef: current => ({ current }), useCallback: fn => fn, useMemo: fn => fn(), Fragment: 'fragment',
       },
       'react-dom': {},
       '@deepseek-ai/dsh-client-ui-primitives': {},
@@ -30,7 +33,7 @@ runInNewContext(bundle.outputFiles[0].text, {
     return platform[name]
   },
 })
-const { inboxModel, needsCount, InboxCard, InboxDialog, InboxRow, GROUPS, STATUSES, KEEP_MS, INBOX_CSS } = module.exports
+const { inboxModel, needsCount, InboxCard, InboxDialog, InboxRow, GROUPS, STATUSES, KEEP_MS, INBOX_CSS, useTasks } = module.exports
 const plain = value => JSON.parse(JSON.stringify(value))
 
 // Draws the inbox's own components; Bot marks and icons stay as elements.
@@ -727,4 +730,48 @@ test('a Needs you card shows the whole ask, and the phone clamp cannot cut it to
   assert.equal(byClass(tree, 'bt-inbox-answer').length, 1)
   assert.ok(buttons(tree).some(node => textOf(node) === 'Submit'))
   assert.ok(buttons(tree).some(node => textOf(node) === 'Open'))
+})
+
+// #1252: the Inbox is a second consumer of `tasks`. When the default read became active-only it
+// silently stopped receiving finished and failed cards, so the inbox's own load has to ask for the
+// settled rows — and the response has to reach the badges and the groups, not just the wire.
+test('#1252: the Inbox asks for the settled rows, and they reach Done and Needs you', async () => {
+  const at = Date.now() - 1000
+  const accepted = task('i1', 'accepted', { createdAt: at - 60_000, updatedAt: at })
+  const failed = task('i2', 'failed', { createdAt: at - 60_000, updatedAt: at, actors: [{ status: 'failed', why: 'the responsible Bot was deleted' }] })
+  // The host answers like the real one: the active-only default carries neither settled row.
+  const calls = []
+  const actions = {
+    openInbox: () => {},
+    tasks: (...args) => {
+      calls.push(args)
+      return Promise.resolve(args[0]?.archive === true ? [accepted, failed] : [])
+    },
+  }
+
+  effects.length = 0
+  useTasks(actions)
+  assert.equal(effects.length, 1, 'the Inbox loads tasks through one effect')
+  effects.pop()()
+  await new Promise(resolve => setImmediate(resolve))
+
+  const base = needsCount(roster, work, [])
+  const counted = InboxRow({ wide: true, useRoster: pick => pick(roster), useWork: pick => pick(work), useUi: pick => pick({}), actions })
+  const badge = textOf(byClass(counted, 'bt-inbox-count')[0])
+  const cards = cardsIn(dialog(actions))
+  const drawn = node => (node ? byClass(expand(node), 'bt-inbox-card')[0]?.props['data-status'] : undefined)
+  const done = drawn(cards.find(node => node.props.card.id === 'task:i1'))
+  const needs = drawn(cards.find(node => node.props.card.id === 'task:i2'))
+  assert.equal(calls[0].length, 1, 'the Inbox read sends a body asking for the settled rows')
+  assert.deepStrictEqual({ ...calls[0][0] }, { archive: true }, 'the Inbox read asks for the settled rows')
+  assert.equal(badge, String(base + 1), 'the row badge counts the failed task')
+  assert.equal(done, 'done', 'an accepted task from that response is a Done card')
+  assert.equal(needs, 'failed', 'a failed task from that response is a Needs you card')
+
+  // Put the shared list back for any later read in this file.
+  effects.length = 0
+  actions.tasks = () => Promise.resolve([])
+  useTasks(actions)
+  effects.pop()()
+  await new Promise(resolve => setImmediate(resolve))
 })
