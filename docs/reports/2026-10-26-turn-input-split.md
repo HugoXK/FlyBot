@@ -66,9 +66,11 @@ A working day is **~1.6 billion prompt tokens**, of which **~36%** is the same f
 | Statistic | p10 | p50 | p90 | Source |
 | --- | --- | --- | --- | --- |
 | Fixed tokens per call | 34,210 | 48,583 | 56,239 | derived: intercept of the Session's prompt fit |
-| Fixed characters per call | 125,377 | 132,270 | 142,655 | measured: system prompt + tool schemas on the surface |
+| Fixed characters per call (each Session's first call) | 125,377 | 132,270 | 142,655 | measured: system prompt + tool schemas on the surface |
 | Message characters per token | 2.85 | 3.32 | 3.62 | derived: 1 / slope of the same fit |
 | Fit R² | 0.921 | 0.986 | 0.995 | derived: least squares over the Session's calls |
+
+**§2 and §4 measure different moments.** This table takes the surface of each Session's **first** call; §4 below takes the sample turn's **last** call. The surface grows inside a Session and inside a turn, so the two character counts measure different moments and are not comparable.
 
 The fixed block is dense — 2.7 characters per token against 3.32 for the messages — because it is mostly a JSON tool schema plus a Chinese system prompt: no prose padding to average out.
 
@@ -100,7 +102,7 @@ On the largest call (248,706 tokens) the split is fixed **57,940** (23.3%), hist
 
 ## 4. What the fixed block is made of
 
-The same turn's surface, last call. Characters are measured; the token column splits the measured fixed block (57,940 tokens) by character share.
+The same turn's surface, the sample turn's last call. Characters are measured; the token column splits the measured fixed block (57,940 tokens) by character share.
 
 | Piece | Characters | Tokens (derived) | Source |
 | --- | --- | --- | --- |
@@ -118,6 +120,8 @@ The same turn's surface, last call. Characters are measured; the token column sp
 The tool schemas are **79%** of the fixed block's characters. The group notice plus roster plus speaking order is 2,588 characters — 8% of the system prompt and 1.8% of the whole fixed block. The part people assume is expensive is the small part. Memory (own + team) is 13,051 characters, 42% of the system prompt.
 
 ## 5. Tool results
+
+`node dev/turn-split.mjs --stats` prints the `## Tool results` block: the `tool/result` count, the characters added across the turn, the largest single result, the share by tool, what is still on the last call's surface, and the derived tokens carried.
 
 | Measure | Value | Source |
 | --- | --- | --- |
@@ -158,6 +162,8 @@ A checkpoint buys back roughly twenty minutes of growth at this rate; the fixed 
 
 ## 7. Fan-out in the group
 
+`node dev/turn-split.mjs --stats --room <room session id>` prints the `## Fan-out` block: per-message member-Bot and member-turn counts (10-minute window), the day totals of the member Sessions that name the room, and the fixed block per user message.
+
 FlyBot 交付组, 2026-10-25, 511 user messages in the room (one per `turn/start` of the room's own relay Session):
 
 | Measure | p50 | p90 | max | Source |
@@ -172,6 +178,8 @@ FlyBot 交付组, 2026-10-25, 511 user messages in the room (one per `turn/start
 One message in the delivery group costs its members **21.7 calls** and **1.17 million fixed-block tokens** on average, before any of them reads the message. The window is 10 minutes and a round can run longer, so the p90 rows over-count overlapping rounds; the day totals do not.
 
 ## 8. Retries and repeated work
+
+`node dev/turn-split.mjs --stats` prints the `## Retries` block: `llm/retry` and `assistant/attempt` counts by local day, and how many attempts carried a non-zero usage chunk.
 
 | Measure | 2026-10-25 | 2026-10-26 (partial) | Source |
 | --- | --- | --- | --- |
