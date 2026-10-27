@@ -3,7 +3,7 @@
 // that member's card and the drive wakes it in its own chat (#1205); no group part opens. A
 // question, a remark, a line naming two members or an `@all` keeps the group turn it had — this
 // module only answers the shape of one line, the room decides who may dispatch.
-import { issueRefPattern } from '../shared/issue-ref.js'
+import { issueRefPattern, refOf } from '../shared/issue-ref.js'
 
 export { cardNamesIssue, issueRefs, namesIssue } from '../shared/issue-ref.js'
 
@@ -29,7 +29,7 @@ export function workDispatch(text, { callees = [] } = {}) {
   for (const match of line.matchAll(issueRefPattern())) {
     const near = line.slice(Math.max(0, match.index - NEAR), match.index + match[0].length + NEAR)
     if (!IMPERATIVE.test(near)) continue
-    const issue = `#${match[1] ?? match[2]}`
+    const issue = refOf(match)
     const note = oneLine(line)
     return { botId: callee.id, issue, title: note, note }
   }

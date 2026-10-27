@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createRuntime } from '../index.js'
-import { workDispatch } from '../src/host/work-dispatch.js'
+import { cardNamesIssue, workDispatch } from '../src/host/work-dispatch.js'
 import { fakeContext } from './fake-ctx.js'
 
 const team = (room = {}) => ({
@@ -131,7 +131,10 @@ test('the dispatch shape is an issue id and an imperative, never any @ (#1254)',
     botId: 'a', issue: '#1234', title: '#1234 rebase and push', note: '#1234 rebase and push',
   })
   assert.ok(workDispatch('@Dev1 please fix #1234', { callees: [one[0]] }), 'the verb may come first')
-  assert.ok(workDispatch('@Dev1 https://github.com/o/r/pull/1234 land it', { callees: [one[0]] }), 'a pull link is an id too')
+  assert.equal(workDispatch('@Dev1 https://github.com/o/r/pull/1234 land it', { callees: [one[0]] })?.issue, '#1234', 'a pull link names its number, not undefined')
+  assert.equal(workDispatch('@Dev1 owner/repo#1234 rebase', { callees: [one[0]] })?.issue, '#1234', 'a repository-qualified mention names the number, not the repository')
+  assert.equal(workDispatch('@Dev1 set the accent colour to #3366ff', { callees: [one[0]] }), undefined, 'a hex colour is not a dispatch')
+  assert.equal(workDispatch('@Dev1 https://github.com/o/r/issues/1234 rebase', { callees: [one[0]] })?.issue, '#1234', 'a URL mention names the number, not undefined')
   assert.ok(workDispatch('@Dev1 请按 #1254 修一下 dispatch', { callees: [one[0]] }), 'Chinese imperatives count')
   assert.equal(workDispatch('@Dev1 #1234 looks good to me', { callees: [one[0]] }), undefined, 'a remark is not a dispatch')
   assert.equal(workDispatch('@Dev1 #1234 which file?', { callees: [one[0]] }), undefined, 'a question stays a question')
@@ -171,6 +174,23 @@ test('a dispatch on a card that exists updates that card instead of writing a se
   assert.equal(again.note, '#1234 then push the branch')
   assert.notEqual(again.note, note)
   assert.ok(again.updatedAt > updatedAt, 'the update moves the card, so the drive wakes it')
+})
+
+test('two dispatches on one issue through a qualified or URL id write one card (#1254, #1331)', async (t) => {
+  const app = await start(t)
+  await app.relay([app.post('@Dev1 owner/repo#1234 rebase onto main')]).done
+  const [first] = app.cards()
+  assert.ok(first, 'a repository-qualified id writes one card')
+  await app.relay([app.post('@Dev1 https://github.com/o/r/issues/1234 then push the branch')]).done
+  assert.equal(app.cards().length, 1, 'the same issue through a URL id reuses that card, so the id is the number')
+  assert.equal(app.cards()[0].id, first.id, 'one issue, one card')
+})
+
+test('a card names an issue through the same number, whichever shape wrote it (#1331)', () => {
+  assert.equal(cardNamesIssue({ title: 'owner/repo#1360 rebase' }, '#1360'), true, 'a qualified id names the number')
+  assert.equal(cardNamesIssue({ title: 'see https://github.com/o/r/issues/1360' }, '#1360'), true, 'a URL id names the number')
+  assert.equal(cardNamesIssue({ title: 'rebase #1360' }, '#1360'), true, 'a bare id names the number')
+  assert.equal(cardNamesIssue({ title: 'accent #3366ff' }, '#3366'), false, 'a colour names no issue')
 })
 
 test('a question to a member is still its group turn (#1254)', async (t) => {
