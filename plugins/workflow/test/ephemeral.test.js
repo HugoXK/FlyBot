@@ -180,6 +180,8 @@ test('apply wires spawn to a hidden ephemeral create and removes those Bots when
   assert.equal(created.length, 1)
   assert.equal(created[0].ephemeral, true)
   assert.equal(created[0].hidden, true)
+  assert.equal(created[0].permission, 'workspace-write')
+  assert.deepEqual(created[0].tools, [])
   assert.match(created[0].systemPrompt, /Write the plan\./)
   assert.equal(created[0].name.startsWith('Planner '), true)
   assert.notEqual(created[0].name, 'Planner')
@@ -190,6 +192,80 @@ test('apply wires spawn to a hidden ephemeral create and removes those Bots when
   assert.equal(done.workflows.find(item => item.id === made.id).run.status, 'done')
   assert.deepEqual(removed, ['bot-1'])
 })
+
+test('a Bot reply advances a live node; a 429 in the reply does not fail it', async () => {
+  let handle
+  const created = []
+  const removed = []
+  async function send(message) { return { action: 'allow', text: message.text } }
+  send.use = (spec) => { handle = spec.handle; return () => {} }
+  send.priority = { ROUTING: 10 }
+  const fb = {
+    bot: {
+      list: () => roster,
+      async create() {
+        const id = `bot-${created.length + 1}`
+        created.push(id)
+        return id
+      },
+      async remove(id) { removed.push(id); return true },
+      send,
+    },
+    readOnly: () => false,
+    api: { handle() { return () => {} } },
+    tools: { register() { return () => {} } },
+    warn() {},
+  }
+  const started = apply({ flybot: { scope: () => fb }, effect(fn) { fn() } }, { persist: false })
+  const defined = await started.service.define({
+    name: 'Lane',
+    nodes: [
+      { id: 'plan', name: 'Planner', prompt: 'Plan.', outputs: [{ name: 'plan', type: 'text' }] },
+      { id: 'code', name: 'Coder', prompt: 'Code.', inputs: [{ name: 'plan', type: 'text', required: true }], outputs: [{ name: 'patch', type: 'text' }] },
+    ],
+    edges: [{ from: 'plan', to: 'code' }],
+  })
+  const made = defined.workflows.find(item => item.name === 'Lane')
+  const opened = await started.service.runNamed({ workflow: 'Lane', brief: 'Ship the note' })
+  const run = opened.workflows.find(item => item.id === made.id).run
+  assert.equal(typeof handle, 'function')
+  assert.equal(run.nodeStatus.plan, 'running')
+  handle({ from: run.ephemeral.plan, role: 'request', text: 'not a reply' })
+  handle({ from: run.ephemeral.plan, role: 'reply', text: 'Noted a rate limit (429) in the log.\nOUTPUT plan: two lines' })
+  const mid = await waitFor(() => {
+    const row = started.service.state().workflows.find(item => item.id === made.id)
+    return row.run?.nodeStatus?.code === 'running' ? row : null
+  })
+  assert.equal(mid.run.nodeStatus.plan, 'done')
+  handle({ from: run.ephemeral.code, role: 'reply', text: 'could not answer your message' })
+  const stopped = await waitFor(() => {
+    const row = started.service.state().workflows.find(item => item.id === made.id)
+    if (row.run?.status !== 'failed' || removed.length !== created.length) return null
+    return row
+  })
+  assert.equal(stopped.run.nodeStatus.code, 'failed')
+  assert.equal(stopped.run.ephemeral, undefined)
+  assert.deepEqual(removed.sort(), created.sort())
+
+  const again = await started.service.runNamed({ workflow: 'Lane', brief: 'Ship another', task: '#1402b' })
+  const second = again.workflows.find(item => item.id === made.id).run
+  assert.equal(second.status, 'running')
+  handle({ from: second.ephemeral.plan, role: 'reply', text: 'The model call failed.' })
+  const failed = await waitFor(() => {
+    const row = started.service.state().workflows.find(item => item.id === made.id)
+    return row.run?.task?.id === '#1402b' && row.run?.status === 'failed' ? row : null
+  })
+  assert.equal(failed.run.nodeStatus.plan, 'failed')
+})
+
+async function waitFor(read) {
+  for (let n = 0; n < 40; n += 1) {
+    const value = read()
+    if (value) return value
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  throw new Error('the reply did not move the run')
+}
 
 test('#1389: a step the host refuses is not marked as handed, and a later settle sends it again', async () => {
   let answer = { ok: false, code: 'no-sender' }
@@ -248,6 +324,16 @@ function readStore(dir) {
   return JSON.parse(readFileSync(join(dir, 'workflows.json'), 'utf8'))
 }
 
+// The lane store keeps a live run on `lanes[id].active` and the one that just
+// ended on `lanes[id].last`. An older file still has `runs[id]`.
+function persistedRun(dir, workflowId) {
+  const store = readStore(dir)
+  const lane = store.lanes?.[workflowId]
+  if (!lane) return store.runs?.[workflowId] ?? null
+  const active = (lane.active ?? []).find(run => run && (run.ephemeral || run.status === 'running'))
+  return active ?? lane.last ?? null
+}
+
 test('a load reaps the run a restart left running: its Bots go and the run ends failed (#1388)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'wf-reap-'))
   const released = []
@@ -263,7 +349,7 @@ test('a load reaps the run a restart left running: its Bots go and the run ends 
       edges: [{ from: 'plan', to: 'code' }],
     }).workflows.find(item => item.name === 'Lane')
     await before.runNamed({ workflow: 'Lane', brief: 'Ship the note' })
-    const saved = readStore(dir).runs[made.id]
+    const saved = persistedRun(dir, made.id)
     assert.equal(saved.status, 'running')
     assert.deepEqual(Object.values(saved.ephemeral).sort(), ['eph-code', 'eph-plan'])
     assert.equal(released.length, 0)
@@ -278,7 +364,7 @@ test('a load reaps the run a restart left running: its Bots go and the run ends 
     assert.equal(run.ephemeral, undefined)
     assert.equal(run.handed, undefined)
     assert.equal(run.updatedAt, clock)
-    const settled = readStore(dir).runs[made.id]
+    const settled = persistedRun(dir, made.id)
     assert.equal(settled.status, 'failed')
     assert.equal(settled.ephemeral, undefined)
     assert.equal('handed' in settled, false)
@@ -307,7 +393,7 @@ test('a finished run stays done, and a run with no ephemeral Bots is not touched
     await svc.runNamed({ workflow: 'Quick', brief: 'One step' })
     await svc.advance({ workflowId: quick.id, nodeId: 'only', outcome: 'done' })
     released.length = 0
-    const finished = readStore(dir).runs[quick.id]
+    const finished = persistedRun(dir, quick.id)
     assert.equal(finished.status, 'done')
     assert.equal(finished.ephemeral, undefined)
     const finishedAt = finished.updatedAt
@@ -317,7 +403,8 @@ test('a finished run stays done, and a run with no ephemeral Bots is not touched
     const idle = svc.define({ name: 'Idle', nodes: [{ id: 'one', name: 'Planner', role: 'plan', prompt: 'Wait.' }], edges: [] })
       .workflows.find(item => item.name === 'Idle')
     const store = readStore(dir)
-    store.runs[idle.id] = {
+    const lane = store.lanes[idle.id] ?? { active: [], queue: [], last: null, history: [] }
+    lane.active = [...(lane.active ?? []), {
       id: 'run-bare',
       workflowId: idle.id,
       task: null,
@@ -329,7 +416,8 @@ test('a finished run stays done, and a run with no ephemeral Bots is not touched
       history: [],
       startedAt: 5,
       updatedAt: 6,
-    }
+    }]
+    store.lanes[idle.id] = lane
     const written = JSON.stringify(store)
     writeFileSync(join(dir, 'workflows.json'), written)
 
@@ -362,7 +450,7 @@ test('the plugin load itself reaps a run the restart left running (#1388)', asyn
       edges: [],
     }).workflows.find(item => item.name === 'Lane')
     await before.runNamed({ workflow: 'Lane', brief: 'Ship the note' })
-    assert.equal(readStore(dir).runs[made.id].status, 'running')
+    assert.equal(persistedRun(dir, made.id).status, 'running')
 
     // Loading the plugin is where the abandoned run is recognised.
     const fb = {

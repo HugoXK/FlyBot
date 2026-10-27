@@ -4,7 +4,7 @@
 // The same nodes, edges and positions are what the canvas edits and what a
 // run paints: x/y are the owner's layout, ranks are derived from the edges.
 
-const STATUSES = new Set(['queued', 'running', 'done', 'failed'])
+const STATUSES = new Set(['queued', 'running', 'done', 'failed', 'skipped'])
 const ID_RE = /^[a-z][a-z0-9-]{0,40}$/
 const GAP_X = 188
 const GAP_Y = 108
@@ -37,11 +37,51 @@ export function cleanTools(value) {
   if (!Array.isArray(value)) return []
   const tools = []
   for (const item of value) {
-    const name = cleanLine(item, 40)
+    const name = cleanLine(item, 64).toLowerCase()
     if (name && !tools.includes(name)) tools.push(name)
     if (tools.length === 16) break
   }
   return tools
+}
+
+const PORT_RE = /^[a-z][a-z0-9-]{0,40}$/
+// A root node's required input is filled from the task when it uses one of these names.
+export const TASK_INPUTS = new Set(['task', 'title', 'brief'])
+
+export function cleanPorts(value, kind) {
+  if (!Array.isArray(value)) return []
+  const ports = []
+  const seen = new Set()
+  for (const item of value) {
+    const name = cleanLine(typeof item === 'string' ? item : item?.name, 40).toLowerCase()
+    if (!PORT_RE.test(name) || seen.has(name)) continue
+    seen.add(name)
+    const type = cleanLine(typeof item === 'object' && item ? item.type : '', 40) || 'text'
+    if (kind === 'in' && item?.required === true) ports.push({ name, type, required: true })
+    else ports.push({ name, type })
+    if (ports.length === 8) break
+  }
+  return ports
+}
+
+// The Bot's reply is the step result. `OUTPUT name: value` lines are that
+// node's declared outputs; a node with one output may put it in the reply body.
+export function readStepResult(text, node) {
+  const outputs = {}
+  const kept = []
+  for (const line of String(text ?? '').split('\n')) {
+    const match = /^OUTPUT\s+([a-z][a-z0-9-]{0,40})\s*:\s*(.*)$/i.exec(line.trim())
+    if (!match) { kept.push(line); continue }
+    outputs[match[1].toLowerCase()] = cleanLine(match[2], 2000)
+  }
+  const body = kept.join('\n').trim().slice(0, 2000)
+  const declared = node?.outputs ?? []
+  if (declared.length === 1 && !outputs[declared[0].name] && body) outputs[declared[0].name] = body
+  if (declared.length > 0) {
+    const allowed = new Set(declared.map(port => port.name))
+    for (const name of Object.keys(outputs)) if (!allowed.has(name)) delete outputs[name]
+  }
+  return { text: body, outputs }
 }
 
 function coord(value, fallback) {
@@ -60,7 +100,40 @@ export function edgesFromLayers(layers) {
   return edges
 }
 
-// Longest-path ranks. A cycle is refused. Nodes keep their list order inside a rank.
+function cleanWhen(value, allowElse) {
+  if (!value || typeof value !== 'object') return null
+  if (allowElse && value.else === true) return { else: true }
+  const output = cleanLine(value.output, 40).toLowerCase()
+  if (!PORT_RE.test(output)) return null
+  return { output, eq: cleanLine(value.eq, 200) }
+}
+
+// A loop is the only edge that may cycle. max is how many times the body runs
+// (1–8, default 3). until stops early when that output equals eq.
+function cleanEdge(edge) {
+  const from = String(edge?.from ?? '')
+  const to = String(edge?.to ?? '')
+  if (edge?.loop === true) {
+    const max = Number(edge.max)
+    const until = cleanWhen(edge.until, false)
+    return {
+      from,
+      to,
+      loop: true,
+      max: Number.isInteger(max) && max >= 1 && max <= 8 ? max : 3,
+      ...(until ? { until } : {}),
+    }
+  }
+  const when = cleanWhen(edge.when, true)
+  return { from, to, ...(when ? { when } : {}) }
+}
+
+function edgeKey(edge) {
+  return `${edge.from}>${edge.to}`
+}
+
+// Longest-path ranks. A forward cycle is refused. A loop edge is not ranked.
+// Nodes keep their list order inside a rank.
 export function ranksOf(nodes, edges) {
   const ids = nodes.map(node => node.id)
   const known = new Set(ids)
@@ -68,6 +141,7 @@ export function ranksOf(nodes, edges) {
   const succs = new Map(ids.map(id => [id, []]))
   for (const edge of edges) {
     if (!known.has(edge.from) || !known.has(edge.to)) throw new Error(`Link names an unknown Bot ${edge.from} → ${edge.to}`)
+    if (edge.loop === true) continue
     if (edge.from === edge.to) throw new Error('A Bot cannot connect to itself')
     preds.get(edge.to).push(edge.from)
     succs.get(edge.from).push(edge.to)
@@ -160,12 +234,11 @@ export function normalizeGraph(graph) {
     if (graph.edges.length > 64) throw new Error('A workflow has at most 64 links')
     const seen = new Set()
     edges = graph.edges.map(edge => {
-      const from = String(edge?.from ?? '')
-      const to = String(edge?.to ?? '')
-      const key = `${from}>${to}`
-      if (seen.has(key)) throw new Error(`Link ${from} → ${to} is listed twice`)
+      const cleaned = cleanEdge(edge)
+      const key = edgeKey(cleaned)
+      if (seen.has(key)) throw new Error(`Link ${cleaned.from} → ${cleaned.to} is listed twice`)
       seen.add(key)
-      return { from, to }
+      return cleaned
     })
   } else {
     checkLayers(graph.layers, ids)
@@ -242,6 +315,8 @@ export function addNode(graph, node) {
   const prompt = cleanPrompt(node.prompt)
   const model = cleanLine(node.model, 80)
   const tools = cleanTools(node.tools)
+  const inputs = cleanPorts(node.inputs, 'in')
+  const outputs = cleanPorts(node.outputs, 'out')
   next.nodes.push({
     id,
     name: cleanLine(node.name, 80),
@@ -250,6 +325,8 @@ export function addNode(graph, node) {
     ...(prompt ? { prompt } : {}),
     ...(model ? { model } : {}),
     ...(tools.length ? { tools } : {}),
+    ...(inputs.length ? { inputs } : {}),
+    ...(outputs.length ? { outputs } : {}),
     ...(node.botId ? { botId: String(node.botId) } : {}),
     ...(node.failOnce === true ? { failOnce: true } : {}),
     ...(Number.isFinite(Number(node.x)) ? { x: coord(node.x, 0) } : {}),
@@ -291,35 +368,210 @@ function copyStatus(status) {
   return next
 }
 
+function forwardEdges(graph) {
+  return graph.edges.filter(edge => edge.loop !== true)
+}
+
 function predecessors(graph, nodeId) {
   ensure(graph)
-  return graph.edges.filter(edge => edge.to === nodeId).map(edge => edge.from)
+  return forwardEdges(graph).filter(edge => edge.to === nodeId).map(edge => edge.from)
+}
+
+function forwardIncoming(graph, id) {
+  return forwardEdges(graph).filter(edge => edge.to === id)
+}
+
+// A plain edge from a done node is open. A when edge is open only when this
+// run recorded it. A skipped source closes the edge.
+function edgeOpen(edge, status, fired) {
+  if (status[edge.from] !== 'done') return false
+  if (edge.when) return fired?.[edgeKey(edge)] === true
+  return true
+}
+
+function ancestors(graph, nodeId, into = new Set()) {
+  for (const from of predecessors(graph, nodeId)) {
+    if (into.has(from)) continue
+    into.add(from)
+    ancestors(graph, from, into)
+  }
+  return into
+}
+
+// A required input must be produced by an upstream output of the same name.
+// A root may take `task`, `title` or `brief` from the assignment instead.
+export function missingProviders(graph) {
+  ensure(graph)
+  const missing = []
+  for (const node of graph.nodes) {
+    const roots = predecessors(graph, node.id).length === 0
+    for (const input of node.inputs ?? []) {
+      if (input.required !== true) continue
+      const provided = [...ancestors(graph, node.id)].some(id => (nodeById(graph, id)?.outputs ?? []).some(port => port.name === input.name))
+      if (!provided && !(roots && TASK_INPUTS.has(input.name))) missing.push({ nodeId: node.id, name: input.name })
+    }
+  }
+  return missing
+}
+
+function producedValue(graph, nodeId, name, produced) {
+  const direct = predecessors(graph, nodeId)
+  for (const id of direct) {
+    const value = produced?.[id]?.[name]
+    if (typeof value === 'string' && value !== '') return value
+  }
+  for (const id of ancestors(graph, nodeId)) {
+    if (direct.includes(id)) continue
+    const value = produced?.[id]?.[name]
+    if (typeof value === 'string' && value !== '') return value
+  }
+  return ''
+}
+
+export function resolveInputs(graph, nodeId, produced, task) {
+  ensure(graph)
+  const node = nodeById(graph, nodeId)
+  const bag = {}
+  const roots = predecessors(graph, nodeId).length === 0
+  for (const input of node?.inputs ?? []) {
+    let value = producedValue(graph, nodeId, input.name, produced)
+    if (!value && roots && TASK_INPUTS.has(input.name)) {
+      if (input.name === 'title' || input.name === 'brief') value = task?.title ?? ''
+      else value = `${task?.id ?? ''} ${task?.title ?? ''}`.trim()
+    }
+    if (value) bag[input.name] = value
+  }
+  return bag
+}
+
+export function unmetRequired(graph, nodeId, produced, task) {
+  const node = nodeById(graph, nodeId)
+  const have = resolveInputs(graph, nodeId, produced, task)
+  return (node?.inputs ?? []).filter(input => input.required === true && !have[input.name]).map(input => input.name)
+}
+
+function settled(value) {
+  return value === 'done' || value === 'skipped'
 }
 
 // The first rank that is not finished, or -1 when every rank is done.
+// A skipped node is settled: an untaken branch does not hold the rank open.
 export function frontierIndex(graph, status) {
   ensure(graph)
   for (let index = 0; index < graph.layers.length; index += 1) {
-    if (graph.layers[index].some(id => status[id] !== 'done')) return index
+    if (graph.layers[index].some(id => !settled(status[id]))) return index
   }
   return -1
 }
 
-// Start every queued Bot whose predecessors are all done.
-export function startFrontier(graph, status) {
+function predSatisfied(graph, id, status, fired) {
+  const incoming = forwardIncoming(graph, id)
+  if (incoming.length === 0) return true
+  if (!incoming.every(edge => settled(status[edge.from]))) return false
+  return incoming.some(edge => edgeOpen(edge, status, fired))
+}
+
+// Start every queued Bot whose forward predecessors are settled, and at least
+// one incoming edge was taken. fired is omitted for a graph with no conditions.
+export function startFrontier(graph, status, fired) {
   ensure(graph)
   const next = copyStatus(status)
   const started = []
   for (const id of orderedIds(graph, next, 'queued')) {
-    if (!predecessors(graph, id).every(pred => next[pred] === 'done')) continue
+    if (!predSatisfied(graph, id, next, fired)) continue
     next[id] = 'running'
     started.push(id)
   }
-  const finished = graph.nodes.every(node => next[node.id] === 'done')
+  const finished = graph.nodes.every(node => settled(next[node.id]))
   return { status: next, started, finished }
 }
 
-export function completeNode(graph, status, nodeId) {
+function takenFrom(graph, nodeId, outputs) {
+  const out = forwardEdges(graph).filter(edge => edge.from === nodeId)
+  const matched = out.some(edge => edge.when && edge.when.else !== true && outputs?.[edge.when.output] === edge.when.eq)
+  const fired = {}
+  for (const edge of out) {
+    let take = false
+    if (!edge.when) take = true
+    else if (edge.when.else === true) take = !matched
+    else take = outputs?.[edge.when.output] === edge.when.eq
+    if (take) fired[edgeKey(edge)] = true
+  }
+  return fired
+}
+
+function loopDecision(graph, nodeId, outputs, loops) {
+  const edges = graph.edges.filter(edge => edge.loop === true && edge.from === nodeId)
+  for (const edge of edges) {
+    const ran = (Number(loops?.[edgeKey(edge)]) || 0) + 1
+    if (edge.until && outputs?.[edge.until.output] === edge.until.eq) continue
+    const max = Number.isInteger(edge.max) ? edge.max : 3
+    if (ran >= max) continue
+    return { edge, ran }
+  }
+  return null
+}
+
+// Nodes the loop runs again: forward-reachable from the target that can still
+// reach the source. A self-loop is that one node. The exit stays queued.
+function loopBody(graph, source, target) {
+  if (source === target) return new Set([source])
+  const forward = new Map()
+  for (const edge of forwardEdges(graph)) {
+    if (!forward.has(edge.from)) forward.set(edge.from, [])
+    forward.get(edge.from).push(edge.to)
+  }
+  const reach = new Set()
+  const stack = [target]
+  while (stack.length > 0) {
+    const id = stack.pop()
+    if (reach.has(id)) continue
+    reach.add(id)
+    for (const to of forward.get(id) ?? []) stack.push(to)
+  }
+  const rev = new Map()
+  for (const [from, tos] of forward) {
+    for (const to of tos) {
+      if (!rev.has(to)) rev.set(to, [])
+      rev.get(to).push(from)
+    }
+  }
+  const can = new Set()
+  const back = [source]
+  while (back.length > 0) {
+    const id = back.pop()
+    if (can.has(id)) continue
+    can.add(id)
+    for (const from of rev.get(id) ?? []) back.push(from)
+  }
+  const body = new Set()
+  for (const id of reach) if (can.has(id)) body.add(id)
+  body.add(source)
+  body.add(target)
+  return body
+}
+
+function skipClosed(graph, status, fired) {
+  const skipped = []
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const node of graph.nodes) {
+      if (status[node.id] !== 'queued') continue
+      const incoming = forwardIncoming(graph, node.id)
+      if (incoming.length === 0) continue
+      const pending = incoming.some(edge => !settled(status[edge.from]))
+      if (pending) continue
+      if (incoming.some(edge => edgeOpen(edge, status, fired))) continue
+      status[node.id] = 'skipped'
+      skipped.push(node.id)
+      changed = true
+    }
+  }
+  return skipped
+}
+
+export function completeNode(graph, status, nodeId, ctx = {}) {
   ensure(graph)
   if (!nodeById(graph, nodeId)) throw new Error(`Unknown Bot ${nodeId}`)
   if (status[nodeId] !== 'running') throw new Error(`${nodeId} is not running`)
@@ -327,9 +579,51 @@ export function completeNode(graph, status, nodeId) {
   next[nodeId] = 'done'
   const index = layerIndex(graph, nodeId)
   const layer = graph.layers[index]
-  const joined = layer.every(id => next[id] === 'done')
-  const follow = startFrontier(graph, next)
-  return { status: follow.status, started: follow.started, joined, finished: follow.finished, layerSize: layer.length }
+  const outputs = ctx.outputs && typeof ctx.outputs === 'object' ? ctx.outputs : {}
+  const loops = { ...(ctx.loops ?? {}) }
+  const fired = { ...(ctx.fired ?? {}) }
+  const looping = loopDecision(graph, nodeId, outputs, ctx.loops)
+  if (looping) {
+    loops[edgeKey(looping.edge)] = looping.ran
+    const body = loopBody(graph, nodeId, looping.edge.to)
+    const reset = []
+    for (const id of body) {
+      next[id] = id === looping.edge.to ? 'running' : 'queued'
+      reset.push(id)
+    }
+    // The previous pass's choice stays in `fired`, and a skipped sibling is
+    // outside the body. skipClosed only moves queued nodes, so the old branch
+    // would open again. Drop decisions the body made, and queue every skipped
+    // node a reset node points at, so the next pass can take the other side.
+    const opened = new Set(body)
+    let grew = true
+    while (grew) {
+      grew = false
+      for (const edge of forwardEdges(graph)) {
+        if (!opened.has(edge.from) || next[edge.to] !== 'skipped') continue
+        next[edge.to] = 'queued'
+        reset.push(edge.to)
+        opened.add(edge.to)
+        grew = true
+      }
+    }
+    for (const key of Object.keys(fired)) {
+      const from = key.split('>')[0]
+      if (opened.has(from)) delete fired[key]
+    }
+    return {
+      status: next, started: [looping.edge.to], joined: false, finished: false, layerSize: layer.length,
+      loops, fired, looped: true, reset, skipped: [],
+    }
+  }
+  Object.assign(fired, takenFrom(graph, nodeId, outputs))
+  const skipped = skipClosed(graph, next, fired)
+  const follow = startFrontier(graph, next, fired)
+  const joined = layer.every(id => settled(follow.status[id]))
+  return {
+    status: follow.status, started: follow.started, joined, finished: follow.finished, layerSize: layer.length,
+    loops, fired, looped: false, reset: [], skipped,
+  }
 }
 
 export function failNode(graph, status, nodeId) {
@@ -379,13 +673,13 @@ export function layerMarks(graph, status) {
   return graph.layers.map(layer => {
     if (layer.some(id => status[id] === 'failed')) return 'failed'
     if (layer.some(id => status[id] === 'running')) return 'running'
-    if (layer.every(id => status[id] === 'done')) return 'done'
+    if (layer.every(id => settled(status[id]))) return 'done'
     return 'queued'
   })
 }
 
 export function doneCount(status) {
-  return Object.values(status).filter(value => value === 'done').length
+  return Object.values(status).filter(value => value === 'done' || value === 'skipped').length
 }
 
 export function chainLabel(graph) {
