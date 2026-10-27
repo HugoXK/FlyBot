@@ -25,6 +25,9 @@ export function install(rt) {
   const state = { version: STATE_VERSION, mainBotIds: [], members: {}, bots: {}, rooms: {}, agents: {}, capabilities: { items: {} }, exchanges: [], exchangeTurns: {}, questions: {}, prefs: {}, invitations: {}, authSessions: {}, tasks: {}, revision: 0 }
   let loaded = null
   let writing = Promise.resolve()
+  // Every save this host has accepted since it started — a monotonic watermark, never decremented
+  // — and the chain's tail: what `savesQueued` and `savesSettled` answer (#1368).
+  let queued = 0
   const { warn } = rt
   // Opt-in (#511): every saved change is also recorded for replay; off by default.
   const journal = config.stateJournal === true ? openJournal({ path: join(home, 'journal', 'state.jsonl'), warn }) : undefined
@@ -467,6 +470,7 @@ export function install(rt) {
       }
     }
     if (!writable()) return writing
+    queued += 1
     state.revision += 1
     state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
     const snapshot = JSON.stringify(state, null, 2)
@@ -499,6 +503,19 @@ export function install(rt) {
       warn('ds-bot: state write failed: %s', error)
       throw error
     })
+  }
+
+  // What the write chain holds, for a caller that must read state.json: `savesQueued` is a
+  // monotonic watermark — every save this host has accepted since it started, never decremented —
+  // and `savesSettled` resolves once the chain is empty. A test (or a caller finishing a rollback)
+  // otherwise has to guess a delay, and a delay long enough on an idle machine reads a half-written team on a busy one (#1368).
+  const savesQueued = () => queued
+  const savesSettled = async () => {
+    for (;;) {
+      const tail = writing
+      await tail
+      if (tail === writing) return
+    }
   }
 
   // The write-path entry for a change made outside a request (a plugin, a scheduled task,
@@ -591,7 +608,7 @@ export function install(rt) {
   const isAdminOf = (room, id) => id !== undefined && room.admin === id
 
   Object.assign(rt, {
-    state, load, save, refresh, readOnly, mutate,
+    state, load, save, refresh, readOnly, mutate, savesQueued, savesSettled,
     botOf, roomOf, isMain, chatOf, selfOf, isBotSession,
     chatOwners, groupOwners, pastOwners,
     groupSessionsOf, dropGroupSession, findBot, findRooms, isAdminOf,
