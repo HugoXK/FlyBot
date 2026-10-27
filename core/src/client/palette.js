@@ -1,7 +1,7 @@
 import { createElement as h, Fragment, useEffect, useState } from 'react'
 import { FishLogo } from '@deepseek-ai/dsh-client-ui-primitives'
 import { isMainOf } from './sources.js'
-import { currentPart, stripHeader } from './text.js'
+import { botNames, currentPart, readableLine } from './text.js'
 import { PlusIcon, SearchIcon, PeopleIcon, CloseIcon, GearIcon } from './icons.js'
 import { BotAvatar, RoomAvatar } from './mark.js'
 import { useEscape } from './overlay-hooks.js'
@@ -12,7 +12,9 @@ import { seatedCount } from './group-settings.js'
 
 // Search is a command palette: a 560px dialog, a search header, and 49px
 // rows (24px avatar, title, subtitle). Bots and groups match on name and role; past
-// messages match on their text.
+// messages match on their text, read by `readableLine`, the same reader `previewOf` uses — a header,
+// a delegation trace and a fence are routing or data, never the row (#1347).
+const paletteText = (raw, names) => readableLine(String(raw ?? ''), names)
 const PALETTE_EXIT_MS = 160
 export function CommandPalette({ start, token, roster, actions, useSessions }) {
   const [query, setQuery] = useState(start ?? '')
@@ -26,6 +28,7 @@ export function CommandPalette({ start, token, roster, actions, useSessions }) {
   }
   useEscape(close)
   const ids = [...roster.bots.map(currentPart), ...roster.rooms.map(item => item.id)]
+  const names = botNames(roster)
   const found = useSessions((list) => {
     if (wanted.length < 2) return '[]'
     const hits = []
@@ -37,7 +40,7 @@ export function CommandPalette({ start, token, roster, actions, useSessions }) {
         const entry = outline[index]
         if (hidden.includes(entry.turn)) continue
         for (const raw of [entry.response, entry.prompt]) {
-          const text = stripHeader(raw ?? '').replace(/\s+/g, ' ').trim()
+          const text = paletteText(raw, names)
           const at = text.toLowerCase().indexOf(wanted)
           if (at < 0) continue
           const from = Math.max(0, at - 24)

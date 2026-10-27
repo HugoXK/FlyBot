@@ -42,12 +42,13 @@ test('ordinary text that merely mentions an arrow is left alone', () => {
 })
 
 test('the sidebar preview drops the trace too', () => {
+  const names = ['Chief', '助手']
   const list = { byId: { s: { projectionValues: { turnOutline: [{ turn: 2, prompt: '', response: 'Chief → 助手\n\nHi Chief!' }] } } } }
-  assert.equal(previewOf(list, 's'), 'Hi Chief!')
+  assert.equal(previewOf(list, 's', [], [], names), 'Hi Chief!')
   const flat = { byId: { s: { projectionValues: { turnOutline: [{ turn: 1, prompt: '', response: 'Chief → 助手 Hi! Message received.' }] } } } }
-  assert.equal(previewOf(flat, 's'), 'Hi! Message received.')
+  assert.equal(previewOf(flat, 's', [], [], names), 'Hi! Message received.')
   const plain = { byId: { s: { projectionValues: { turnOutline: [{ turn: 1, prompt: '', response: 'Use Settings → Models first' }] } } } }
-  assert.equal(previewOf(plain, 's'), 'Use Settings → Models first')
+  assert.equal(previewOf(plain, 's', [], [], names), 'Use Settings → Models first')
 })
 
 test("an inbound friend's message uses the friend's sidebar Bot (avatar, name), else a stable look from its handle", () => {

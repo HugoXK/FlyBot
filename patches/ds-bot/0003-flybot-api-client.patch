@@ -2016,7 +2016,14 @@ diff --git a/src/client/overlays.js b/src/client/overlays.js
 diff --git a/src/client/palette.js b/src/client/palette.js
 --- a/src/client/palette.js
 +++ b/src/client/palette.js
-@@ -7,6 +7,8 @@ import { BotAvatar, RoomAvatar } from './mark.js'
+@@ -1,16 +1,20 @@
+ import { createElement as h, Fragment, useEffect, useState } from 'react'
+ import { FishLogo } from '@deepseek-ai/dsh-client-ui-primitives'
+ import { isMainOf } from './sources.js'
+-import { currentPart, stripHeader } from './text.js'
++import { botNames, currentPart, readableLine } from './text.js'
+ import { PlusIcon, SearchIcon, PeopleIcon, CloseIcon, GearIcon } from './icons.js'
+ import { BotAvatar, RoomAvatar } from './mark.js'
  import { useEscape } from './overlay-hooks.js'
  import { QUICK_EDGES, useFlip, useGlide } from './motion.js'
  import { t } from './i18n.js'
@@ -2025,6 +2032,30 @@ diff --git a/src/client/palette.js b/src/client/palette.js
  
  // Search is a command palette: a 560px dialog, a search header, and 49px
  // rows (24px avatar, title, subtitle). Bots and groups match on name and role; past
+-// messages match on their text.
++// messages match on their text, read by `readableLine`, the same reader `previewOf` uses — a header,
++// a delegation trace and a fence are routing or data, never the row (#1347).
++const paletteText = (raw, names) => readableLine(String(raw ?? ''), names)
+ const PALETTE_EXIT_MS = 160
+ export function CommandPalette({ start, token, roster, actions, useSessions }) {
+   const [query, setQuery] = useState(start ?? '')
+@@ -24,6 +24,7 @@ export function CommandPalette({ start, token, roster, actions, useSessions }) {
+   }
+   useEscape(close)
+   const ids = [...roster.bots.map(currentPart), ...roster.rooms.map(item => item.id)]
++  const names = botNames(roster)
+   const found = useSessions((list) => {
+     if (wanted.length < 2) return '[]'
+     const hits = []
+@@ -35,7 +35,7 @@ export function CommandPalette({ start, token, roster, actions, useSessions }) {
+         const entry = outline[index]
+         if (hidden.includes(entry.turn)) continue
+         for (const raw of [entry.response, entry.prompt]) {
+-          const text = stripHeader(raw ?? '').replace(/\s+/g, ' ').trim()
++          const text = paletteText(raw, names)
+           const at = text.toLowerCase().indexOf(wanted)
+           if (at < 0) continue
+           const from = Math.max(0, at - 24)
 @@ -49,13 +49,13 @@ export function CommandPalette({ start, token, roster, actions, useSessions }) {
    const matchesName = (...fields) => wanted === '' || fields.some(field => (field ?? '').toLowerCase().includes(wanted))
    const sections = []
@@ -2063,7 +2094,7 @@ diff --git a/src/client/sidebar.js b/src/client/sidebar.js
  import { isMainOf } from './sources.js'
 -import { currentPart, previewOf, relativeShort } from './text.js'
 -import { PlusIcon, SearchIcon, GaugeIcon, PlugIcon, ClockIcon, GearIcon, PinMarkIcon, ConnectorIcon, SwitchIcon, CloudDownloadIcon } from './icons.js'
-+import { awayGroups, botRowTitle, currentPart, faceRowTitle, modelOf, nameMentions, previewOf, relativeShort, unsentReplyTurns } from './text.js'
++import { awayGroups, botNames, botRowTitle, currentPart, faceRowTitle, modelOf, nameMentions, previewOf, relativeShort, unsentReplyTurns } from './text.js'
 +import { PlusIcon, SearchIcon, GaugeIcon, PlugIcon, ClockIcon, GearIcon, PinMarkIcon, ConnectorIcon, SwitchIcon, CloudDownloadIcon, FlyBotMark } from './icons.js'
  import { MAIN_LOOK } from './characters.js'
  import { botState, BotMark, BotAvatar, RoomAvatar } from './mark.js'
@@ -2088,7 +2119,7 @@ diff --git a/src/client/sidebar.js b/src/client/sidebar.js
    const id = bot.id
    const part = currentPart(bot)
 -  const preview = useSessions(list => previewOf(list, part, roster.exchangeTurns[part]))
-+  const preview = useSessions(list => nameMentions(previewOf(list, part, roster.exchangeTurns[part], unsentReplyTurns(bot, part)), roster))
++  const preview = useSessions(list => nameMentions(previewOf(list, part, roster.exchangeTurns[part], unsentReplyTurns(bot, part), botNames(roster)), roster))
    const running = useSessionStatus(map => map.get(part)?.running === true)
    const active = useSessionRetainInfo(part, info => (info?.retainedBy?.mainView ?? 0) > 0)
    const unread = useSessionStatus(map => map.get(part)?.completionUnread === true || map.get(part)?.pendingInteraction !== undefined) || (marked && !active)
@@ -2205,7 +2236,7 @@ diff --git a/src/client/sidebar.js b/src/client/sidebar.js
    const id = room.id
 -  const fallback = useSessions(list => previewOf(list, id))
 -  const preview = room.preview?.replace(/\s+/g, ' ').trim() || fallback
-+  const fallback = useSessions(list => nameMentions(previewOf(list, id), roster))
++  const fallback = useSessions(list => nameMentions(previewOf(list, id, [], [], botNames(roster)), roster))
 +  // The host's line is the same kind of stored text as a Bot chat's, so the row reads it the same way:
 +  // a fence or a marker fragment must never reach the row (#1347).
 +  const preview = nameMentions(visibleText(room.preview), roster) || fallback
