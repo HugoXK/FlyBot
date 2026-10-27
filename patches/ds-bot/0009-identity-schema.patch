@@ -3,8 +3,12 @@ FlyBot patch 0009-identity-schema on Fei2411/DeepSeek-Bot@2b10c70 (ds-bot/). Gen
 diff --git a/test/roster.test.js b/test/roster.test.js
 --- a/test/roster.test.js
 +++ b/test/roster.test.js
-@@ -9,7 +9,7 @@ import { format } from 'node:util'
- import { apply } from '../index.js'
+@@ -6,10 +6,10 @@ import { hostname, tmpdir } from 'node:os'
+ import { join } from 'node:path'
+ import { test } from 'node:test'
+ import { format } from 'node:util'
+-import { apply } from '../index.js'
++import { createRuntime, provideFlyBot } from '../index.js'
  import { fakeContext } from './fake-ctx.js'
  
 -// Enough of the dsh services for the roster to make Sessions; kickoff messages are dropped.
@@ -12,7 +16,24 @@ diff --git a/test/roster.test.js b/test/roster.test.js
  function start(team, { models = [], reasoning = {}, archiveError } = {}) {
    const home = mkdtempSync(join(tmpdir(), 'ds-bot-roster-'))
    if (team !== undefined) writeFileSync(join(home, 'state.json'), JSON.stringify(team))
-@@ -67,7 +67,7 @@ function start(team, { models = [], reasoning = {}, archiveError } = {}) {
+@@ -54,7 +54,10 @@ function start(team, { models = [], reasoning = {}, archiveError } = {}) {
+     route = options
+     return register(options)
+   }
+-  apply(ctx, { home })
++  // The runtime itself, not only `apply`'s side effects: this file waits on the store's own
++  // write chain instead of on a delay (#1368).
++  const rt = createRuntime(ctx, { home })
++  provideFlyBot(ctx, rt.flybot)
+   const call = async (endpoint, payload) => {
+     const response = await route.fetch(new Request('http://localhost/api/bot', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))
+     return response.json()
+@@ -63,11 +63,11 @@ function start(team, { models = [], reasoning = {}, archiveError } = {}) {
+     await ctx.dispose()
+     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
+   }
+-  return { call, stop, home, sent, selected, ctx, archived, warnings }
++  return { call, stop, home, sent, selected, ctx, archived, warnings, rt }
  }
  
  const settle = () => new Promise(resolve => setTimeout(resolve, 20))
@@ -263,6 +284,44 @@ diff --git a/test/roster.test.js b/test/roster.test.js
  test('a host that loses its lock to another dsh refuses changes instead of making a phantom Bot', async (t) => {
    const { call, stop, home, ctx } = start({ version: 1, mainBotIds: ['chief'], bots: { chief: { id: 'chief', name: 'Chief' } } })
    t.after(stop)
+@@ -463,7 +463,7 @@ test('a delete whose save fails still stops the Sessions, and the next save writ
+ })
+ 
+ test('a rolled-back Bot does not come back with a save queued before the rollback', async (t) => {
+-  const { call, stop, home } = start({ version: 1, mainBotIds: ['chief'], bots: { chief: { id: 'chief', name: 'Chief' } } })
++  const { call, stop, home, rt } = start({ version: 1, mainBotIds: ['chief'], bots: { chief: { id: 'chief', name: 'Chief' } } })
+   t.after(async () => {
+     fsp.rename = rename
+     syncBuiltinESMExports()
+@@ -485,18 +485,25 @@ test('a rolled-back Bot does not come back with a save queued before the rollbac
+       await gate
+       throw Object.assign(new Error('rename failed'), { code: 'EIO' })
+     }
++    // Every write after the failed one is slow here, the way a busy runner makes it: the case
++    // must not depend on how fast the disk is, only on reading after the chain is empty (#1368).
++    if (to === statePath && failed) await new Promise(resolve => setTimeout(resolve, 150))
+     return rename(from, to)
+   }
+   syncBuiltinESMExports()
+   const phantom = call('create-bot', { name: 'Phantom' })
+   await first
+-  // A second Bot's save queues a snapshot that still holds Phantom.
++  // A second Bot's save queues a snapshot that still holds Phantom. Waiting on the store's own
++  // save count is an event; the 20 ms delay this used to wait on was the race (#1368).
++  const queued = rt.savesQueued()
+   const kept = call('create-bot', { name: 'Kept' })
+-  await settle()
++  await until(() => rt.savesQueued() > queued)
+   release()
+   assert.equal((await phantom).ok, false)
+   assert.equal((await kept).ok, true)
+-  await settle()
++  // The rollback's save is queued, not awaited (roster.js), so the file may still hold the
++  // stale snapshot: read it only once the write chain is empty.
++  await rt.savesSettled()
+   const names = Object.values(JSON.parse(readFileSync(statePath, 'utf8')).bots).map(bot => bot.name)
+   assert.deepEqual(names.sort(), ['Chief', 'Kept', 'Warm'])
+ })
 @@ -526,3 +526,65 @@ test('a write that fails at save time archives the Session it made', async (t) =
    const saved = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
    assert.equal(Object.values(saved.bots).some(bot => bot.name === 'Phantom'), false)

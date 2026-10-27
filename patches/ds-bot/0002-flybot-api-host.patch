@@ -574,7 +574,7 @@ diff --git a/src/host/roster.js b/src/host/roster.js
 diff --git a/src/host/store.js b/src/host/store.js
 --- a/src/host/store.js
 +++ b/src/host/store.js
-@@ -1,21 +1,33 @@
+@@ -1,21 +1,36 @@
  // Store: the saved team (state.json), its migrations, the lock that keeps a second dsh
  // host on the same data from writing it, and the indexes that map a Session to the Bot
  // or group chat it belongs to.
@@ -606,6 +606,9 @@ diff --git a/src/host/store.js b/src/host/store.js
 +  const state = { version: STATE_VERSION, mainBotIds: [], members: {}, bots: {}, rooms: {}, agents: {}, capabilities: { items: {} }, exchanges: [], exchangeTurns: {}, questions: {}, prefs: {}, invitations: {}, authSessions: {}, tasks: {}, revision: 0 }
    let loaded = null
    let writing = Promise.resolve()
++  // Every save this host has accepted since it started — a monotonic watermark, never decremented
++  // — and the chain's tail: what `savesQueued` and `savesSettled` answer (#1368).
++  let queued = 0
    const { warn } = rt
 +  // Opt-in (#511): every saved change is also recorded for replay; off by default.
 +  const journal = config.stateJournal === true ? openJournal({ path: join(home, 'journal', 'state.jsonl'), warn }) : undefined
@@ -872,7 +875,7 @@ diff --git a/src/host/store.js b/src/host/store.js
          warnedReadOnly = false
          adopt(await readFileState())
          return
-@@ -235,10 +235,35 @@ export function install(rt) {
+@@ -235,11 +235,37 @@ export function install(rt) {
      return warnReadOnly()
    }
  
@@ -906,8 +909,10 @@ diff --git a/src/host/store.js b/src/host/store.js
 +      }
 +    }
      if (!writable()) return writing
++    queued += 1
      state.revision += 1
      state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
+     const snapshot = JSON.stringify(state, null, 2)
 @@ -260,9 +260,10 @@ export function install(rt) {
          ensureLock()
          await rename(temp, statePath)
@@ -920,10 +925,23 @@ diff --git a/src/host/store.js b/src/host/store.js
          throw error
        }
      })
-@@ -273,6 +273,17 @@ export function install(rt) {
+@@ -273,6 +273,30 @@ export function install(rt) {
      })
    }
  
++  // What the write chain holds, for a caller that must read state.json: `savesQueued` is a
++  // monotonic watermark — every save this host has accepted since it started, never decremented —
++  // and `savesSettled` resolves once the chain is empty. A test (or a caller finishing a rollback)
++  // otherwise has to guess a delay, and a delay long enough on an idle machine reads a half-written team on a busy one (#1368).
++  const savesQueued = () => queued
++  const savesSettled = async () => {
++    for (;;) {
++      const tail = writing
++      await tail
++      if (tail === writing) return
++    }
++  }
++
 +  // The write-path entry for a change made outside a request (a plugin, a scheduled task,
 +  // a delivery): take over the lock and adopt what the other host left *before* the change
 +  // is made, then write it. Adopting first is what keeps both sides: a change already in
@@ -965,7 +983,7 @@ diff --git a/src/host/store.js b/src/host/store.js
  
    Object.assign(rt, {
 -    state, load, save, refresh, readOnly,
-+    state, load, save, refresh, readOnly, mutate,
++    state, load, save, refresh, readOnly, mutate, savesQueued, savesSettled,
      botOf, roomOf, isMain, chatOf, selfOf, isBotSession,
      chatOwners, groupOwners, pastOwners,
      groupSessionsOf, dropGroupSession, findBot, findRooms, isAdminOf,
