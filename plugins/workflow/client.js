@@ -43,6 +43,10 @@ window.__ModuleLoader__.load({
       'Not started': '待办',
       'In progress': '进行中',
       'Close': '关闭',
+      Pause: '暂停',
+      Resume: '继续',
+      Stop: '停止',
+      Progress: '进度',
       'New workflow': '新建 Workflow',
       Name: '名称',
       'Add a Bot': '添加 Bot',
@@ -94,6 +98,19 @@ window.__ModuleLoader__.load({
       Role: '角色',
       Tools: '工具',
       'Inputs and outputs': '输入和输出',
+      Delete: '删除',
+      Rename: '重命名',
+      'Delete workflow': '删除 Workflow',
+      'Rename workflow': '重命名 Workflow',
+      'Are you sure you want to delete "{name}"? This cannot be undone.': '确定删除「{name}」？此操作无法撤销。',
+      'No open tasks on the Tasks board.': 'Tasks 看板上没有可分配的任务。',
+      'Could not rename this workflow': '无法重命名该 Workflow',
+      'Could not delete this workflow': '无法删除该 Workflow',
+      'Reading workflows…': '正在读取 Workflow…',
+      'Changes are saved automatically': '更改会自动保存',
+      'Next run: {time}': '下次运行：{time}',
+      'Step {step}': '步骤 {step}',
+      'Parallel branches · Merge after all pass': '并行分支 · 全部通过后汇合',
     }
 
     function zhUi() {
@@ -115,6 +132,46 @@ window.__ModuleLoader__.load({
     const COLUMN_KEY = { 'not-started': 'Not started', 'in-progress': 'In progress', done: 'Done' }
     const COLUMN_OF = { open: 'not-started', claimed: 'not-started', working: 'in-progress', blocked: 'in-progress', 'result-ready': 'in-progress', accepted: 'done', cancelled: 'done', failed: 'done' }
     const COLORS = { Planner: '#8b5cf6', Writer: '#f0509a', Coder: '#1fbf6a', Reviewer: '#f5a524', Tester: '#14b8a6', Deployer: '#2f7cf6', '研究员': '#a78bfa', '数据分析师': '#ec4899' }
+    // Zero-width plane center line: shift wire coordinates so strokes stay inside the SVG box.
+    const WIRE_SPAN = 480
+    const NODE_WIRE_OUT = 56
+    const NODE_W = 168
+    const NODE_H = 72
+
+    function workflowNodeIds(workflow) {
+      return new Set((workflow?.nodes ?? []).map(node => node.id))
+    }
+
+    function stageMessages(workflow, messages, roster) {
+      const nodeIds = workflowNodeIds(workflow)
+      const rosterIds = roster?.byId ? new Set(Object.keys(roster.byId)) : new Set()
+      return (messages ?? []).filter(message => {
+        if (message.kind !== 'bot') return true
+        if (rosterIds.has(message.botId)) return true
+        return !nodeIds.has(message.botId)
+      })
+    }
+
+    function useConversationInset() {
+      const [left, setLeft] = useState(() => conversationLeft())
+      useEffect(() => {
+        if (typeof document === 'undefined') return undefined
+        const sync = () => setLeft(conversationLeft())
+        sync()
+        globalThis.addEventListener?.('resize', sync)
+        let obs
+        if (typeof ResizeObserver !== 'undefined') {
+          obs = new ResizeObserver(sync)
+          const side = document.querySelector?.('.bt-side')
+          if (side) obs.observe(side)
+        }
+        return () => {
+          globalThis.removeEventListener?.('resize', sync)
+          obs?.disconnect?.()
+        }
+      }, [])
+      return left
+    }
 
     function columnOf(task) {
       if (task.column && COLUMN_KEY[task.column]) return task.column
@@ -132,12 +189,33 @@ window.__ModuleLoader__.load({
       if (text.startsWith('task-')) return `#${text.slice(-6)}`
       return text
     }
-    const FIXTURE_TASKS = [
-      { id: '#1280', title: '缩短交付组群 notice', column: 'in-progress', priority: 'P1' },
-      { id: '#1281', title: '发布说明：Workflow Beta 上线', column: 'not-started', priority: 'P1' },
-      { id: '#1276', title: '修复群聊 @ 提及跳转错位', column: 'not-started', priority: 'P2' },
-    ]
-
+    const CHAT_PREVIEW = 240
+    function taskSummary(task, run) {
+      if (run?.taskSummary) return run.taskSummary
+      const id = shortId(task?.id ?? '')
+      const title = String(task?.title ?? '').replace(/\s+/g, ' ').trim()
+      if (!id && !title) return ''
+      if (!title) return id
+      if (!id) return title.length > 72 ? `${title.slice(0, 69)}…` : title
+      // Remove issue number prefix from title if it duplicates the id
+      let cleanTitle = title
+      const issueMatch = title.match(/^issue\s+#?\d+\s*[:\-–—]\s*/i)
+      if (issueMatch && id) cleanTitle = title.slice(issueMatch[0].length)
+      const room = Math.max(24, 72 - id.length - 3)
+      const short = cleanTitle.length > room ? `${cleanTitle.slice(0, room - 1)}…` : cleanTitle
+      return `${id} · ${short}`
+    }
+    function chatPreview(text) {
+      const line = String(text ?? '').replace(/\s+/g, ' ').trim()
+      if (line.length <= CHAT_PREVIEW) return line
+      return `${line.slice(0, CHAT_PREVIEW - 1)}…`
+    }
+    function sidebarPreview(item) {
+      const busy = (item.activeCount ?? 0) > 0 && item.run?.live === true
+      if (busy) return item.preview || tr('Waiting for a task')
+      if (item.trigger === 'schedule' && item.scheduleLabel) return tr('Next run: {time}', { time: item.scheduleLabel })
+      return tr('Waiting for a task')
+    }
     function glyph() {
       return h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', 'aria-hidden': true },
         h('rect', { x: 9, y: 2, width: 6, height: 5, rx: 1.5 }),
@@ -154,24 +232,76 @@ window.__ModuleLoader__.load({
       return h('span', { className: 'wf-av', style: { background: color, width: size, height: size, fontSize: Math.max(11, size * 0.42) } }, (node?.name ?? '?').slice(0, 1))
     }
 
+    const BOT_TINTS = ['#4d6bfe', '#8b5cf6', '#14b8a6', '#f5a524', '#ec4899', '#1fbf6a', '#2f7cf6']
+    function botTint(bot) {
+      let hash = 0
+      for (const ch of String(bot?.id ?? bot?.name ?? '')) hash = (hash * 31 + ch.charCodeAt(0)) | 0
+      return BOT_TINTS[Math.abs(hash) % BOT_TINTS.length]
+    }
+
+    function botPaletteSubtitle(bot, peers) {
+      const role = String(bot?.role ?? '').replace(/\s+/g, ' ').trim()
+      const dupes = (peers ?? []).filter(item => item.name === bot.name).length > 1
+      if (role) return role.length > 28 ? `${role.slice(0, 27)}…` : role
+      if (dupes && bot?.id) return `…${String(bot.id).slice(-6)}`
+      return ''
+    }
+
+    function PaletteBotFace({ bot, size = 26 }) {
+      const Avatar = globalThis.__flybot__?.BotAvatar
+      if (typeof Avatar === 'function') return h(Avatar, { bot, size, badge: false, live: false })
+      const color = botTint(bot)
+      return h('span', {
+        className: 'wf-palette-av',
+        style: { background: color, width: size, height: size, fontSize: Math.max(11, size * 0.42) },
+      }, (bot?.name ?? '?').slice(0, 1))
+    }
+
+    function PaletteBotChip({ bot, peers, onPointerDown, dragging }) {
+      const sub = botPaletteSubtitle(bot, peers)
+      return h('button', {
+        type: 'button',
+        className: `wf-palette-bot${dragging ? ' dragging' : ''}`,
+        'data-bot': bot.id,
+        'aria-label': sub ? `${bot.name} · ${sub}` : bot.name,
+        onPointerDown,
+      },
+        h('span', { className: 'wf-palette-grip', 'aria-hidden': true }),
+        h(PaletteBotFace, { bot, size: 26 }),
+        h('span', { className: 'wf-palette-copy' },
+          h('span', { className: 'wf-palette-name' }, bot.name),
+          sub ? h('span', { className: 'wf-palette-sub' }, sub) : null))
+    }
+
     function nodeOf(workflow, id) {
       return workflow?.nodes?.find(node => node.id === id)
     }
 
-    function MiniFlowchart({ workflow }) {
+    function MiniFlowchart({ workflow, compact = false }) {
       const nodes = workflow?.nodes ?? []
       const edges = workflow?.edges ?? []
       if (nodes.length === 0) return null
       const layers = workflow?.layers ?? [[nodes[0]?.id]]
-      const width = 160
-      const nodeW = 32
-      const nodeH = 32
-      const spacing = 40
-      const layerSpacing = 48
-      const height = layers.length * layerSpacing + nodeH
-      return h('svg', { width, height, viewBox: `0 0 ${width} ${height}`, className: 'wf-mini-flow', 'aria-label': workflow.name },
+      const width = compact ? 28 : 160
+      const nodeW = compact ? 10 : 32
+      const nodeH = compact ? 10 : 32
+      const spacing = compact ? 14 : 40
+      const layerSpacing = compact ? 14 : 48
+      const height = compact ? 28 : layers.length * layerSpacing + nodeH
+      const viewW = compact ? 28 : width
+      const viewH = compact ? 28 : height
+      const markerId = compact ? 'wf-mini-arrow-c' : 'wf-mini-arrow'
+      return h('svg', {
+        width: compact ? '100%' : width,
+        height: compact ? '100%' : height,
+        viewBox: `0 0 ${viewW} ${viewH}`,
+        preserveAspectRatio: 'xMidYMid meet',
+        className: compact ? 'wf-mini-flow wf-mini-flow-compact' : 'wf-mini-flow',
+        'aria-hidden': compact ? true : undefined,
+        'aria-label': compact ? undefined : workflow.name,
+      },
         h('defs', null,
-          h('marker', { id: 'wf-mini-arrow', viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: '4', markerHeight: '4', orient: 'auto' },
+          h('marker', { id: markerId, viewBox: '0 0 10 10', refX: '8', refY: '5', markerWidth: compact ? '3' : '4', markerHeight: compact ? '3' : '4', orient: 'auto' },
             h('path', { d: 'M0 0 10 5 0 10z', fill: 'var(--bt-ink-3, #9a9a9a)' }))),
         edges.map(edge => {
           const fromIdx = layers.findIndex(layer => layer.includes(edge.from))
@@ -181,131 +311,132 @@ window.__ModuleLoader__.load({
           const toLayer = layers[toIdx]
           const fromPos = fromLayer.indexOf(edge.from)
           const toPos = toLayer.indexOf(edge.to)
-          const x1 = width / 2 + (fromPos - (fromLayer.length - 1) / 2) * spacing
+          const midX = viewW / 2
+          const x1 = midX + (fromPos - (fromLayer.length - 1) / 2) * spacing
           const y1 = fromIdx * layerSpacing + nodeH
-          const x2 = width / 2 + (toPos - (toLayer.length - 1) / 2) * spacing
+          const x2 = midX + (toPos - (toLayer.length - 1) / 2) * spacing
           const y2 = toIdx * layerSpacing
           return h('path', {
             key: `${edge.from}>${edge.to}`,
             d: `M ${x1} ${y1} L ${x2} ${y2}`,
             stroke: 'var(--bt-ink-3, #9a9a9a)',
-            strokeWidth: 1,
+            strokeWidth: compact ? 1.2 : 1,
             fill: 'none',
-            markerEnd: 'url(#wf-mini-arrow)'
+            markerEnd: `url(#${markerId})`,
           })
         }),
         layers.map((layer, layerIdx) => layer.map((nodeId, pos) => {
           const node = nodeOf(workflow, nodeId)
           if (!node) return null
-          const x = width / 2 + (pos - (layer.length - 1) / 2) * spacing - nodeW / 2
+          const x = viewW / 2 + (pos - (layer.length - 1) / 2) * spacing - nodeW / 2
           const y = layerIdx * layerSpacing
           const color = COLORS[node.name] ?? '#4d6bfe'
           return h('g', { key: nodeId },
             h('rect', {
-              x, y, width: nodeW, height: nodeH, rx: 6,
+              x, y, width: nodeW, height: nodeH, rx: compact ? 2 : 6,
               fill: color,
               opacity: 0.15,
               stroke: color,
-              strokeWidth: 1
+              strokeWidth: 1,
             }),
-            h('text', {
+            compact ? null : h('text', {
               x: x + nodeW / 2,
               y: y + nodeH / 2 + 1,
               textAnchor: 'middle',
               dominantBaseline: 'middle',
               fill: color,
               fontSize: 12,
-              fontWeight: 600
+              fontWeight: 600,
             }, (node.name ?? '?').slice(0, 1)))
         })))
     }
 
-    // Stage: reuse normal FlyBot conversation UI instead of custom card style
-    function Stage({ workflow, roster, drawer, tab, draft, onDraft, onCloseDrawer, onToggleDrawer, onTab, onAssign, onSend, onTip, onReset, editing, onToggleEdit, onCommit }) {
+    function RunStrip({ workflow, run, focused, onFocus, onPause, onResume, onStop, onTab, onOpenDrawer }) {
+      const running = (run.running ?? []).map(id => nodeOf(workflow, id)).filter(Boolean)
+      const chipClass = run.status === 'done' ? 'done' : (run.status === 'failed' ? 'failed' : (run.paused ? 'queued' : (running[0] ? 'running' : 'queued')))
+      const chipLabel = run.status === 'done' ? tr('Done') : (run.status === 'failed' ? tr('Failed') : (run.paused ? tr('Pause') : (running[0] ? tr('Running') : tr('Queued'))))
+      const meta = run.paused
+        ? `${tr('Pause')} · ${running.map(node => node.name).join(' ‖ ') || '—'} · ${run.doneCount}/${run.nodeCount}`
+        : (running[0]
+          ? `${tr('Running')} · ${running.map(node => node.name).join(' ‖ ')} · ${run.doneCount}/${run.nodeCount}`
+          : (run.status === 'done' ? tr('Done') : tr('Waiting for a task')))
+      const focus = () => onFocus?.(run.id)
+      const stopBubble = (event) => { event?.stopPropagation?.() }
+      return h('div', {
+        className: `wf-strip ${focused ? 'wf-strip-focus' : ''}`,
+        'data-run-id': run.id,
+        role: 'button',
+        tabIndex: 0,
+        onClick: focus,
+        onKeyDown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); focus() } },
+      },
+        h('div', { className: 'wf-strip-head' },
+          h('div', { className: 'wf-strip-id' },
+            h('div', { className: 'wf-tk', title: run.task?.title ?? '' }, taskSummary(run.task, run)),
+            h('div', { className: 'wf-meta' }, meta)),
+          h('span', { className: `wf-chip ${chipClass}` }, chipLabel)),
+        h('div', { className: 'wf-strip-progress', 'aria-label': tr('Progress'), title: tr('Progress') },
+          h('div', { className: 'wf-segs' }, (run.marks ?? []).map((mark, index) => h('span', { key: index, className: `wf-seg ${mark}` })))),
+        h('div', { className: 'wf-strip-actions' },
+          run.status === 'running' ? (run.paused
+            ? h('button', { type: 'button', className: 'wf-btn wf-sm wf-pri', onClick: (event) => { stopBubble(event); onResume?.(run.id) } }, tr('Resume'))
+            : h('button', { type: 'button', className: 'wf-btn wf-sm', onClick: (event) => { stopBubble(event); onPause?.(run.id) } }, tr('Pause'))) : null,
+          run.status === 'running' ? h('button', { type: 'button', className: 'wf-btn wf-sm wf-danger-outline', onClick: (event) => { stopBubble(event); onStop?.(run.id) } }, tr('Stop')) : null,
+          h('button', { type: 'button', className: 'wf-btn wf-sm', onClick: (event) => { stopBubble(event); focus(); onOpenDrawer?.(); onTab('runs') } }, tr('Progress')),
+          h('button', { type: 'button', className: 'wf-btn wf-sm', onClick: (event) => { stopBubble(event); focus(); onOpenDrawer?.(); onTab('flow') } }, tr('Flow'))))
+    }
+
+    // Stage: view/control only — progress and flowchart; no message composer (#1459).
+    function Stage({ workflow, roster, stageLeft, drawer, tab, focusedRunId, onFocusRun, onCloseDrawer, onToggleDrawer, onOpenDrawer, onTab, onAssign, onTip, onReset, editing, onToggleEdit, onCommit, onPause, onResume, onStop }) {
       const chatRef = useRef(null)
-      const run = workflow.run
+      const liveRuns = liveStageRuns(workflow)
+      const viewRun = resolveFocusedRun(workflow, focusedRunId)
+      const showSummary = (workflow.queueDepth ?? 0) > 0 || liveRuns.length > 1
       useEffect(() => {
         const el = chatRef.current
         if (el) el.scrollTop = el.scrollHeight
       }, [workflow.messages.length])
-      const running = (run?.running ?? []).map(id => nodeOf(workflow, id)).filter(Boolean)
-      const Conversation = globalThis.__flybot__?.Conversation
-      const ConversationHeader = globalThis.__flybot__?.ConversationHeader
-      
-      // Use normal conversation components if available
-      if (typeof Conversation === 'function' && typeof ConversationHeader === 'function') {
-        const messages = workflow.messages.map(msg => ({
-          id: msg.id,
-          role: msg.kind === 'user' ? 'user' : msg.kind === 'system' ? 'system' : 'assistant',
-          sender: msg.botId ? { id: msg.botId, name: nodeOf(workflow, msg.botId)?.name } : { id: workflow.id, name: workflow.name },
-          text: msg.text,
-          timestamp: msg.timestamp
-        }))
-        
-        return h('div', { className: 'wf-stage', style: { left: conversationLeft() } },
-          h(ConversationHeader, {
-            title: workflow.name,
-            subtitle: run?.task ? `${run.task.id} ${run.task.title}` : tr('Waiting for a task'),
-            onAction: onToggleDrawer
-          }),
-          h(Conversation, {
-            messages,
-            onSend: (text) => { onDraft(text); onSend() }
-          }))
-      }
-      
-      // Fallback to simplified conversation-style UI
-      return h('div', { className: 'wf-stage', style: { left: conversationLeft() } },
+      const visible = stageMessages(workflow, workflow.messages, roster)
+      return h('div', { className: 'wf-stage', style: { left: stageLeft } },
         h('div', { className: 'wf-main' },
           h('div', { className: 'wf-top' },
             h('button', { type: 'button', className: 'wf-pill', onClick: onToggleDrawer },
-              h(MiniFlowchart, { workflow }),
+              h('span', { className: 'wf-pill-thumb' }, h(MiniFlowchart, { workflow, compact: true })),
               h('span', { className: 'wf-pill-name' }, workflow.name),
               h('span', { className: 'wf-chev', 'aria-hidden': true }, '▾')),
             h('div', { className: 'wf-actions' },
               h('button', { type: 'button', className: 'wf-btn wf-pri', onClick: onAssign }, tr('Hand a task to a Workflow')))),
-          run ? h('div', { className: 'wf-strip' },
-            h('div', { className: 'wf-strip-id' },
-              h('div', { className: 'wf-tk' }, `${run.task?.id ?? ''} ${run.task?.title ?? ''}`),
-              h('div', { className: 'wf-meta' }, running[0]
-                ? `${tr('Running')} · ${running.map(node => node.name).join(' ‖ ')} · ${run.doneCount}/${run.nodeCount}`
-                : (run.status === 'done' ? tr('Done') : tr('Waiting for a task')))),
-            h('div', { className: 'wf-segs' }, (run.marks ?? []).map((mark, index) => h('span', { key: index, className: `wf-seg ${mark}` }))),
-            h('span', { className: `wf-chip ${run.status === 'done' ? 'done' : (running[0] ? 'running' : 'queued')}` }, run.status === 'done' ? tr('Done') : (running[0] ? tr('Running') : tr('Queued'))),
-            (workflow.queueDepth > 0 || (workflow.activeCount ?? 0) > 1) ? h('span', { className: 'wf-chip queued' }, tr('{count} running · queue {depth}', { count: workflow.activeCount ?? 0, depth: workflow.queueDepth ?? 0 })) : null,
-            h('button', { type: 'button', className: 'wf-btn wf-sm', onClick: () => onTab('flow') }, tr('Flow'))) : null,
-          h('div', { className: 'wf-chat', ref: chatRef },
+          showSummary ? h('div', { className: 'wf-strip wf-strip-summary' },
+            h('span', { className: 'wf-chip queued' }, tr('{count} running · queue {depth}', { count: workflow.activeCount ?? liveRuns.length, depth: workflow.queueDepth ?? 0 }))) : null,
+          liveRuns.length > 0 ? h('div', { className: 'wf-strips' },
+            liveRuns.map(run => h(RunStrip, {
+              key: run.id, workflow, run, focused: viewRun?.id === run.id,
+              onFocus: onFocusRun, onPause, onResume, onStop, onTab, onOpenDrawer,
+            }))) : null,
+          visible.length > 0 ? h('div', { className: 'wf-chat', ref: chatRef },
             h('div', { className: 'wf-chat-in' },
-              workflow.messages.map(message => h(Bubble, { key: message.id, message, workflow, roster })))),
-          h('div', { className: 'wf-composer-wrap' },
-            h('form', { className: 'wf-composer', onSubmit: (event) => { event.preventDefault(); onSend() } },
-              h('input', {
-                value: draft, placeholder: `${tr('Message the workflow')} ${workflow.name}`,
-                onChange: (event) => onDraft(event.target.value),
-              }),
-              h('button', { type: 'submit', className: 'wf-mic', 'aria-label': tr('Assign') }, '↑')),
-            h('div', { className: 'wf-under' }, run ? `运行 ${run.steps}/${run.stepBudget} 步 · 已完成 ${run.doneCount} 个节点` : null))),
+              visible.map(message => h(Bubble, { key: message.id, message, workflow, roster })))) : null),
         drawer ? h('aside', { className: 'wf-drawer' },
           h('div', { className: 'wf-dr-head' },
             h('button', { type: 'button', className: 'wf-icon', 'aria-label': tr('Close'), onClick: onCloseDrawer }, '×')),
-          h(DrawerBody, { workflow, roster, tab, onTab, onReset, onTip, editing, onToggleEdit, onCommit })) : null)
+          h(DrawerBody, { workflow, roster, tab, onTab, onReset, onTip, editing, onToggleEdit, onCommit, viewRun })) : null)
     }
 
     function Bubble({ message, workflow, roster }) {
       if (message.kind === 'time') return h('div', { className: 'wf-ts' }, message.text)
-      if (message.kind === 'system') return h('div', { className: `wf-sys ${message.tone ?? ''}` }, message.text)
-      if (message.kind === 'user') return h('div', { className: 'wf-user' }, message.text)
+      if (message.kind === 'system') return h('div', { className: `wf-sys ${message.tone ?? ''}`, title: message.text }, chatPreview(message.text))
+      if (message.kind === 'user') return h('div', { className: 'wf-user', title: message.text }, chatPreview(message.text))
       const node = nodeOf(workflow, message.botId) ?? { id: message.botId, name: message.botId }
       return h('div', { className: 'wf-msg' },
         h(Mark, { node, roster, size: 28 }),
         h('div', null,
-          h('div', { className: 'wf-who' }, node.name, message.step ? h('span', { className: 'wf-step' }, `步骤 ${message.step}`) : null),
-          h('div', { className: 'wf-bub' }, message.text,
+          h('div', { className: 'wf-who' }, node.name, message.step ? h('span', { className: 'wf-step' }, tr('Step {step}', { step: message.step })) : null),
+          h('div', { className: 'wf-bub', title: message.text }, chatPreview(message.text),
             message.attachments?.length ? h('div', { className: 'wf-att' }, message.attachments.map(name => h('span', { key: name }, name))) : null)))
     }
 
-    function DrawerBody({ workflow, roster, tab, onTab, onReset, onTip, editing, onToggleEdit, onCommit }) {
-      const run = workflow.run
+    function DrawerBody({ workflow, roster, tab, onTab, onReset, onTip, editing, onToggleEdit, onCommit, viewRun }) {
+      const run = viewRun?.live === true ? viewRun : null
       return h('div', { className: 'wf-dr-body' },
         h('div', { className: 'wf-dr-title' },
           h('div', { className: 'wf-ico wf-ico-lg' }, glyph()),
@@ -337,17 +468,77 @@ window.__ModuleLoader__.load({
     }
 
     function wirePath(from, to) {
-      const x1 = from.x
-      const y1 = from.y + 58
-      const x2 = to.x
-      const y2 = to.y
-      const mid = (y1 + y2) / 2
-      return `M ${x1} ${y1} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}`
+      const x1 = (from.x ?? 0) + WIRE_SPAN
+      const y1 = (from.y ?? 0) + NODE_WIRE_OUT
+      const x2 = (to.x ?? 0) + WIRE_SPAN
+      const y2 = to.y ?? 0
+      if (Math.abs(x1 - x2) < 0.5) {
+        const mid = (y1 + y2) / 2
+        return `M ${x1} ${y1} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}`
+      }
+      const midY = Math.round((y1 + y2) / 2)
+      return `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`
+    }
+
+    function parallelFrameStyle(members) {
+      const minX = Math.min(...members.map(node => node.x ?? 0))
+      const maxX = Math.max(...members.map(node => node.x ?? 0))
+      const minY = Math.min(...members.map(node => node.y ?? 0))
+      const maxY = Math.max(...members.map(node => (node.y ?? 0) + NODE_H))
+      const pad = 10
+      return {
+        left: minX - NODE_W / 2 - pad,
+        top: minY - 20,
+        width: maxX - minX + NODE_W + pad * 2,
+        height: maxY - minY + pad,
+      }
+    }
+
+    function liveStageRuns(workflow) {
+      let liveRuns = (workflow.runs ?? []).filter(run => run?.live === true && (run.status === 'running' || run.status === 'failed'))
+      if (liveRuns.length === 0 && workflow.run?.live === true && (workflow.run.status === 'running' || workflow.run.status === 'failed')) {
+        liveRuns = [workflow.run]
+      }
+      return liveRuns
+    }
+
+    function resolveFocusedRun(workflow, focusedRunId) {
+      const live = liveStageRuns(workflow)
+      if (focusedRunId) {
+        const picked = live.find(run => run.id === focusedRunId)
+        if (picked) return picked
+      }
+      if (workflow.run?.live === true && (workflow.run.status === 'running' || workflow.run.status === 'failed')) return workflow.run
+      return live[0] ?? null
+    }
+
+    function runHistoryRows(workflow) {
+      const history = workflow.history ?? []
+      const queued = workflow.queue ?? []
+      const liveRuns = liveStageRuns(workflow)
+      if (liveRuns.length === 0 && history.length === 0 && queued.length === 0) return null
+      const rows = liveRuns.map(run => ({
+        task: run.task,
+        status: 'running',
+        current: workflow.run?.id === run.id,
+      }))
+      for (const task of queued) rows.push({ task, status: 'queued', current: false })
+      for (const item of history) rows.push({ ...item, current: false })
+      return rows
+    }
+
+    function wireSvgProps(height) {
+      return {
+        width: WIRE_SPAN * 2,
+        height,
+        viewBox: `0 0 ${WIRE_SPAN * 2} ${height}`,
+      }
     }
 
     function Flow({ workflow, run, roster, onTip, editing, onCommit }) {
       const [gesture, setGesture] = useState(null)
       const [ghost, setGhost] = useState(null)
+      const [dragPreview, setDragPreview] = useState(null)
       const [selectedNode, setSelectedNode] = useState(null)
       const status = run?.nodeStatus ?? {}
       const nodes = workflow.nodes.map(node => ghost?.[node.id] ? { ...node, ...ghost[node.id] } : node)
@@ -357,11 +548,17 @@ window.__ModuleLoader__.load({
       const selected = nodes.find(node => node.id === selectedNode)
       const commit = (nextNodes, nextEdges) => onCommit?.({ nodes: nextNodes, edges: nextEdges })
       const movePointer = (event) => {
-        if (!gesture || gesture.kind !== 'move') return
+        if (!gesture) return
+        if (gesture.kind === 'add') {
+          setDragPreview({ x: event.clientX, y: event.clientY })
+          return
+        }
+        if (gesture.kind !== 'move') return
         setGhost({ [gesture.id]: { x: Math.round(gesture.x + event.clientX - gesture.ox), y: Math.round(gesture.y + event.clientY - gesture.oy) } })
       }
       const endPointer = (event) => {
         if (!gesture) return
+        setDragPreview(null)
         const hit = hitNode(event)
         if (gesture.kind === 'move' && ghost?.[gesture.id]) {
           commit(nodes.map(node => node.id === gesture.id ? { ...node, ...ghost[gesture.id] } : node), edges)
@@ -383,16 +580,29 @@ window.__ModuleLoader__.load({
       const updateNode = (nodeId, updates) => {
         commit(nodes.map(item => item.id === nodeId ? { ...item, ...updates } : item), edges)
       }
-      return h('div', { className: 'wf-canvas', onPointerMove: movePointer, onPointerUp: endPointer },
+      return h('div', { className: 'wf-canvas', onPointerMove: movePointer, onPointerUp: endPointer, onPointerCancel: () => { setGesture(null); setGhost(null); setDragPreview(null) } },
         editing ? h('div', { className: 'wf-palette' },
-          h('div', { className: 'wf-muted' }, tr('Drag a Bot here')),
-          locals.map(bot => h('button', {
-            key: bot.id, type: 'button', className: 'wf-chip', 'data-bot': bot.id,
-            onPointerDown: (event) => { event.preventDefault?.(); setGesture({ kind: 'add', bot }) },
-          }, bot.name))) : null,
-        h('div', { className: 'wf-term' }, run?.task ? `${run.task.id} ${run.task.title}` : tr('Waiting for a task')),
+          h('p', { className: 'wf-palette-hint' }, tr('Drag a Bot here')),
+          h('div', { className: 'wf-palette-row' },
+            locals.map(bot => h(PaletteBotChip, {
+              key: bot.id,
+              bot,
+              peers: locals,
+              dragging: gesture?.kind === 'add' && gesture.bot?.id === bot.id,
+              onPointerDown: (event) => {
+                event.preventDefault?.()
+                setGesture({ kind: 'add', bot })
+                setDragPreview({ x: event.clientX, y: event.clientY })
+              },
+            })))) : null,
+        gesture?.kind === 'add' && dragPreview ? h('div', {
+          className: 'wf-drag-ghost',
+          style: { left: dragPreview.x + 10, top: dragPreview.y + 10 },
+          'aria-hidden': true,
+        }, h(PaletteBotFace, { bot: gesture.bot, size: 24 }), h('span', { className: 'wf-drag-ghost-name' }, gesture.bot?.name ?? '')) : null,
+        run ? h('div', { className: 'wf-term', title: run.task?.title ?? '' }, taskSummary(run.task, run)) : null,
         h('div', { className: 'wf-plane', 'data-plane': '1', style: { height } },
-          h('svg', { className: 'wf-wires', 'aria-hidden': true },
+          h('svg', { className: 'wf-wires', 'aria-hidden': true, ...wireSvgProps(height) },
             edges.map(edge => {
               const from = nodes.find(node => node.id === edge.from)
               const to = nodes.find(node => node.id === edge.to)
@@ -408,13 +618,10 @@ window.__ModuleLoader__.load({
           (workflow.layers ?? []).filter(layer => layer.length > 1).map(layer => {
             const members = layer.map(id => nodes.find(node => node.id === id)).filter(Boolean)
             if (members.length < 2) return null
-            const minX = Math.min(...members.map(node => node.x))
-            const maxX = Math.max(...members.map(node => node.x))
-            const y = Math.min(...members.map(node => node.y))
             return h('div', {
               key: layer.join('+'), className: 'wf-par wf-abs',
-              style: { left: minX - 108, top: y - 18, width: maxX - minX + 216, height: 92 },
-            }, h('div', { className: 'wf-plabel' }, '并行分支 · 全部通过后汇合'))
+              style: parallelFrameStyle(members),
+            }, h('div', { className: 'wf-plabel' }, tr('Parallel branches · Merge after all pass')))
           }),
           nodes.map(node => h('div', {
             key: node.id,
@@ -426,8 +633,8 @@ window.__ModuleLoader__.load({
               if (!editing || event.target?.dataset?.port || event.target?.dataset?.remove) return
               setGesture({ kind: 'move', id: node.id, ox: event.clientX, oy: event.clientY, x: node.x, y: node.y })
             },
-            onMouseEnter: (event) => onTip?.({ x: event.clientX, y: event.clientY, node }),
-            onMouseLeave: () => onTip?.(null),
+            onMouseEnter: editing ? (event) => onTip?.({ x: event.clientX, y: event.clientY, node }) : null,
+            onMouseLeave: editing ? () => onTip?.(null) : null,
           },
             editing ? h('button', {
               type: 'button', className: 'wf-port out', 'data-port': 'out', 'aria-label': node.name,
@@ -456,13 +663,13 @@ window.__ModuleLoader__.load({
     }
 
     function FlowNode({ node, status, roster }) {
-      return [
-        h('span', { className: `wf-chip ${status}` }, tr(STATUS_KEY[status] ?? 'Idle')),
+      return h('div', { className: 'wf-node-row' },
         h(Mark, { node, roster, size: 28 }),
         h('span', { className: 'wf-nt' },
-          h('span', { className: 'wf-nm' }, node.name),
-          h('span', { className: 'wf-rl' }, node.role)),
-      ]
+          h('span', { className: 'wf-nm' },
+            node.name,
+            h('span', { className: `wf-chip wf-chip-inline ${status}` }, tr(STATUS_KEY[status] ?? 'Idle'))),
+          h('span', { className: 'wf-rl' }, node.role)))
     }
 
     function Details({ workflow }) {
@@ -480,22 +687,51 @@ window.__ModuleLoader__.load({
     }
 
     function Runs({ workflow }) {
-      const history = workflow.history ?? workflow.run?.history ?? []
-      const queued = workflow.queue ?? []
-      const current = workflow.run?.task
-      if (!current && history.length === 0 && queued.length === 0) return h('div', { className: 'wf-muted' }, tr('No runs yet.'))
-      const rows = history.map(item => ({ ...item, current: false }))
-      for (const task of queued) rows.push({ task, status: 'queued', current: false })
-      if (current && !rows.some(item => item.task?.id === current.id && item.status === workflow.run.status)) rows.push({ task: current, status: workflow.run.status, current: true })
+      const rows = runHistoryRows(workflow)
+      if (!rows) return h('div', { className: 'wf-muted' }, tr('No runs yet.'))
       return h('div', null, rows.map((item, index) => h('div', { key: index, className: 'wf-hist' },
-        h('span', null, `${item.task?.id ?? ''} ${item.task?.title ?? ''}`),
+        h('span', { title: item.task?.title ?? '' }, taskSummary(item.task, item)),
         h('span', { className: `wf-chip ${item.status === 'done' ? 'done' : item.status === 'running' ? 'running' : item.status === 'failed' ? 'failed' : 'queued'}` }, tr(item.status === 'done' ? 'Done' : item.status === 'running' ? 'Running' : item.status === 'failed' ? 'Failed' : 'Queued')))))
     }
 
+    function RenameModal({ workflow, onClose, onConfirm }) {
+      const [name, setName] = useState(workflow?.name ?? '')
+      return h('div', { className: 'wf-mask', onClick: (event) => { if (event.target === event.currentTarget) onClose() } },
+        h('div', { className: 'wf-modal', role: 'dialog', 'aria-modal': true, 'aria-label': tr('Rename workflow') },
+          h('div', { className: 'wf-modal-header' },
+            h('h3', null, tr('Rename workflow'),
+              h('button', { type: 'button', className: 'wf-icon', 'aria-label': tr('Close'), onClick: onClose }, '×'))),
+          h('div', { className: 'wf-modal-body' },
+            h('label', { className: 'wf-field' }, tr('Name'),
+              h('input', { value: name, onChange: (event) => setName(event.target.value) }))),
+          h('div', { className: 'wf-modal-footer' },
+            h('button', { type: 'button', className: 'wf-btn', onClick: onClose }, tr('Cancel')),
+            h('button', { type: 'button', className: 'wf-btn wf-dark', onClick: () => onConfirm?.(name) }, tr('Rename')))))
+    }
+
+    function DeleteModal({ workflow, onClose, onConfirm }) {
+      return h('div', { className: 'wf-mask', onClick: (event) => { if (event.target === event.currentTarget) onClose() } },
+        h('div', { className: 'wf-modal', role: 'dialog', 'aria-modal': true, 'aria-label': tr('Delete workflow') },
+          h('div', { className: 'wf-modal-header' },
+            h('h3', null, tr('Delete workflow'),
+              h('button', { type: 'button', className: 'wf-icon', 'aria-label': tr('Close'), onClick: onClose }, '×'))),
+          h('div', { className: 'wf-modal-body' },
+            h('p', { className: 'wf-hint' }, tr('Are you sure you want to delete "{name}"? This cannot be undone.', { name: workflow?.name ?? '' }))),
+          h('div', { className: 'wf-modal-footer' },
+            h('button', { type: 'button', className: 'wf-btn', onClick: onClose }, tr('Cancel')),
+            h('button', { type: 'button', className: 'wf-btn wf-danger', onClick: onConfirm }, tr('Delete')))))
+    }
+
     function AssignModal({ workflows, tasks, roster, workflowId, onClose, onConfirm }) {
-      const [taskId, setTaskId] = useState(tasks[1]?.id ?? tasks[0]?.id ?? '')
+      const [taskId, setTaskId] = useState(tasks[0]?.id ?? '')
       const [target, setTarget] = useState(workflowId || workflows[0]?.id || '')
-      const bots = (roster?.bots ?? []).filter(bot => bot && bot.remote !== true && bot.id && bot.name).slice(0, 12)
+      const seen = new Set()
+      const bots = (roster?.bots ?? []).filter(bot => {
+        if (!bot || bot.remote === true || !bot.id || !bot.name) return false
+        if (seen.has(bot.name)) return false
+        seen.add(bot.name)
+        return true
+      }).slice(0, 12)
       return h('div', { className: 'wf-mask', onClick: (event) => { if (event.target === event.currentTarget) onClose() } },
         h('div', { className: 'wf-modal', role: 'dialog', 'aria-modal': true, 'aria-label': tr('Hand a task to a Workflow') },
           h('div', { className: 'wf-modal-header' },
@@ -504,18 +740,20 @@ window.__ModuleLoader__.load({
             h('p', { className: 'wf-hint' }, tr('A task can go to a Workflow, not only to one Bot. The Workflow then runs each Bot in order, or side by side.'))),
           h('div', { className: 'wf-modal-body' },
             h('div', { className: 'wf-step-h' }, h('b', null, '1'), tr('Pick a task card')),
-            h('div', { className: 'wf-cards' }, tasks.map(task => h('button', {
-              key: task.id, type: 'button', className: `wf-kcard ${taskId === task.id ? 'sel' : ''}`, onClick: () => setTaskId(task.id),
-            },
-              h('div', { className: 'wf-id' }, `${shortId(task.id)} · ${priorityOf(task)}`),
-              h('div', { className: 'wf-tt' }, task.title),
-              h('div', { className: 'wf-kcol' }, `● ${tr(COLUMN_KEY[columnOf(task)] ?? 'Not started')}`)))),
+            tasks.length === 0
+              ? h('div', { className: 'wf-muted wf-cards-empty' }, tr('No open tasks on the Tasks board.'))
+              : h('div', { className: 'wf-cards' }, tasks.map(task => h('button', {
+                key: task.id, type: 'button', className: `wf-kcard ${taskId === task.id ? 'sel' : ''}`, onClick: () => setTaskId(task.id),
+              },
+                h('div', { className: 'wf-id' }, `${shortId(task.id)} · ${priorityOf(task)}`),
+                h('div', { className: 'wf-tt' }, task.title),
+                h('div', { className: 'wf-kcol' }, `● ${tr(COLUMN_KEY[columnOf(task)] ?? 'Not started')}`)))),
             h('div', { className: 'wf-step-h' }, h('b', null, '2'), tr('Pick who runs it')),
             h('div', { className: 'wf-targets' },
               workflows.map(item => h('button', {
                 key: item.id, type: 'button', className: `wf-tgt ${target === item.id ? 'sel' : ''}`, onClick: () => setTarget(item.id),
               },
-                h(MiniFlowchart, { workflow: item, roster }),
+                h('span', { className: 'wf-tgt-thumb' }, h(MiniFlowchart, { workflow: item, roster, compact: true })),
                 h('span', null,
                   h('span', { className: 'wf-t1' }, item.name, h('span', { className: 'wf-badge' }, tr('Workflow'))),
                   h('span', { className: 'wf-chain' }, item.chain)),
@@ -585,11 +823,14 @@ window.__ModuleLoader__.load({
       const [selectedNode, setSelectedNode] = useState(null)
       const [editing, setEditing] = useState(false)
       const [error, setError] = useState('')
+      const [loading, setLoading] = useState(true)
       
       useEffect(() => {
         let gone = false
+        setLoading(true)
         void Promise.resolve(call('workflow/state')).then(value => {
           if (gone) return
+          setLoading(false)
           if (value && Array.isArray(value.workflows)) {
             setPack(value)
             const first = value.workflows[0]
@@ -635,7 +876,8 @@ window.__ModuleLoader__.load({
       
       return h('div', { className: 'wf-settings-canvas', 'data-flybot': 'workflow-settings' },
         error ? h('div', { className: 'wf-err', role: 'alert' }, error) : null,
-        workflows.length === 0 ? h('div', { className: 'wf-muted' }, tr('No workflows yet.')) : null,
+        loading ? h('div', { className: 'wf-muted' }, tr('Reading workflows…')) : null,
+        !loading && workflows.length === 0 ? h('div', { className: 'wf-muted' }, tr('No workflows yet.')) : null,
         current ? h('div', { className: 'wf-settings-layout' },
           h('div', { className: 'wf-settings-header' },
             h('label', { className: 'wf-field' },
@@ -645,16 +887,18 @@ window.__ModuleLoader__.load({
                 onChange: (event) => { setWorkflowId(event.target.value); setSelectedNode(null) },
               }, workflows.map(item => h('option', { key: item.id, value: item.id }, item.name)))),
             h('button', { type: 'button', className: 'wf-btn', onClick: () => setEditing(!editing) },
-              editing ? tr('Finish editing') : tr('Edit'))),
+              editing ? tr('Finish editing') : tr('Edit')),
+            editing ? h('span', { className: 'wf-autosave-hint' }, tr('Changes are saved automatically')) : null),
           h('div', { className: 'wf-canvas-main' },
             h(GraphCanvas, {
               workflow: current,
               editing,
               selectedNode,
               onSelectNode: setSelectedNode,
-              onCommit: ({ nodes, edges }) => save(nodes, edges)
+              onCommit: ({ nodes, edges }) => save(nodes, edges),
+              roster: pack?.roster
             })),
-          selected ? h('div', { className: 'wf-inspector' },
+          editing && selected ? h('div', { className: 'wf-inspector' },
             h('h3', null, tr('Node settings')),
             h('div', { className: 'wf-inspector-content' },
               h('label', { className: 'wf-field' },
@@ -676,9 +920,8 @@ window.__ModuleLoader__.load({
                   value: (selected.tools ?? []).join(', '),
                   placeholder: 'github, bash, read, edit...',
                   onChange: (event) => updateNode(selected.id, { tools: event.target.value.split(',').map(s => s.trim()).filter(Boolean) }),
-                })))) : h('div', { className: 'wf-inspector wf-inspector-empty' },
-            h('p', null, tr('Select a node to edit'))),
-          nodes.length >= 2 ? h('div', { className: 'wf-edge-form' },
+                })))) : null,
+          editing && nodes.length >= 2 ? h('div', { className: 'wf-edge-form' },
             h('h3', null, tr('Add link')),
             h('div', { className: 'wf-edge-fields' },
               h('label', { className: 'wf-field' },
@@ -727,11 +970,13 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', onClick: addEdge }, tr('Add link')))) : null) : null)
     }
 
-    function GraphCanvas({ workflow, editing, selectedNode, onSelectNode, onCommit }) {
+    function GraphCanvas({ workflow, editing, selectedNode, onSelectNode, onCommit, roster }) {
       const [gesture, setGesture] = useState(null)
       const nodes = workflow?.nodes ?? []
       const edges = workflow?.edges ?? []
       const height = Math.max(420, ...nodes.map(node => (node.y ?? 0) + 150), 0)
+      const run = workflow?.run?.live === true ? workflow.run : null
+      const status = run?.nodeStatus ?? {}
       
       const commit = (nextNodes, nextEdges) => onCommit?.({ nodes: nextNodes, edges: nextEdges })
       
@@ -758,7 +1003,7 @@ window.__ModuleLoader__.load({
       
       return h('div', { className: 'wf-canvas-view', onPointerMove: movePointer, onPointerUp: endPointer },
         h('div', { className: 'wf-plane', 'data-plane': '1', style: { height } },
-          h('svg', { className: 'wf-wires', 'aria-hidden': true },
+          h('svg', { className: 'wf-wires', 'aria-hidden': true, ...wireSvgProps(height) },
             edges.map(edge => {
               const from = nodes.find(node => node.id === edge.from)
               const to = nodes.find(node => node.id === edge.to)
@@ -788,7 +1033,7 @@ window.__ModuleLoader__.load({
                 setGesture({ kind: 'wire', from: node.id })
               },
             }) : null,
-            h(FlowNode, { node, status: 'idle', roster: {} })))))
+            h(FlowNode, { node, status: status[node.id] ?? 'idle', roster: roster ?? {} })))))
     }
 
     function conversationLeft() {
@@ -805,11 +1050,15 @@ window.__ModuleLoader__.load({
       const [tab, setTab] = useState('flow')
       const [assignOpen, setAssignOpen] = useState(false)
       const [creating, setCreating] = useState(false)
-      const [draft, setDraft] = useState('')
-      const [tasks, setTasks] = useState(FIXTURE_TASKS)
+      const [tasks, setTasks] = useState([])
       const [tip, setTip] = useState(null)
       const [error, setError] = useState('')
       const [editing, setEditing] = useState(false)
+      const [focusedRunId, setFocusedRunId] = useState(null)
+      const [rowMenu, setRowMenu] = useState(null)
+      const [renaming, setRenaming] = useState(null)
+      const [deleting, setDeleting] = useState(null)
+      const stageLeft = useConversationInset()
 
       const refresh = async () => {
         const value = await call('workflow/state')
@@ -891,19 +1140,54 @@ window.__ModuleLoader__.load({
       const workflows = pack?.workflows ?? []
       const open = workflows.find(item => item.id === openId) ?? null
 
+      useEffect(() => {
+        if (!open) { setFocusedRunId(null); return }
+        const live = liveStageRuns(open)
+        if (live.length === 0) { setFocusedRunId(null); return }
+        if (!live.some(run => run.id === focusedRunId)) setFocusedRunId(live[0].id)
+      }, [open?.id, open?.activeCount, open?.runs?.length, focusedRunId])
+
+      // Hide the shell's composer when a Workflow stage is open (#1486)
+      useEffect(() => {
+        if (typeof document === 'undefined' || !document.body || !document.body.dataset) return undefined
+        if (!open) return undefined
+        document.body.dataset.btWorkflow = ''
+        return () => { delete document.body.dataset.btWorkflow }
+      }, [open?.id])
+
       const loadTasks = async () => {
         const host = globalThis.__flybot__?.host
-        if (typeof host !== 'function') { setTasks(FIXTURE_TASKS); return }
+        if (typeof host !== 'function') { setTasks([]); return }
         try {
           const rows = await host('tasks', {})
-          const real = Array.isArray(rows) ? rows.filter(task => task && task.title && task.status !== 'cancelled').slice(0, 12).map(task => ({
-            id: task.id, title: task.title, status: task.status, priority: task.priority, column: columnOf(task),
-          })) : []
-          setTasks(real.length > 0 ? real : FIXTURE_TASKS)
+          const real = Array.isArray(rows)
+            ? rows.filter(task => task && task.title && task.status !== 'cancelled').slice(0, 12).map(task => ({
+              id: task.id, title: task.title, status: task.status, priority: task.priority, column: columnOf(task),
+            }))
+            : []
+          setTasks(real)
         } catch (loadError) {
           void loadError
-          setTasks(FIXTURE_TASKS)
+          setTasks([])
         }
+      }
+
+      const confirmRename = async (workflowId, name) => {
+        const trimmed = String(name ?? '').trim()
+        if (!trimmed) return
+        const value = await call('workflow/rename', { workflowId, name: trimmed })
+        if (value?.ok === false) { setError(value.error ?? tr('Could not rename this workflow')); return }
+        if (value?.workflows) setPack(value)
+        setRenaming(null)
+      }
+
+      const confirmDelete = async (workflowId) => {
+        const value = await call('workflow/delete', { workflowId })
+        if (value?.ok === false) { setError(value.error ?? tr('Could not delete this workflow')); return }
+        if (value?.workflows) setPack(value)
+        if (openId === workflowId) { setOpenId(null); setDrawer(false) }
+        setDeleting(null)
+        setRowMenu(null)
       }
 
       const confirmAssign = async ({ taskId, target }) => {
@@ -947,6 +1231,16 @@ window.__ModuleLoader__.load({
         if (made) setOpenId(made.id)
       }
 
+      useEffect(() => {
+        if (!rowMenu || typeof document === 'undefined') return undefined
+        const close = () => setRowMenu(null)
+        const onPointer = (event) => {
+          if (!event.target?.closest?.('.wf-context-menu')) close()
+        }
+        document.addEventListener('pointerdown', onPointer, true)
+        return () => document.removeEventListener('pointerdown', onPointer, true)
+      }, [rowMenu])
+
       return h('div', { 'data-flybot': 'workflow' },
         h('div', { className: 'wf-sec' },
           h('span', null, tr('Workflows')),
@@ -955,18 +1249,24 @@ window.__ModuleLoader__.load({
         workflows.map(item => h('button', {
           key: item.id, type: 'button', className: `wf-row ${openId === item.id ? 'on' : ''}`,
           onClick: () => { setOpenId(item.id) },
+          onContextMenu: (event) => {
+            event.preventDefault()
+            event.stopPropagation?.()
+            setRowMenu({ x: event.clientX, y: event.clientY, workflow: item })
+          },
         },
-          h('span', { className: 'wf-ico' }, h(MiniFlowchart, { workflow: item, roster })),
+          h('span', { className: 'wf-ico' }, h(MiniFlowchart, { workflow: item, compact: true })),
           h('span', { className: 'wf-txt' },
             h('span', { className: 'wf-t1' }, item.name, h('span', { className: 'wf-badge' }, 'Workflow')),
-            h('span', { className: 'wf-t2' }, item.preview || tr('Waiting for a task'))),
-          item.run?.status === 'running' ? h('span', { className: 'wf-live', 'aria-hidden': true }) : null)),
+            h('span', { className: 'wf-t2' }, sidebarPreview(item))),
+          (item.activeCount ?? 0) > 0 ? h('span', { className: 'wf-live', 'aria-hidden': true }) : null)),
         h('button', { type: 'button', className: 'wf-row wf-assign-row', onClick: () => { setAssignOpen(true); void loadTasks() } },
           h('span', { className: 'wf-ico' }, glyph()),
           h('span', { className: 'wf-txt' }, h('span', { className: 'wf-t1' }, tr('Hand a task to a Workflow')))),
         error ? h('div', { className: 'wf-err', role: 'alert' }, error) : null,
         open ? portal(h(Stage, {
-          workflow: open, roster, drawer, tab, draft, onDraft: setDraft,
+          workflow: open, roster, stageLeft, drawer, tab, focusedRunId,
+          onFocusRun: setFocusedRunId,
           editing,
           onToggleEdit: () => { setEditing(value => !value); setDrawer(true); setTab('flow') },
           onCommit: (graph) => {
@@ -976,17 +1276,21 @@ window.__ModuleLoader__.load({
             })
           },
           onCloseDrawer: () => setDrawer(false),
+          onOpenDrawer: () => setDrawer(true),
           onToggleDrawer: () => { setDrawer(value => !value); setTab('flow') },
           onTab: (key) => { setTab(key); setDrawer(true) },
           onReset: () => { void call('workflow/reset', { workflowId: open.id }).then(value => { if (value?.workflows) setPack(value) }) },
           onAssign: () => { setAssignOpen(true); void loadTasks() },
-          onSend: () => {
-            const text = draft.trim()
-            if (!text) return
-            setDraft('')
-            void call('workflow/say', { workflowId: open.id, text }).then(value => { if (value?.workflows) setPack(value) })
-          },
           onTip: setTip,
+          onPause: (runId) => {
+            void call('workflow/pause', { workflowId: open.id, runId }).then(value => { if (value?.workflows) setPack(value) })
+          },
+          onResume: (runId) => {
+            void call('workflow/resume', { workflowId: open.id, runId }).then(value => { if (value?.workflows) setPack(value) })
+          },
+          onStop: (runId) => {
+            void call('workflow/reset', { workflowId: open.id, runId }).then(value => { if (value?.workflows) setPack(value) })
+          },
         })) : null,
         assignOpen ? portal(h(AssignModal, {
           workflows, tasks, roster, workflowId: openId || workflows[0]?.id,
@@ -1008,7 +1312,25 @@ window.__ModuleLoader__.load({
           h('b', null, tip.node.name),
           h('div', null, tip.node.role),
           h('div', { className: 'wf-k' }, 'Instructions'),
-          h('div', null, tip.node.instructions)) : null)
+          h('div', null, tip.node.instructions)) : null,
+        rowMenu ? portal(h('div', {
+          className: 'wf-context-menu',
+          style: { left: rowMenu.x, top: rowMenu.y },
+          onPointerDown: (event) => event.stopPropagation(),
+          onClick: (event) => event.stopPropagation(),
+        },
+          h('button', { type: 'button', onClick: () => { setRenaming(rowMenu.workflow); setRowMenu(null) } }, tr('Rename')),
+          h('button', { type: 'button', className: 'wf-danger-text', onClick: () => { setDeleting(rowMenu.workflow); setRowMenu(null) } }, tr('Delete')))) : null,
+        renaming ? portal(h(RenameModal, {
+          workflow: renaming,
+          onClose: () => setRenaming(null),
+          onConfirm: (name) => { void confirmRename(renaming.id, name) },
+        })) : null,
+        deleting ? portal(h(DeleteModal, {
+          workflow: deleting,
+          onClose: () => setDeleting(null),
+          onConfirm: () => { void confirmDelete(deleting.id) },
+        })) : null)
     }
 
     const CSS = `
@@ -1021,22 +1343,33 @@ window.__ModuleLoader__.load({
 .wf-t2,.wf-chain{display:block;font-size:12px;color:var(--bt-ink-2,rgba(20,20,20,.6));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .wf-badge{font-size:9.5px;padding:0 5px;border-radius:4px;background:rgba(77,107,254,.12);color:var(--bt-accent,#4d6bfe);line-height:15px}
 .wf-live{width:7px;height:7px;border-radius:50%;background:var(--bt-accent,#4d6bfe);flex:none}
-.wf-ico{width:32px;height:32px;border-radius:9px;background:var(--bt-card,#fff);border:1px solid var(--bt-line,rgba(20,20,20,.08));display:grid;place-items:center;color:var(--bt-accent,#4d6bfe);flex:none}
+.wf-ico{width:32px;height:32px;border-radius:9px;background:var(--bt-card,#fff);border:1px solid var(--bt-line,rgba(20,20,20,.08));display:grid;place-items:center;color:var(--bt-accent,#4d6bfe);flex:none;overflow:hidden;padding:2px;box-sizing:border-box}
+.wf-mini-flow{display:block;max-width:100%;max-height:100%}
+.wf-mini-flow-compact{width:100%;height:100%}
+.wf-pill-thumb{width:28px;height:28px;flex:none;display:grid;place-items:center;overflow:hidden;border-radius:6px;background:var(--bt-main,#fcfcfc)}
 .wf-ico-lg{width:42px;height:42px;margin:0 auto}
 .wf-av{border-radius:50%;display:inline-grid;place-items:center;color:#fff;font-weight:650;flex:none}
-.wf-mini-flow{display:block}
-.wf-stage{position:fixed;top:0;right:0;bottom:0;z-index:30;display:flex;background:var(--bt-main,#fcfcfc);color:var(--bt-ink,#141414)}
+.wf-stage{position:fixed;top:0;right:0;bottom:0;z-index:30;display:flex;overflow:hidden;background:var(--bt-main,#fcfcfc);color:var(--bt-ink,#141414)}
 .wf-main{flex:1;min-width:0;display:flex;flex-direction:column}
 .wf-top{height:56px;display:flex;align-items:center;justify-content:center;position:relative;flex:none}
-.wf-pill{display:flex;align-items:center;gap:8px;height:34px;padding:0 12px 0 8px;border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:10px;background:var(--bt-card,#fff);cursor:pointer;color:inherit;font:inherit}
-.wf-pill-name{font-weight:600}.wf-sub{font-size:11px;color:var(--bt-ink-3,#9a9a9a)}.wf-chev{color:var(--bt-ink-3,#9a9a9a)}
+.wf-pill{display:flex;align-items:center;gap:10px;height:36px;padding:0 12px 0 6px;border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:10px;background:var(--bt-card,#fff);cursor:pointer;color:inherit;font:inherit;max-width:min(420px,calc(100% - 120px))}
+.wf-pill-name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wf-sub{font-size:11px;color:var(--bt-ink-3,#9a9a9a)}.wf-chev{color:var(--bt-ink-3,#9a9a9a)}
 .wf-actions{position:absolute;right:14px;top:12px;display:flex;gap:6px}
 .wf-btn{height:32px;padding:0 12px;border-radius:16px;border:1px solid var(--bt-line,rgba(20,20,20,.08));background:var(--bt-card,#fff);color:inherit;font:inherit;font-size:12.5px;cursor:pointer}
 .wf-btn.wf-pri{background:var(--bt-accent,#4d6bfe);border-color:var(--bt-accent,#4d6bfe);color:#fff}
 .wf-btn.wf-dark{background:var(--bt-user,#070707);color:var(--bt-user-ink,#fcfcfc);border-color:var(--bt-user,#070707)}
 .wf-btn.wf-sm{height:28px}
-.wf-strip{margin:0 auto 4px;width:min(720px,calc(100% - 48px));border:1px solid var(--bt-line,rgba(20,20,20,.08));background:var(--bt-card,#fff);border-radius:12px;padding:9px 12px;display:flex;align-items:center;gap:12px}
-.wf-tk{font-weight:600}.wf-meta{font-size:11.5px;color:var(--bt-ink-2,rgba(20,20,20,.6))}
+.wf-strips{display:flex;flex-direction:column;gap:8px;margin:0 auto 4px;width:min(720px,calc(100% - 48px))}
+.wf-strip{margin:0;width:100%;border:1px solid var(--bt-line,rgba(20,20,20,.08));background:var(--bt-card,#fff);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;box-sizing:border-box;cursor:pointer;text-align:left;color:inherit}
+.wf-strip:focus-visible{outline:2px solid var(--bt-accent,#4d6bfe);outline-offset:2px}
+.wf-strip-focus{border-color:var(--bt-accent,#4d6bfe);box-shadow:0 0 0 2px rgba(77,107,254,.14)}
+.wf-strip-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;width:100%}
+.wf-strip-progress{width:100%}
+.wf-strip-progress .wf-segs{width:100%}
+.wf-strip-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.wf-strip-summary{justify-content:center;border-style:dashed;background:transparent;margin-bottom:2px;cursor:default;flex-direction:row}
+.wf-btn.wf-danger-outline{border-color:rgba(229,72,77,.45);color:#e5484d}
+.wf-tk{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:min(360px,42vw)}.wf-meta{font-size:11.5px;color:var(--bt-ink-2,rgba(20,20,20,.6));white-space:nowrap}
 .wf-segs{display:flex;gap:3px;flex:1;min-width:80px}
 .wf-seg{height:5px;border-radius:3px;background:var(--bt-active,rgba(119,119,119,.17));flex:1}
 .wf-seg.done{background:var(--bt-accent,#4d6bfe)}.wf-seg.failed{background:#e5484d}.wf-seg.running{background:rgba(77,107,254,.35)}
@@ -1047,14 +1380,14 @@ window.__ModuleLoader__.load({
 .wf-chat{flex:1;overflow:auto;padding:10px 0 20px}
 .wf-chat-in{width:min(760px,calc(100% - 48px));margin:0 auto;display:flex;flex-direction:column;gap:10px}
 .wf-ts{text-align:center;font-size:11px;color:var(--bt-ink-3,#9a9a9a)}
-.wf-sys{align-self:center;font-size:11.5px;color:var(--bt-ink-2,rgba(20,20,20,.6));border:1px dashed var(--bt-line,rgba(20,20,20,.08));padding:4px 10px;border-radius:12px;max-width:90%;text-align:center}
+.wf-sys{align-self:center;font-size:11.5px;color:var(--bt-ink-2,rgba(20,20,20,.6));border:1px dashed var(--bt-line,rgba(20,20,20,.08));padding:4px 10px;border-radius:12px;max-width:90%;text-align:center;word-wrap:break-word;overflow-wrap:break-word}
 .wf-sys.accent{color:var(--bt-accent,#4d6bfe);background:rgba(77,107,254,.1);border-style:solid}
 .wf-sys.ok{color:#16a34a;background:rgba(22,163,74,.1);border-color:transparent}
 .wf-sys.bad{color:#e5484d;background:rgba(229,72,77,.1);border-color:transparent}
 .wf-msg{display:flex;gap:8px;align-items:flex-end;max-width:78%}
 .wf-who{font-size:11px;margin:0 0 3px 2px;display:flex;gap:6px}
 .wf-step{color:var(--bt-ink-3,#9a9a9a)}
-.wf-bub{background:var(--bt-bubble,#eee);border-radius:12px;padding:8px 11px;line-height:1.6}
+.wf-bub{background:var(--bt-bubble,#eee);border-radius:12px;padding:8px 11px;line-height:1.6;word-wrap:break-word;overflow-wrap:break-word}
 .wf-att{margin-top:6px;display:flex;gap:6px;flex-wrap:wrap}
 .wf-att span{font-size:11.5px;background:var(--bt-card,#fff);border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:8px;padding:3px 8px}
 .wf-user{align-self:flex-end;background:var(--bt-user,#070707);color:var(--bt-user-ink,#fcfcfc);border-radius:12px;padding:8px 12px;max-width:70%;line-height:1.6}
@@ -1063,42 +1396,57 @@ window.__ModuleLoader__.load({
 .wf-composer input{flex:1;border:0;outline:0;background:transparent;font:inherit;color:inherit}
 .wf-mic{width:28px;height:28px;border-radius:9px;border:0;background:var(--bt-accent,#4d6bfe);color:#fff;cursor:pointer}
 .wf-under{text-align:center;margin-top:6px;font-size:11px;color:var(--bt-ink-2,rgba(20,20,20,.6))}
-.wf-drawer{width:400px;flex:none;border-left:1px solid var(--bt-line,rgba(20,20,20,.08));display:flex;flex-direction:column;background:var(--bt-main,#fcfcfc)}
+.wf-drawer{width:400px;flex:none;min-width:0;overflow:hidden;border-left:1px solid var(--bt-line,rgba(20,20,20,.08));display:flex;flex-direction:column;background:var(--bt-main,#fcfcfc)}
 .wf-dr-head{display:flex;justify-content:flex-end;padding:12px}
 .wf-icon{width:28px;height:28px;border-radius:8px;border:1px solid var(--bt-line,rgba(20,20,20,.08));background:var(--bt-card,#fff);cursor:pointer;color:inherit}
 .wf-dr-body{flex:1;overflow:auto;padding:4px 18px 20px}
 .wf-dr-title{display:flex;flex-direction:column;align-items:center;gap:4px;margin-bottom:10px}
 .wf-dr-title h2{font-size:16px;font-weight:600;margin:0}
-.wf-dr-title p{font-size:12px;color:var(--bt-ink-2,rgba(20,20,20,.6));text-align:center;line-height:1.5;margin:0}
+.wf-dr-title p{font-size:12px;color:var(--bt-ink-2,rgba(20,20,20,.6));text-align:center;line-height:1.5;margin:0;max-width:100%;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .wf-tabs{display:flex;justify-content:center;gap:4px;margin:6px 0 12px}
 .wf-tabs button{padding:4px 10px;border-radius:7px;border:0;background:transparent;color:var(--bt-ink-2,rgba(20,20,20,.6));cursor:pointer;font:inherit}
 .wf-tabs button.on{background:var(--bt-active,rgba(119,119,119,.17));color:var(--bt-ink,#141414)}
-.wf-term{font-size:11px;color:var(--bt-ink-2,rgba(20,20,20,.6));border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:12px;padding:3px 10px}
+.wf-term{font-size:11px;color:var(--bt-ink-2,rgba(20,20,20,.6));border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:12px;padding:3px 10px;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wf-node-row{display:flex;align-items:center;gap:8px;width:100%;min-width:0}
+.wf-chip-inline{margin-left:6px;font-size:9.5px;vertical-align:middle;font-weight:500}
 .wf-term.on{color:#16a34a;background:rgba(22,163,74,.1);border-color:transparent}
-.wf-canvas{display:flex;flex-direction:column;align-items:center;gap:8px;min-height:440px;position:relative}
-.wf-palette{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;width:100%}
-.wf-plane{position:relative;width:0;margin:8px auto 0}
+.wf-canvas{display:flex;flex-direction:column;align-items:center;gap:8px;min-height:440px;position:relative;overflow:auto}
+.wf-palette{display:flex;flex-direction:column;align-items:stretch;gap:10px;width:min(100%,360px);margin:0 auto 4px;padding:10px 12px;border:1px dashed var(--bt-line,rgba(20,20,20,.14));border-radius:12px;background:var(--bt-card,#fff)}
+.wf-palette-hint{margin:0;font-size:11.5px;color:var(--bt-ink-2,rgba(20,20,20,.6));text-align:center;line-height:1.4}
+.wf-palette-row{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+.wf-palette-bot{display:inline-flex;align-items:center;gap:8px;min-width:0;max-width:100%;padding:6px 10px 6px 6px;border:1px solid var(--bt-line,rgba(20,20,20,.1));border-radius:12px;background:var(--bt-main,#fcfcfc);color:inherit;font:inherit;cursor:grab;box-shadow:0 1px 0 rgba(20,20,20,.04);transition:border-color .15s,box-shadow .15s,transform .12s}
+.wf-palette-bot:hover{border-color:rgba(77,107,254,.35);box-shadow:0 2px 8px rgba(77,107,254,.12)}
+.wf-palette-bot:active,.wf-palette-bot.dragging{cursor:grabbing;border-color:var(--bt-accent,#4d6bfe);box-shadow:0 0 0 3px rgba(77,107,254,.14);transform:scale(.98)}
+.wf-palette-grip{width:6px;height:18px;flex:none;border-radius:2px;background:repeating-linear-gradient(180deg,var(--bt-ink-3,#9a9a9a) 0 2px,transparent 2px 4px);opacity:.45}
+.wf-palette-av{border-radius:50%;display:inline-grid;place-items:center;color:#fff;font-weight:650;flex:none}
+.wf-palette-copy{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:1px;text-align:left}
+.wf-palette-name{font-size:12.5px;font-weight:600;line-height:1.2;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wf-palette-sub{font-size:10.5px;color:var(--bt-ink-3,#9a9a9a);line-height:1.2;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wf-drag-ghost{position:fixed;z-index:100;pointer-events:none;display:inline-flex;align-items:center;gap:6px;padding:5px 10px 5px 5px;border-radius:10px;border:1px solid var(--bt-accent,#4d6bfe);background:var(--bt-card,#fff);box-shadow:0 8px 20px rgba(20,20,20,.12);opacity:.92;transform:translate(-4px,-4px)}
+.wf-drag-ghost-name{font-size:12px;font-weight:600;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wf-plane{position:relative;width:0;margin:8px auto 0;--wf-wire-span:${WIRE_SPAN}px}
 .wf-node-inspector{position:absolute;bottom:8px;right:8px;width:320px;background:var(--bt-card,#fff);border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:12px;padding:12px;box-shadow:0 4px 12px rgba(0,0,0,.1);z-index:10}
 .wf-inspector-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:12px;font-weight:600}
 .wf-close-inspector{background:none;border:0;cursor:pointer;color:var(--bt-ink-3,#9a9a9a);font-size:18px;line-height:1;padding:0;width:20px;height:20px}
 .wf-node-inspector textarea{width:100%;box-sizing:border-box;border-radius:8px;border:1px solid var(--bt-line,rgba(20,20,20,.08));background:var(--bt-card,#fff);color:inherit;font:inherit;padding:8px;resize:vertical;font-size:12px}
-.wf-wires{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}
-.wf-wires path{fill:none;stroke:var(--bt-line,rgba(20,20,20,.35));stroke-width:1.6}
+.wf-wires{position:absolute;left:calc(-1 * var(--wf-wire-span, ${WIRE_SPAN}px));top:0;width:calc(2 * var(--wf-wire-span, ${WIRE_SPAN}px));overflow:visible;pointer-events:none}
+.wf-wires path{fill:none;stroke:var(--bt-line,rgba(20,20,20,.5));stroke-width:2}
 .wf-wires .wf-end{pointer-events:auto;fill:var(--bt-card,#fff);stroke:var(--bt-accent,#4d6bfe);cursor:crosshair}
 .wf-abs{position:absolute}
 .wf-port{position:absolute;left:50%;bottom:-6px;width:12px;height:12px;margin-left:-6px;border-radius:50%;border:2px solid var(--bt-accent,#4d6bfe);background:var(--bt-card,#fff);padding:0;cursor:crosshair}
 .wf-mini{position:absolute;top:-8px;right:-8px;width:18px;height:18px;border-radius:50%;border:1px solid var(--bt-line,rgba(20,20,20,.16));background:var(--bt-card,#fff);cursor:pointer;line-height:16px;padding:0}
 .wf-node{width:168px;border:1px solid var(--bt-line,rgba(20,20,20,.08));background:var(--bt-card,#fff);border-radius:12px;padding:8px 9px;display:flex;align-items:center;gap:8px;position:relative}
-.wf-node.running{border-color:var(--bt-accent,#4d6bfe);box-shadow:0 0 0 3px rgba(77,107,254,.12)}
+@keyframes wf-node-live{0%,100%{border-color:var(--bt-accent,#4d6bfe);box-shadow:0 0 0 2px rgba(77,107,254,.18),0 0 0 0 rgba(77,107,254,.2)}50%{border-color:rgba(77,107,254,.85);box-shadow:0 0 0 3px rgba(77,107,254,.35),0 0 14px 2px rgba(77,107,254,.22)}}
+.wf-node.running{border-color:var(--bt-accent,#4d6bfe);animation:wf-node-live 1.5s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){.wf-node.running{animation:none;box-shadow:0 0 0 3px rgba(77,107,254,.2)}}
 .wf-node.done{border-color:rgba(22,163,74,.35)}.wf-node.failed{border-color:#e5484d}
 .wf-node.selected{border-color:var(--bt-accent,#4d6bfe);box-shadow:0 0 0 2px rgba(77,107,254,.2)}
-.wf-node .wf-chip{position:absolute;top:-9px;right:8px}
 .wf-nt{min-width:0;flex:1;display:flex;flex-direction:column}
-.wf-nm{font-weight:600;font-size:12.5px}.wf-rl{font-size:11px;color:var(--bt-ink-3,#9a9a9a);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wf-nm{font-weight:600;font-size:12.5px}.wf-rl{font-size:12px;color:rgba(20,20,20,.55);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .wf-box{border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:10px;background:var(--bt-card,#fff);padding:10px 12px}
-.wf-kv{display:flex;justify-content:space-between;gap:12px;padding:5px 0;font-size:12px}
+.wf-kv{display:flex;justify-content:space-between;gap:16px;padding:8px 0;font-size:12px}
 .wf-kv span:first-child{color:var(--bt-ink-2,rgba(20,20,20,.6))}
-.wf-hist{display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--bt-line,rgba(20,20,20,.08));font-size:12px}
+.wf-hist{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--bt-line,rgba(20,20,20,.08));font-size:12px}
 .wf-ctl{display:flex;gap:6px;flex-wrap:wrap;margin-top:14px}
 .wf-mask{position:fixed;inset:0;background:rgba(0,0,0,.28);display:flex;align-items:center;justify-content:center;z-index:80;padding:16px}
 .wf-modal{width:560px;max-width:100%;max-height:calc(100vh - 32px);background:var(--bt-main,#fcfcfc);color:var(--bt-ink,#141414);border-radius:16px;border:1px solid var(--bt-line,rgba(20,20,20,.08));display:flex;flex-direction:column;overflow:hidden}
@@ -1114,7 +1462,9 @@ window.__ModuleLoader__.load({
 .wf-kcard.sel,.wf-tgt.sel{border-color:var(--bt-accent,#4d6bfe);box-shadow:0 0 0 3px rgba(77,107,254,.12)}
 .wf-id,.wf-kcol{font-size:11px;color:var(--bt-ink-3,#9a9a9a)}.wf-tt{font-size:12.5px;margin:3px 0 6px;font-weight:500}
 .wf-targets{display:flex;flex-direction:column;gap:6px}
-.wf-tgt{display:flex;align-items:center;gap:10px;border:1px solid var(--bt-line,rgba(20,20,20,.08));background:var(--bt-card,#fff);border-radius:10px;padding:8px 10px;text-align:left;cursor:pointer;color:inherit;font:inherit;width:100%}
+.wf-tgt{display:flex;align-items:center;gap:10px;border:1px solid var(--bt-line,rgba(20,20,20,.08));background:var(--bt-card,#fff);border-radius:10px;padding:6px 10px;text-align:left;cursor:pointer;color:inherit;font:inherit;width:100%;min-height:44px}
+.wf-tgt-thumb{width:30px;height:30px;flex:none;display:grid;place-items:center;overflow:hidden;border-radius:6px;background:var(--bt-main,#fcfcfc)}
+.wf-tgt>span:not(.wf-rad):not(.wf-tgt-thumb){min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}
 .wf-rad{margin-left:auto;width:16px;height:16px;border-radius:50%;border:1.5px solid var(--bt-ink-3,#9a9a9a);flex:none}
 .wf-tgt.sel .wf-rad{border:5px solid var(--bt-accent,#4d6bfe)}
 .wf-field{display:flex;flex-direction:column;gap:6px;font-size:12px;margin-top:12px}
@@ -1127,13 +1477,21 @@ window.__ModuleLoader__.load({
 .wf-muted{font-size:12px;color:var(--bt-ink-3,#9a9a9a);padding:4px 8px}
 .wf-err{font-size:12px;color:#e5484d;padding:4px 8px}
 .wf-assign-row{opacity:.9}
-.wf-par{position:relative;border:1px dashed var(--bt-ink-3,#9a9a9a);border-radius:14px;padding:16px 8px 8px}
+.wf-par{position:relative;z-index:0;pointer-events:none;border:1px dashed var(--bt-ink-3,#9a9a9a);border-radius:14px;padding:16px 8px 8px}
+.wf-node.wf-abs{z-index:1}
 .wf-plabel{position:absolute;top:-9px;left:50%;transform:translateX(-50%);font-size:10.5px;color:var(--bt-ink-2,rgba(20,20,20,.6));background:var(--bt-card,#fff);padding:0 6px;white-space:nowrap}
 .wf-settings-canvas{padding:16px}
 .wf-settings-layout{display:flex;flex-direction:column;gap:16px}
-.wf-settings-header{display:flex;gap:12px;align-items:center}
-.wf-canvas-main{flex:1;min-height:500px;border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:12px;padding:16px;background:var(--bt-card,#fff)}
-.wf-canvas-view{width:100%;height:100%;position:relative}
+.wf-settings-header{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.wf-autosave-hint{font-size:11px;color:var(--bt-ink-3,#9a9a9a)}
+.wf-canvas-main{flex:1;min-height:500px;display:flex;flex-direction:column;border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:12px;padding:16px;background:var(--bt-card,#fff)}
+.wf-canvas-view{width:100%;height:100%;min-height:0;position:relative;overflow:auto}
+.wf-cards-empty{padding:8px 4px 12px}
+.wf-context-menu{position:fixed;z-index:95;min-width:140px;background:var(--bt-card,#fff);border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:10px;padding:4px;box-shadow:0 8px 24px rgba(0,0,0,.12);display:flex;flex-direction:column;gap:2px}
+.wf-context-menu button{border:0;background:transparent;color:inherit;font:inherit;font-size:12.5px;text-align:left;padding:8px 10px;border-radius:8px;cursor:pointer}
+.wf-context-menu button:hover{background:var(--bt-hover,rgba(119,119,119,.09))}
+.wf-danger-text{color:#e5484d}
+.wf-btn.wf-danger{background:#e5484d;border-color:#e5484d;color:#fff}
 .wf-inspector{width:300px;border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:12px;padding:16px;background:var(--bt-card,#fff)}
 .wf-inspector h3{font-size:14px;margin:0 0 12px}
 .wf-inspector-content{display:flex;flex-direction:column;gap:12px}
@@ -1155,6 +1513,11 @@ window.__ModuleLoader__.load({
       return off
     }
 
-    return { name: 'flybot-workflow', inject: ['flybot'], apply, Section, WorkflowSettings, tr, columnOf, shortId, FIXTURE_TASKS }
+    return {
+      name: 'flybot-workflow', inject: ['flybot'], apply, Section, WorkflowSettings,
+      tr, columnOf, shortId, stageMessages, taskSummary, chatPreview, wirePath, WIRE_SPAN, NODE_WIRE_OUT,
+      runHistoryRows, liveStageRuns, resolveFocusedRun, parallelFrameStyle, NODE_W,
+      botPaletteSubtitle, botTint,
+    }
   },
 })

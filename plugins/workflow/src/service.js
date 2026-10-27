@@ -1,7 +1,6 @@
 // Workflow records and the runs a board task starts. The graph rules live in
 // graph.js. A workflow keeps a FIFO queue and up to maxConcurrent live runs
-// (default 2). A live node stays running until its Bot replies. The demo
-// player is a separate script and does not move a live run.
+// (default 2). A live node stays running until its Bot replies.
 
 import { randomBytes } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
@@ -9,12 +8,12 @@ import { join } from 'node:path'
 import { releaseAll, spawnAll } from './ephemeral.js'
 import {
   chainLabel, cleanLine, cleanPorts, cleanPrompt, cleanTools, completeNode, doneCount, failNode, freshStatus, layerMarks,
-  missingProviders, nextDemoOp, nodeById, normalizeGraph, orderedIds, readStepResult, resolveInputs, retryNode,
-  rowPreview, startFrontier, unmetRequired, validateGraph,
+  missingProviders, nodeById, normalizeGraph, orderedIds, readStepResult, resolveInputs, retryNode,
+  rowPreview, startFrontier, summarizeTask, unmetRequired, validateGraph,
 } from './graph.js'
 import { matchTask } from './match.js'
 import { linesFor } from './narrate.js'
-import { DELIVERY_ID, DELIVERY_STEPS, WEEKLY_ID, deliveryWorkflow, fixtureTask, templateById, templateCatalog, weeklyWorkflow } from './template.js'
+import { DELIVERY_ID, DELIVERY_STEPS, WEEKLY_ID, deliveryWorkflow, templateById, templateCatalog, weeklyWorkflow } from './template.js'
 
 const MAX_WORKFLOWS = 24
 const MAX_MESSAGES = 200
@@ -66,6 +65,7 @@ function publicRun(workflow, run) {
     id: run.id,
     workflowId: run.workflowId,
     task: run.task,
+    taskSummary: summarizeTask(run.task),
     status: run.status,
     nodeStatus: { ...run.nodeStatus },
     steps: run.steps,
@@ -78,6 +78,7 @@ function publicRun(workflow, run) {
     startedAt: run.startedAt,
     updatedAt: run.updatedAt,
     ...(run.live === true ? { live: true } : {}),
+    ...(run.paused === true ? { paused: true } : {}),
     ...(run.ephemeral && Object.keys(run.ephemeral).length > 0 ? { ephemeral: { ...run.ephemeral } } : {}),
   }
 }
@@ -101,12 +102,12 @@ function blankRun(workflow, task, now, history = []) {
 
 export function createWorkflowService({ dir, persist = true, now = () => Date.now(), bots = () => [], readOnly = () => false, warn = () => {}, spawn, release, dispatch } = {}) {
   const file = dir ? join(dir, FILE) : null
-  let state = load(file, warn) ?? seed(now())
+  let state = load(file, warn) ?? seed()
   state.routes ??= {}
   state.claims ??= {}
   state.lanes ??= {}
-  state.demos ??= {}
   if (!state.laneFormat) migrateRuns(state)
+  purgeDemos(state)
   let seq = state.seq ?? 1
   // One lock for every start and release. The host cap is read and updated
   // only while this is held, so two workflows cannot both pass it.
@@ -131,7 +132,7 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
   }
 
   function readyWorkflow(item) {
-    if (Array.isArray(item.edges) && Array.isArray(item.layers) && item.nodes.every(node => Number.isFinite(node.x))) return item
+    if (Array.isArray(item.edges) && Array.isArray(item.layers) && item.nodes.every(node => Number.isFinite(node.x) && Number.isFinite(node.y))) return item
     const next = normalizeGraph(item)
     item.nodes = next.nodes
     item.edges = next.edges
@@ -179,8 +180,8 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
         queue: (laneOf(item.id).queue ?? []).map(task => ({ id: task.id, title: task.title })),
         history: [...(laneOf(item.id).history ?? [])],
         runs: runningOf(laneOf(item.id)).map(run => publicRun(item, run)),
-        preview: rowPreview(item, primaryRun(item.id)),
-        run: publicRun(item, primaryRun(item.id)),
+        preview: rowPreview(item, previewRun(item.id)),
+        run: publicRun(item, displayRun(item.id)),
         messages: state.logs[item.id] ?? [],
       }) }),
     }
@@ -196,7 +197,7 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
   }
 
   function runningOf(lane) {
-    return (lane?.active ?? []).filter(run => run && run.status === 'running')
+    return (lane?.active ?? []).filter(run => run && run.live === true && run.status === 'running')
   }
 
   function globalRunning() {
@@ -211,23 +212,23 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
     return Math.min(MAX_CONCURRENT, value)
   }
 
-  function primaryRun(id) {
+  function displayRun(id) {
     const live = runningOf(laneOf(id))
     if (live.length > 0) return live[0]
-    // A finished lane.last stays up until Replay. demoStep marks the script
-    // as the run on stage; otherwise the graph stays on that finished lane
-    // while the canned lines append to the demo.
-    const demo = state.demos[id]
-    if (state.demoOnTop?.[id] === true && demo) return demo
-    if (laneOf(id).last) return laneOf(id).last
-    return demo ?? null
+    const last = laneOf(id).last
+    if (last?.live === true) return last
+    return null
+  }
+
+  function previewRun(id) {
+    const live = runningOf(laneOf(id))
+    return live.length > 0 ? live[0] : null
   }
 
   function storeRun(workflowId, run) {
     const lane = laneOf(workflowId)
     const index = lane.active.findIndex(item => item.id === run.id)
     if (index >= 0) lane.active[index] = run
-    else if (state.demos[workflowId]?.id === run.id) state.demos[workflowId] = run
   }
 
   function sentOk(result) {
@@ -355,7 +356,7 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
   // leave the node open: the next hand-off tries again. No second send in
   // this call — a 429 must not be hammered.
   async function handOff(item, run) {
-    if (typeof dispatch !== 'function' || !run?.ephemeral) return run
+    if (typeof dispatch !== 'function' || !run?.ephemeral || run.paused === true) return run
     let current = run
     const running = orderedIds(item, current.nodeStatus, 'running')
     for (const nodeId of running) {
@@ -396,6 +397,28 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
     }
     await releaseAll(ids, release, warn)
     write()
+  }
+
+  // A live run the host cut off: fail in-flight nodes and mark the run failed (#1414,
+  // #1424). Ephemeral ids are left on the record until release strips them.
+  function failCutoffRun(item, run) {
+    if (run.status === 'done' || run.status === 'failed') return
+    for (const nodeId of item ? orderedIds(item, run.nodeStatus, 'running') : []) {
+      try {
+        run.nodeStatus = failNode(item, run.nodeStatus, nodeId).status
+      } catch (error) {
+        warn(`flybot-workflow: node ${nodeId} kept its status: ${error?.message ?? error}`)
+      }
+    }
+    run.status = 'failed'
+    run.updatedAt = now()
+  }
+
+  function archiveCutoffRun(workflowId, run) {
+    const lane = laneOf(workflowId)
+    lane.active = lane.active.filter(item => item.id !== run.id)
+    lane.last = run
+    lane.history = [...lane.history, { task: run.task, status: run.status, at: run.updatedAt }].slice(-20)
   }
 
   // The oldest queued task whose own workflow still has a slot, or null.
@@ -479,13 +502,12 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
   function beginRun(item, task, ephemeral) {
     const holes = missingProviders(item)
     if (holes.length > 0) return { ok: false, error: `Node ${holes[0].nodeId} input ${holes[0].name} has no upstream provider` }
-    delete state.demoOnTop?.[item.id]
     let run = { ...blankRun(item, task, now(), []), live: true }
     if (ephemeral) run.ephemeral = ephemeral
     const at = now()
     push(item.id, [
       { kind: 'time', text: '刚刚' },
-      { kind: 'system', text: `来自 Tasks 看板：${task.id} ${task.title} → 分配给 Workflow「${item.name}」` },
+      { kind: 'system', text: `任务已分配 · ${summarizeTask(task)} → ${item.name}` },
     ], at)
     const stepped = applyOp(item, run, { type: 'start' })
     run = stepped.run
@@ -529,7 +551,7 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
     const lane = laneOf(item.id)
     state.queueSeq = (state.queueSeq ?? 0) + 1
     lane.queue.push({ id: task.id, title: task.title, enqueuedAt: now(), queueSeq: state.queueSeq })
-    push(item.id, [{ kind: 'system', text: `排队：${task.id} ${task.title}（前面 ${lane.queue.length - 1} 个，同时运行上限 ${maxOf(item)}）` }], now())
+    push(item.id, [{ kind: 'system', text: `排队 · ${summarizeTask(task)}（前面 ${lane.queue.length - 1} 个）` }], now())
     write()
   }
 
@@ -569,7 +591,7 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
     if (runId) return lane.active.find(run => run.id === runId) ?? null
     const live = lane.active.find(run => run.status === 'running' && (!nodeId || run.nodeStatus?.[nodeId] === 'running'))
     if (live) return live
-    return state.demos[workflowId] ?? null
+    return null
   }
 
   function commitAdvance(workflowId, op) {
@@ -626,8 +648,6 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
       const workflowId = String(body.workflowId ?? '')
       const item = workflow(workflowId)
       if (!item) return { ok: false, error: 'No such workflow' }
-      const template = templateById(item.id)
-      if (template) return { ok: false, error: 'Cannot rename a factory preset' }
       const name = cleanLine(body.name, 80)
       if (!name) return { ok: false, error: 'A workflow needs a name' }
       item.name = name
@@ -642,16 +662,18 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
       const workflowId = String(body.workflowId ?? '')
       const item = workflow(workflowId)
       if (!item) return { ok: false, error: 'No such workflow' }
-      const template = templateById(item.id)
-      if (template) return { ok: false, error: 'Cannot delete a factory preset' }
-      const run = state.runs[workflowId]
-      const releasing = run ? Object.values(run.ephemeral ?? {}) : []
+      const lane = laneOf(workflowId)
+      const releasing = (lane.active ?? []).flatMap(run => Object.values(run.ephemeral ?? {}))
       const finish = () => {
         state.workflows = state.workflows.filter(workflow => workflow.id !== workflowId)
+        delete state.lanes[workflowId]
         delete state.runs[workflowId]
         delete state.logs[workflowId]
         Object.keys(state.routes).forEach(taskId => {
           if (state.routes[taskId]?.id === workflowId) delete state.routes[taskId]
+        })
+        Object.keys(state.claims ?? {}).forEach(taskId => {
+          if (state.routes[taskId]?.id === workflowId) delete state.claims[taskId]
         })
         write()
         return present()
@@ -788,54 +810,90 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
     ownsBot(botId) {
       return findEphemeral(botId) !== null
     },
-    // Replay the scripted demo. It never moves a live run.
-    demoStep(body = {}) {
-      const workflowId = String(body.workflowId ?? '')
+    pause(body = {}) {
       if (readOnly()) return { ok: false, code: 'read-only', error: 'The host is read-only' }
+      const workflowId = String(body.workflowId ?? '')
       const item = workflow(workflowId)
       if (!item) return { ok: false, error: 'No such workflow' }
-      if (runningOf(laneOf(workflowId)).length > 0) return { ok: false, error: 'A live run is in progress' }
-      try {
-        let run = state.demos[item.id]
-        if (!run) throw new Error('This workflow has no task')
-        state.demoOnTop ??= {}
-        state.demoOnTop[item.id] = true
-        if (run.status === 'failed') throw new Error('This run is already finished')
-        const op = nextDemoOp(item, run.nodeStatus, { failedOnce: run.failedOnce })
-        if (op.type === 'restart') {
-          run = blankRun(item, run.task, now(), run.history)
-          push(item.id, [{ kind: 'time', text: '重新演示' }], now())
-        }
-        const stepped = applyOp(item, run, op.type === 'restart' ? { type: 'start' } : op)
-        state.demos[item.id] = stepped.run
-        push(item.id, stepped.lines, now())
-        write()
+      const lane = laneOf(workflowId)
+      const runId = body.runId ? String(body.runId) : ''
+      let run = runId ? lane.active.find(itemRun => itemRun.id === runId) : lane.active.find(itemRun => itemRun.live === true && itemRun.status === 'running')
+      if (!run || run.live !== true) return { ok: false, error: 'No live run to pause' }
+      if (run.paused === true) return present()
+      run = { ...run, paused: true, updatedAt: now() }
+      storeRun(workflowId, run)
+      push(workflowId, [{ kind: 'system', text: `⏸ 已暂停 · ${summarizeTask(run.task)}` }], now())
+      write()
+      return present()
+    },
+    resume(body = {}) {
+      if (readOnly()) return { ok: false, code: 'read-only', error: 'The host is read-only' }
+      const workflowId = String(body.workflowId ?? '')
+      const item = workflow(workflowId)
+      if (!item) return { ok: false, error: 'No such workflow' }
+      const lane = laneOf(workflowId)
+      const runId = body.runId ? String(body.runId) : ''
+      let run = runId ? lane.active.find(itemRun => itemRun.id === runId) : lane.active.find(itemRun => itemRun.live === true && itemRun.status === 'running')
+      if (!run || run.live !== true) return { ok: false, error: 'No live run to resume' }
+      if (run.paused !== true) return present()
+      run = { ...run, paused: false, updatedAt: now() }
+      storeRun(workflowId, run)
+      push(workflowId, [{ kind: 'system', text: `▶ 已继续 · ${summarizeTask(run.task)}` }], now())
+      write()
+      if (typeof spawn !== 'function') return present()
+      return hostSerial(async () => {
+        const latest = lane.active.find(itemRun => itemRun.id === run.id) ?? run
+        await handOff(item, latest)
         return present()
-      } catch (error) {
-        return refuse(error)
-      }
+      })
     },
     reset(body = {}) {
       const workflowId = String(body.workflowId ?? '')
+      const runId = body.runId ? String(body.runId) : ''
+      if (runId) {
+        const stopOne = () => {
+          const item = workflow(workflowId)
+          if (!item) return { ok: false, error: 'No such workflow' }
+          const lane = laneOf(workflowId)
+          const run = lane.active.find(itemRun => itemRun.id === runId)
+          if (!run || run.live !== true || run.status !== 'running') return { ok: false, error: 'No live run to stop' }
+          const ids = Object.values(run.ephemeral ?? {})
+          const ended = { ...run, status: 'failed', updatedAt: now() }
+          delete ended.ephemeral
+          delete ended.handed
+          lane.active = lane.active.filter(itemRun => itemRun.id !== runId)
+          lane.last = ended
+          lane.history = [...lane.history, { task: ended.task, status: ended.status, at: ended.updatedAt }].slice(-20)
+          push(workflowId, [{ kind: 'system', tone: 'bad', text: `■ 已停止 · ${summarizeTask(run.task)}` }], now())
+          write()
+          return { ok: true, ids }
+        }
+        if (typeof spawn !== 'function') {
+          const saved = stopOne()
+          if (saved.ok === false) return saved
+          drainSync()
+          return present()
+        }
+        return hostSerial(async () => {
+          const saved = stopOne()
+          if (saved.ok === false) return saved
+          await releaseAll(saved.ids, release, warn)
+          await drainAll()
+          return present()
+        })
+      }
       const take = () => {
         const item = workflow(workflowId)
         if (!item) return { ok: false, error: 'No such workflow' }
         const lane = laneOf(workflowId)
         const ids = lane.active.flatMap(run => Object.values(run.ephemeral ?? {}))
-        const live = lane.active[0] ?? lane.last
+        const live = lane.active[0] ?? (lane.last?.live === true ? lane.last : null)
         lane.active = []
         lane.queue = []
-        if (live) {
-          const kept = { ...blankRun(item, live.task, now(), lane.history), id: live.id, startedAt: live.startedAt }
-          lane.last = kept
-          push(item.id, linesFor(item, live.task, { type: 'reset' }), now())
-        }
-        const demo = state.demos[item.id]
-        if (demo) {
-          state.demos[item.id] = { ...blankRun(item, demo.task, now(), demo.history), id: demo.id, startedAt: demo.startedAt }
-          if (!live) push(item.id, linesFor(item, demo.task, { type: 'reset' }), now())
-        }
-        if (!live && !demo) return { ok: false, error: 'This workflow has no task' }
+        if (!live?.task) return { ok: false, error: 'This workflow has no task' }
+        const kept = { ...blankRun(item, live.task, now(), lane.history), id: live.id, startedAt: live.startedAt }
+        lane.last = kept
+        push(item.id, linesFor(item, live.task, { type: 'reset' }), now())
         write()
         return { ok: true, ids }
       }
@@ -857,8 +915,8 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
         if (!text) throw new Error('A message needs text')
         const at = now()
         const lines = [{ kind: 'user', text }]
-        const run = primaryRun(item.id)
-        const running = run ? orderedIds(item, run.nodeStatus, 'running')[0] : undefined
+        const run = displayRun(item.id)
+        const running = run?.live === true ? orderedIds(item, run.nodeStatus, 'running')[0] : undefined
         if (running) {
           const node = nodeById(item, running)
           lines.push({ kind: 'bot', botId: running, step: '进行中', text: `${node?.name ?? running}：收到。我继续处理「${run.task?.title ?? ''}」。` })
@@ -886,13 +944,15 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
         item.nodes = next.nodes
         item.edges = next.edges
         item.layers = next.layers
-        const run = primaryRun(item.id)
-        if (run) {
+        const lane = laneOf(item.id)
+        const run = displayRun(item.id)
+        if (run?.live === true) {
           const ids = new Set(item.nodes.map(node => node.id))
           const nodeStatus = {}
           for (const id of ids) nodeStatus[id] = run.nodeStatus?.[id] ?? 'queued'
-          run.nodeStatus = nodeStatus
-          run.updatedAt = now()
+          const nextRun = { ...run, nodeStatus, updatedAt: now() }
+          if (lane.active.some(itemRun => itemRun.id === run.id)) storeRun(item.id, nextRun)
+          else if (lane.last?.id === run.id) lane.last = nextRun
         }
       })
     },
@@ -938,12 +998,6 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
         write()
         return { ok: true, matched: true, already: false, decision }
       }
-      const demo = state.demos[decision.id]
-      if (demo && demo.task?.id === taskId && demo.status === 'running') {
-        state.routes[taskId] = { key, kind: decision.kind, id: decision.id, at: now() }
-        write()
-        return { ok: true, matched: true, already: true, decision }
-      }
       if (queuedOrRunning(decision.id, taskId)) {
         state.routes[taskId] = { key, kind: decision.kind, id: decision.id, at: now() }
         write()
@@ -965,52 +1019,80 @@ export function createWorkflowService({ dir, persist = true, now = () => Date.no
       if (typeof release !== 'function') return Promise.resolve()
       const stale = []
       const abandoned = []
+      let wrote = false
       for (const [workflowId, lane] of Object.entries(state.lanes ?? {})) {
         const seen = new Set()
         for (const run of [...(lane.active ?? []), lane.last].filter(Boolean)) {
-          if (!run?.ephemeral || seen.has(run)) continue
+          if (seen.has(run)) continue
           seen.add(run)
+          const hasEphemeral = run?.ephemeral && Object.keys(run.ephemeral).length > 0
+          const zombie = run?.live === true && run.status === 'running' && !hasEphemeral
+          if (!hasEphemeral && !zombie) continue
           // A run still marked running here was cut off with the host that ran it,
           // and nothing resumes it: its instances are abandoned, not in progress.
           // Release them and end the run, or they stay hidden with no way to remove
-          // them. A run that already ended keeps its own status (#1388).
+          // them. A run that already ended keeps its own status (#1388). A zombie
+          // is a run dispose() already stripped: heal it on load (#1414).
           if (run.status === 'running') {
             abandoned.push({ workflowId, run })
             continue
           }
-          stale.push(...Object.values(run.ephemeral))
-          delete run.ephemeral
-          delete run.handed
+          if (hasEphemeral) {
+            stale.push(...Object.values(run.ephemeral))
+            delete run.ephemeral
+            delete run.handed
+            wrote = true
+          }
         }
       }
       for (const { workflowId, run } of abandoned) {
-        stale.push(...Object.values(run.ephemeral))
-        const ended = { ...run, status: 'failed', updatedAt: now() }
-        delete ended.ephemeral
-        delete ended.handed
-        const lane = laneOf(workflowId)
-        lane.active = lane.active.filter(item => item.id !== run.id)
-        lane.last = ended
-        lane.history = [...lane.history, { task: ended.task, status: ended.status, at: ended.updatedAt }].slice(-20)
+        try {
+          if (run.ephemeral) stale.push(...Object.values(run.ephemeral))
+          failCutoffRun(workflow(workflowId), run)
+          delete run.ephemeral
+          delete run.handed
+          archiveCutoffRun(workflowId, run)
+          wrote = true
+        } catch (error) {
+          warn(`flybot-workflow: could not end ${run.id}: ${error?.message ?? error}`)
+        }
       }
-      if (stale.length === 0 && abandoned.length === 0) return Promise.resolve()
+      if (stale.length === 0 && !wrote) return Promise.resolve()
+      if (stale.length === 0) {
+        write()
+        return Promise.resolve()
+      }
       return releaseAll(stale, release, warn).then(() => { write() })
     },
     dispose() {
-      const runs = Object.values(state.lanes).flatMap(lane => [...(lane.active ?? []), lane.last].filter(Boolean))
-      const ids = runs.flatMap(run => Object.values(run?.ephemeral ?? {}))
-      // Release first, then forget the ids (#1387). A record that drops an id
-      // before its Bot is gone leaves a hidden Bot that no state names, so
-      // nothing can ever find it again. releaseAll reports a failed id through
-      // `warn` instead of rejecting, so one bad release cannot skip the write.
-      // The caller awaits this: a disposer that returns before the Bots are
-      // gone is not a cleanup.
+      const ids = []
+      const runs = []
+      let endedLive = false
+      for (const [workflowId, lane] of Object.entries(state.lanes ?? {})) {
+        for (const run of [...(lane.active ?? [])]) {
+          if (run?.live === true && run.status === 'running') {
+            failCutoffRun(workflow(workflowId), run)
+            archiveCutoffRun(workflowId, run)
+            endedLive = true
+          }
+        }
+        runs.push(...[...(lane.active ?? []), lane.last].filter(Boolean))
+      }
+      for (const run of runs) ids.push(...Object.values(run?.ephemeral ?? {}))
+      // Release first, then forget the ids (#1387). End live runs before the
+      // record drops ephemeral so nothing is persisted as running without a map
+      // (#1414). A record that drops an id before its Bot is gone leaves a hidden
+      // Bot that no state names, so nothing can ever find it again. releaseAll
+      // reports a failed id through `warn` instead of rejecting, so one bad
+      // release cannot skip the write. The caller awaits this: a disposer that
+      // returns before the Bots are gone is not a cleanup.
+      const shouldWrite = ids.length > 0 || endedLive
       return releaseAll(ids, release, warn).then(() => {
         for (const run of runs) {
           delete run.ephemeral
           delete run.handed
         }
-        if (ids.length > 0) write()
+        if (shouldWrite) write()
       })
     },
   }
@@ -1045,81 +1127,65 @@ function seat(nodes, roster) {
   })
 }
 
-function seed(now) {
+function emptyLane() {
+  return { active: [], queue: [], last: null, history: [] }
+}
+
+function seed() {
   const delivery = normalizeGraph(deliveryWorkflow())
   const weekly = normalizeGraph(weeklyWorkflow())
-  const task = fixtureTask()
-  const logs = { [DELIVERY_ID]: [], [WEEKLY_ID]: [] }
-  const runs = {}
-  let seq = 0
-  const push = (workflowId, lines) => {
-    for (const line of lines) {
-      seq += 1
-      logs[workflowId].push({ id: `m${seq}`, at: now, ...line })
-    }
-  }
-  push(DELIVERY_ID, [
-    { kind: 'time', text: 'Today 9:07 PM' },
-    { kind: 'system', text: 'Workflow「发布交付流水线」已创建 · 成员 Planner、Writer、Coder、Reviewer、Tester、Deployer' },
-    { kind: 'user', text: '@发布交付流水线 #1280 今天要上，notice 太长了，帮我缩短并发布。' },
-  ])
-  let run = blankRun(delivery, task, now)
-  for (const op of [{ type: 'start' }, { type: 'complete', nodeId: 'planner' }, { type: 'complete', nodeId: 'writer' }]) {
-    const result = op.type === 'start'
-      ? { ...startFrontier(delivery, run.nodeStatus), joined: false, layerSize: 0 }
-      : completeNode(delivery, run.nodeStatus, op.nodeId)
-    run = { ...run, status: 'running', nodeStatus: result.status, steps: run.steps + 1, updatedAt: now }
-    push(DELIVERY_ID, linesFor(delivery, task, {
-      type: op.type, nodeId: op.nodeId, started: result.started ?? [],
-      joined: result.joined === true, finished: false, layerSize: result.layerSize ?? 0,
-    }))
-  }
-  runs[DELIVERY_ID] = run
-  const weeklyTask = { id: 'W42', title: '周报' }
-  const done = freshStatus(weekly)
-  for (const id of Object.keys(done)) done[id] = 'done'
-  runs[WEEKLY_ID] = {
-    ...blankRun(weekly, weeklyTask, now),
-    status: 'done',
-    nodeStatus: done,
-    steps: 4,
-    stepBudget: 4,
-    history: [{ task: weeklyTask, status: 'done', at: now }],
-  }
-  push(WEEKLY_ID, [
-    { kind: 'time', text: '上周五 17:00' },
-    { kind: 'system', tone: 'accent', text: '定时触发：周报 W42' },
-    { kind: 'bot', botId: 'researcher', step: '1/3', text: '本周行业动态 12 条已整理。' },
-    { kind: 'bot', botId: 'analyst', step: '2/3', text: '核心指标周环比：DAU +4.1%，留存 +0.6pt。' },
-    { kind: 'bot', botId: 'writer', step: '3/3', text: '周报已发布。' },
-    { kind: 'system', tone: 'ok', text: '✓ 运行完成' },
-  ])
   return {
-    version: 1, workflows: [delivery, weekly], runs: {}, demos: runs, lanes: {}, claims: {}, routes: {},
-    logs, seq, laneFormat: true,
+    version: 1,
+    workflows: [delivery, weekly],
+    runs: {},
+    lanes: { [DELIVERY_ID]: emptyLane(), [WEEKLY_ID]: emptyLane() },
+    claims: {},
+    routes: {},
+    logs: { [DELIVERY_ID]: [], [WEEKLY_ID]: [] },
+    seq: 0,
+    laneFormat: true,
   }
+}
+
+function purgeDemos(state) {
+  if (!state.demos || typeof state.demos !== 'object') {
+    delete state.demos
+    return
+  }
+  for (const [id, run] of Object.entries(state.demos)) {
+    if (!run || typeof run !== 'object') continue
+    const lane = state.lanes[id] ?? emptyLane()
+    const finished = run.status === 'done' || run.status === 'failed'
+    if (finished && run.task) {
+      lane.history = [...lane.history, { task: run.task, status: run.status, at: run.updatedAt ?? 0 }].slice(-20)
+    }
+    if (lane.last?.live !== true) lane.last = null
+    state.lanes[id] = lane
+  }
+  delete state.demos
 }
 
 function migrateRuns(state) {
   state.lanes ??= {}
-  state.demos ??= {}
   state.claims ??= {}
   if (state.laneFormat === true) return
   for (const [id, run] of Object.entries(state.runs ?? {})) {
     if (!run || typeof run !== 'object' || state.lanes[id]) continue
     const history = Array.isArray(run.history) ? run.history.filter(item => item?.status === 'done' || item?.status === 'failed') : []
     const bots = run.ephemeral && typeof run.ephemeral === 'object' ? Object.keys(run.ephemeral) : []
-    // Only a run that still has its Bots occupies a slot. The seeded script
-    // has none, so it stays a demo and replay can move it.
     if (bots.length > 0 && run.status === 'running') {
       state.lanes[id] = { active: [{ ...run, live: true }], queue: [], last: null, history }
       continue
     }
-    const demo = { ...run }
-    delete demo.live
-    state.demos[id] = demo
     const finished = run.status === 'done' || run.status === 'failed'
-    state.lanes[id] = { active: [], queue: [], last: finished ? { ...demo } : null, history }
+    state.lanes[id] = {
+      active: [],
+      queue: [],
+      last: finished && run.live === true ? { ...run, live: true } : null,
+      history: finished && run.task
+        ? [...history, { task: run.task, status: run.status, at: run.updatedAt ?? 0 }].slice(-20)
+        : history,
+    }
   }
   state.runs = {}
   state.laneFormat = true

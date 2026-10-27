@@ -133,8 +133,9 @@ test('a failed step tears the instances down, a fail-once step keeps them, and r
   assert.equal(held.workflows.find(item => item.id === retry.id).run.status, 'running')
   assert.equal(again.released.length, 0)
   const cancelled = await again.svc.reset({ workflowId: retry.id })
-  assert.equal(cancelled.workflows.find(item => item.id === retry.id).run.status, 'idle')
-  assert.equal(cancelled.workflows.find(item => item.id === retry.id).run.ephemeral, undefined)
+  const cleared = cancelled.workflows.find(item => item.id === retry.id)
+  assert.equal(cleared.run, null)
+  assert.equal(cleared.activeCount, 0)
   assert.deepEqual(again.released.sort(), again.spawned.map(item => item.id).sort())
 })
 
@@ -230,14 +231,15 @@ test('a Bot reply advances a live node; a 429 in the reply does not fail it', as
   const run = opened.workflows.find(item => item.id === made.id).run
   assert.equal(typeof handle, 'function')
   assert.equal(run.nodeStatus.plan, 'running')
-  handle({ from: run.ephemeral.plan, role: 'request', text: 'not a reply' })
-  handle({ from: run.ephemeral.plan, role: 'reply', text: 'Noted a rate limit (429) in the log.\nOUTPUT plan: two lines' })
+  assert.equal(await handle({ from: run.ephemeral.plan, role: 'request', text: 'not a reply' }), undefined)
+  const planReply = await handle({ from: run.ephemeral.plan, role: 'reply', text: 'Noted a rate limit (429) in the log.\nOUTPUT plan: two lines' })
+  assert.equal(planReply?.action, 'deny')
   const mid = await waitFor(() => {
     const row = started.service.state().workflows.find(item => item.id === made.id)
     return row.run?.nodeStatus?.code === 'running' ? row : null
   })
   assert.equal(mid.run.nodeStatus.plan, 'done')
-  handle({ from: run.ephemeral.code, role: 'reply', text: 'could not answer your message' })
+  await handle({ from: run.ephemeral.code, role: 'reply', text: 'could not answer your message' })
   const stopped = await waitFor(() => {
     const row = started.service.state().workflows.find(item => item.id === made.id)
     if (row.run?.status !== 'failed' || removed.length !== created.length) return null
@@ -250,7 +252,7 @@ test('a Bot reply advances a live node; a 429 in the reply does not fail it', as
   const again = await started.service.runNamed({ workflow: 'Lane', brief: 'Ship another', task: '#1402b' })
   const second = again.workflows.find(item => item.id === made.id).run
   assert.equal(second.status, 'running')
-  handle({ from: second.ephemeral.plan, role: 'reply', text: 'The model call failed.' })
+  await handle({ from: second.ephemeral.plan, role: 'reply', text: 'The model call failed.' })
   const failed = await waitFor(() => {
     const row = started.service.state().workflows.find(item => item.id === made.id)
     return row.run?.task?.id === '#1402b' && row.run?.status === 'failed' ? row : null
@@ -361,6 +363,8 @@ test('a load reaps the run a restart left running: its Bots go and the run ends 
     assert.deepEqual(released.sort(), ['eph-code', 'eph-plan'])
     const run = after.state().workflows.find(item => item.id === made.id).run
     assert.equal(run.status, 'failed')
+    assert.equal(run.nodeStatus.plan, 'failed')
+    assert.deepEqual(run.running, [])
     assert.equal(run.ephemeral, undefined)
     assert.equal(run.handed, undefined)
     assert.equal(run.updatedAt, clock)
@@ -398,8 +402,8 @@ test('a finished run stays done, and a run with no ephemeral Bots is not touched
     assert.equal(finished.ephemeral, undefined)
     const finishedAt = finished.updatedAt
 
-    // A run record whose ephemeral map is already gone (the shape the restart
-    // leaves when it lost the map) is outside this fix: reap must not rewrite it.
+    // A live run whose ephemeral map is already gone (dispose on an older build)
+    // is healed on load: end failed and free capacity (#1414).
     const idle = svc.define({ name: 'Idle', nodes: [{ id: 'one', name: 'Planner', role: 'plan', prompt: 'Wait.' }], edges: [] })
       .workflows.find(item => item.name === 'Idle')
     const store = readStore(dir)
@@ -407,9 +411,10 @@ test('a finished run stays done, and a run with no ephemeral Bots is not touched
     lane.active = [...(lane.active ?? []), {
       id: 'run-bare',
       workflowId: idle.id,
-      task: null,
+      task: { id: '#1414', title: 'Zombie' },
+      live: true,
       status: 'running',
-      nodeStatus: {},
+      nodeStatus: { one: 'running' },
       steps: 0,
       stepBudget: 1,
       failedOnce: {},
@@ -418,8 +423,7 @@ test('a finished run stays done, and a run with no ephemeral Bots is not touched
       updatedAt: 6,
     }]
     store.lanes[idle.id] = lane
-    const written = JSON.stringify(store)
-    writeFileSync(join(dir, 'workflows.json'), written)
+    writeFileSync(join(dir, 'workflows.json'), JSON.stringify(store))
 
     clock += 60_000
     const after = persistent(dir, released, () => clock)
@@ -428,11 +432,11 @@ test('a finished run stays done, and a run with no ephemeral Bots is not touched
     const kept = after.state().workflows.find(item => item.id === quick.id).run
     assert.equal(kept.status, 'done')
     assert.equal(kept.updatedAt, finishedAt)
-    const bare = after.state().workflows.find(item => item.id === idle.id).run
-    assert.equal(bare.status, 'running')
-    assert.equal(bare.updatedAt, 6)
-    // Nothing to release means nothing is written: the file it loaded is intact.
-    assert.equal(readFileSync(join(dir, 'workflows.json'), 'utf8'), written)
+    const healed = after.state().workflows.find(item => item.id === idle.id).run
+    assert.equal(healed.status, 'failed')
+    assert.equal(healed.nodeStatus.one, 'failed')
+    assert.deepEqual(healed.running, [])
+    assert.equal(after.state().workflows.find(item => item.id === idle.id).activeCount, 0)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

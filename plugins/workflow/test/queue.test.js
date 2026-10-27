@@ -47,6 +47,36 @@ function delivery(state) {
   return state.workflows.find(item => item.id === DELIVERY_ID)
 }
 
+test('stopping one live run leaves the other running and releases only its Bots', async () => {
+  const { svc, spawned, released } = harness()
+  svc.setConcurrency({ workflowId: DELIVERY_ID, maxConcurrent: 2 })
+  await svc.assign({ workflowId: DELIVERY_ID, taskId: '#1422', title: 'PR 1422' })
+  const second = await svc.assign({ workflowId: DELIVERY_ID, taskId: '#1395', title: 'PR 1395' })
+  const lane = delivery(second)
+  assert.equal(lane.activeCount, 2)
+  const victim = lane.runs.find(run => run.task.id === '#1422')
+  const kept = lane.runs.find(run => run.task.id === '#1395')
+  const botsBefore = spawned.length
+  const stopped = await svc.reset({ workflowId: DELIVERY_ID, runId: victim.id })
+  const after = delivery(stopped)
+  assert.equal(after.activeCount, 1)
+  assert.equal(after.runs[0].task.id, '#1395')
+  assert.equal(after.runs[0].id, kept.id)
+  assert.ok(released.length > 0)
+  assert.equal(spawned.length, botsBefore)
+})
+
+test('activeCount matches the number of live runs returned in workflow.runs', async () => {
+  const { svc } = harness()
+  svc.setConcurrency({ workflowId: DELIVERY_ID, maxConcurrent: 2 })
+  await svc.assign({ workflowId: DELIVERY_ID, taskId: '#1422', title: 'PR 1422' })
+  const both = delivery(await svc.assign({ workflowId: DELIVERY_ID, taskId: '#1395', title: 'PR 1395' }))
+  assert.equal(both.activeCount, 2)
+  assert.equal(both.runs.length, 2)
+  assert.equal(both.runs.filter(run => run.live === true && run.status === 'running').length, 2)
+  assert.equal(both.activeCount, both.runs.length)
+})
+
 test('a second assign queues behind a live run and does not release its Bots', async () => {
   const { svc, spawned, released } = harness()
   svc.setConcurrency({ workflowId: DELIVERY_ID, maxConcurrent: 1 })
@@ -108,7 +138,7 @@ test('the queued task starts only after the live run finishes, in FIFO order', a
   assert.equal(delivery(svc.state()).queueDepth, 0)
 })
 
-test('a node stays running until the Bot replies, and demo-step does not move a live run', async () => {
+test('a node stays running until the Bot replies', async () => {
   const { svc, dispatched } = harness()
   const started = await svc.assign({ workflowId: DELIVERY_ID, taskId: '#7', title: 'Wait for the Bot' })
   const run = delivery(started).run
@@ -117,11 +147,6 @@ test('a node stays running until the Bot replies, and demo-step does not move a 
   assert.equal(dispatched.length, 1)
   assert.equal(dispatched[0].step.nodeId, 'planner')
   assert.match(dispatched[0].step.inputs.task, /#7/)
-
-  const demo = await svc.demoStep({ workflowId: DELIVERY_ID })
-  assert.equal(demo.ok, false)
-  assert.equal(delivery(svc.state()).run.nodeStatus.planner, 'running')
-  assert.equal(delivery(svc.state()).run.nodeStatus.writer, 'queued')
 
   const writer = await svc.stepResult({
     botId: run.ephemeral.planner,
@@ -179,7 +204,8 @@ test('assigning to a Bot does not start a workflow, even when the title matches 
   assert.equal(routed.decision.id, 'bot-coder')
   assert.equal(delivery(svc.state()).activeCount, 0)
   assert.equal(spawned.length, 0)
-  assert.equal(delivery(svc.state()).run.task.id, '#1280')
+  assert.equal(delivery(svc.state()).run, null)
+  assert.equal(delivery(svc.state()).preview, '等待任务')
 
   const remote = svc.assign({ botId: 'bot-friend', taskId: '#52', title: 'Nope' })
   assert.equal(remote.ok, false)
@@ -243,7 +269,7 @@ test('outputs travel along edges and a node does not start without them', async 
   assert.match(done.workflows.find(item => item.id === made.id).messages.map(message => message.text).join('\n'), /model call failed/)
 })
 
-test('an old store keeps the seeded script as a demo, so replay still advances', () => {
+test('an old store drops scripted runs and keeps only live abandoned runs', () => {
   const dir = mkdtempSync(join(tmpdir(), 'flybot-wf-old-'))
   try {
     const deliveryGraph = normalizeGraph(deliveryWorkflow())
@@ -286,32 +312,15 @@ test('an old store keeps the seeded script as a demo, so replay still advances',
     const svc = createWorkflowService({ dir, persist: true, now: () => 9, bots: () => [] })
     const opened = delivery(svc.state())
     assert.equal(opened.activeCount, 0)
-    assert.equal(opened.run.task.id, '#1280')
-    assert.equal(opened.run.live, undefined)
-    assert.equal(opened.run.nodeStatus.coder, 'running')
-    const stepped = svc.demoStep({ workflowId: DELIVERY_ID })
-    assert.equal(stepped.ok, true)
-    const after = delivery(stepped)
-    assert.equal(after.activeCount, 0)
-    assert.equal(after.run.nodeStatus.coder, 'done')
-    const week = stepped.workflows.find(item => item.id === WEEKLY_ID)
+    assert.equal(opened.run, null)
+    assert.equal(opened.preview, '等待任务')
+    const week = svc.state().workflows.find(item => item.id === WEEKLY_ID)
     assert.equal(week.activeCount, 0)
-    assert.equal(week.run.status, 'done')
-    assert.equal(week.run.nodeStatus.researcher, 'done')
-    const replay = svc.demoStep({ workflowId: WEEKLY_ID })
-    assert.equal(replay.ok, true)
-    const replayed = replay.workflows.find(item => item.id === WEEKLY_ID)
-    assert.equal(replayed.activeCount, 0)
-    assert.equal(replayed.run.status, 'running')
-    assert.equal(replayed.run.nodeStatus.researcher, 'running')
-    assert.equal(replayed.run.nodeStatus.writer, 'queued')
-    const replayNext = svc.demoStep({ workflowId: WEEKLY_ID })
-    assert.equal(replayNext.workflows.find(item => item.id === WEEKLY_ID).run.nodeStatus.analyst, 'running')
-    const solo = replay.workflows.find(item => item.id === 'solo')
+    assert.equal(week.run, null)
+    assert.match(week.preview, /周五 17:00/)
+    const solo = svc.state().workflows.find(item => item.id === 'solo')
     assert.equal(solo.activeCount, 1)
-    const refused = svc.demoStep({ workflowId: 'solo' })
-    assert.equal(refused.ok, false)
-    assert.match(refused.error, /A live run is in progress/)
+    assert.equal(solo.run?.live, true)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
