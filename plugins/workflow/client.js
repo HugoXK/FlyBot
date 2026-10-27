@@ -45,6 +45,7 @@ window.__ModuleLoader__.load({
       'Close': '关闭',
       Pause: '暂停',
       Resume: '继续',
+      Stop: '停止',
       Progress: '进度',
       'New workflow': '新建 Workflow',
       Name: '名称',
@@ -129,6 +130,8 @@ window.__ModuleLoader__.load({
     // Zero-width plane center line: shift wire coordinates so strokes stay inside the SVG box.
     const WIRE_SPAN = 480
     const NODE_WIRE_OUT = 56
+    const NODE_W = 168
+    const NODE_H = 72
 
     function workflowNodeIds(workflow) {
       return new Set((workflow?.nodes ?? []).map(node => node.id))
@@ -339,15 +342,51 @@ window.__ModuleLoader__.load({
         })))
     }
 
+    function RunStrip({ workflow, run, focused, onFocus, onPause, onResume, onStop, onTab, onOpenDrawer }) {
+      const running = (run.running ?? []).map(id => nodeOf(workflow, id)).filter(Boolean)
+      const chipClass = run.status === 'done' ? 'done' : (run.paused ? 'queued' : (running[0] ? 'running' : 'queued'))
+      const chipLabel = run.status === 'done' ? tr('Done') : (run.paused ? tr('Pause') : (running[0] ? tr('Running') : tr('Queued')))
+      const meta = run.paused
+        ? `${tr('Pause')} · ${running.map(node => node.name).join(' ‖ ') || '—'} · ${run.doneCount}/${run.nodeCount}`
+        : (running[0]
+          ? `${tr('Running')} · ${running.map(node => node.name).join(' ‖ ')} · ${run.doneCount}/${run.nodeCount}`
+          : (run.status === 'done' ? tr('Done') : tr('Waiting for a task')))
+      const focus = () => onFocus?.(run.id)
+      const stopBubble = (event) => { event?.stopPropagation?.() }
+      return h('div', {
+        className: `wf-strip ${focused ? 'wf-strip-focus' : ''}`,
+        'data-run-id': run.id,
+        role: 'button',
+        tabIndex: 0,
+        onClick: focus,
+        onKeyDown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); focus() } },
+      },
+        h('div', { className: 'wf-strip-head' },
+          h('div', { className: 'wf-strip-id' },
+            h('div', { className: 'wf-tk', title: run.task?.title ?? '' }, taskSummary(run.task, run)),
+            h('div', { className: 'wf-meta' }, meta)),
+          h('span', { className: `wf-chip ${chipClass}` }, chipLabel)),
+        h('div', { className: 'wf-strip-progress', 'aria-label': tr('Progress'), title: tr('Progress') },
+          h('div', { className: 'wf-segs' }, (run.marks ?? []).map((mark, index) => h('span', { key: index, className: `wf-seg ${mark}` })))),
+        h('div', { className: 'wf-strip-actions' },
+          run.status === 'running' ? (run.paused
+            ? h('button', { type: 'button', className: 'wf-btn wf-sm wf-pri', onClick: (event) => { stopBubble(event); onResume?.(run.id) } }, tr('Resume'))
+            : h('button', { type: 'button', className: 'wf-btn wf-sm', onClick: (event) => { stopBubble(event); onPause?.(run.id) } }, tr('Pause'))) : null,
+          run.status === 'running' ? h('button', { type: 'button', className: 'wf-btn wf-sm wf-danger-outline', onClick: (event) => { stopBubble(event); onStop?.(run.id) } }, tr('Stop')) : null,
+          h('button', { type: 'button', className: 'wf-btn wf-sm', onClick: (event) => { stopBubble(event); focus(); onTab('runs'); onOpenDrawer?.() } }, tr('Progress')),
+          h('button', { type: 'button', className: 'wf-btn wf-sm', onClick: (event) => { stopBubble(event); focus(); onTab('flow'); onOpenDrawer?.() } }, tr('Flow'))))
+    }
+
     // Stage: view/control only — progress and flowchart; no message composer (#1459).
-    function Stage({ workflow, roster, stageLeft, drawer, tab, onCloseDrawer, onToggleDrawer, onTab, onAssign, onTip, onReset, editing, onToggleEdit, onCommit, onPause, onResume }) {
+    function Stage({ workflow, roster, stageLeft, drawer, tab, focusedRunId, onFocusRun, onCloseDrawer, onToggleDrawer, onOpenDrawer, onTab, onAssign, onTip, onReset, editing, onToggleEdit, onCommit, onPause, onResume, onStop }) {
       const chatRef = useRef(null)
-      const run = workflow.run?.live === true ? workflow.run : null
+      const liveRuns = liveStageRuns(workflow)
+      const viewRun = resolveFocusedRun(workflow, focusedRunId)
+      const showSummary = (workflow.queueDepth ?? 0) > 0 || liveRuns.length > 1
       useEffect(() => {
         const el = chatRef.current
         if (el) el.scrollTop = el.scrollHeight
       }, [workflow.messages.length])
-      const running = (run?.running ?? []).map(id => nodeOf(workflow, id)).filter(Boolean)
       const visible = stageMessages(workflow, workflow.messages, roster)
       return h('div', { className: 'wf-stage', style: { left: stageLeft } },
         h('div', { className: 'wf-main' },
@@ -358,30 +397,20 @@ window.__ModuleLoader__.load({
               h('span', { className: 'wf-chev', 'aria-hidden': true }, '▾')),
             h('div', { className: 'wf-actions' },
               h('button', { type: 'button', className: 'wf-btn wf-pri', onClick: onAssign }, tr('Hand a task to a Workflow')))),
-          run ? h('div', { className: 'wf-strip' },
-            h('div', { className: 'wf-strip-id' },
-              h('div', { className: 'wf-tk', title: run.task?.title ?? '' }, taskSummary(run.task, run)),
-              h('div', { className: 'wf-meta' }, run.paused
-                ? `${tr('Pause')} · ${running.map(node => node.name).join(' ‖ ') || '—'} · ${run.doneCount}/${run.nodeCount}`
-                : (running[0]
-                  ? `${tr('Running')} · ${running.map(node => node.name).join(' ‖ ')} · ${run.doneCount}/${run.nodeCount}`
-                  : (run.status === 'done' ? tr('Done') : tr('Waiting for a task'))))),
-            h('div', { className: 'wf-segs', 'aria-label': tr('Progress'), title: tr('Progress') }, (run.marks ?? []).map((mark, index) => h('span', { key: index, className: `wf-seg ${mark}` }))),
-            h('span', { className: `wf-chip ${run.status === 'done' ? 'done' : (run.paused ? 'queued' : (running[0] ? 'running' : 'queued'))}` },
-              run.status === 'done' ? tr('Done') : (run.paused ? tr('Pause') : (running[0] ? tr('Running') : tr('Queued')))),
-            (workflow.queueDepth > 0 || (workflow.activeCount ?? 0) > 1) ? h('span', { className: 'wf-chip queued' }, tr('{count} running · queue {depth}', { count: workflow.activeCount ?? 0, depth: workflow.queueDepth ?? 0 })) : null,
-            run.status === 'running' ? (run.paused
-              ? h('button', { type: 'button', className: 'wf-btn wf-sm wf-pri', onClick: onResume }, tr('Resume'))
-              : h('button', { type: 'button', className: 'wf-btn wf-sm', onClick: onPause }, tr('Pause'))) : null,
-            h('button', { type: 'button', className: 'wf-btn wf-sm', onClick: () => { onTab('runs'); onToggleDrawer() } }, tr('Progress')),
-            h('button', { type: 'button', className: 'wf-btn wf-sm', onClick: () => onTab('flow') }, tr('Flow'))) : null,
+          showSummary ? h('div', { className: 'wf-strip wf-strip-summary' },
+            h('span', { className: 'wf-chip queued' }, tr('{count} running · queue {depth}', { count: workflow.activeCount ?? liveRuns.length, depth: workflow.queueDepth ?? 0 }))) : null,
+          liveRuns.length > 0 ? h('div', { className: 'wf-strips' },
+            liveRuns.map(run => h(RunStrip, {
+              key: run.id, workflow, run, focused: viewRun?.id === run.id,
+              onFocus: onFocusRun, onPause, onResume, onStop, onTab, onOpenDrawer,
+            }))) : null,
           visible.length > 0 ? h('div', { className: 'wf-chat', ref: chatRef },
             h('div', { className: 'wf-chat-in' },
               visible.map(message => h(Bubble, { key: message.id, message, workflow, roster })))) : null),
         drawer ? h('aside', { className: 'wf-drawer' },
           h('div', { className: 'wf-dr-head' },
             h('button', { type: 'button', className: 'wf-icon', 'aria-label': tr('Close'), onClick: onCloseDrawer }, '×')),
-          h(DrawerBody, { workflow, roster, tab, onTab, onReset, onTip, editing, onToggleEdit, onCommit })) : null)
+          h(DrawerBody, { workflow, roster, tab, onTab, onReset, onTip, editing, onToggleEdit, onCommit, viewRun })) : null)
     }
 
     function Bubble({ message, workflow, roster }) {
@@ -397,8 +426,8 @@ window.__ModuleLoader__.load({
             message.attachments?.length ? h('div', { className: 'wf-att' }, message.attachments.map(name => h('span', { key: name }, name))) : null)))
     }
 
-    function DrawerBody({ workflow, roster, tab, onTab, onReset, onTip, editing, onToggleEdit, onCommit }) {
-      const run = workflow.run?.live === true ? workflow.run : null
+    function DrawerBody({ workflow, roster, tab, onTab, onReset, onTip, editing, onToggleEdit, onCommit, viewRun }) {
+      const run = viewRun?.live === true ? viewRun : null
       return h('div', { className: 'wf-dr-body' },
         h('div', { className: 'wf-dr-title' },
           h('div', { className: 'wf-ico wf-ico-lg' }, glyph()),
@@ -434,8 +463,59 @@ window.__ModuleLoader__.load({
       const y1 = (from.y ?? 0) + NODE_WIRE_OUT
       const x2 = (to.x ?? 0) + WIRE_SPAN
       const y2 = to.y ?? 0
-      const mid = (y1 + y2) / 2
-      return `M ${x1} ${y1} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}`
+      if (Math.abs(x1 - x2) < 0.5) {
+        const mid = (y1 + y2) / 2
+        return `M ${x1} ${y1} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}`
+      }
+      const midY = Math.round((y1 + y2) / 2)
+      return `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`
+    }
+
+    function parallelFrameStyle(members) {
+      const minX = Math.min(...members.map(node => node.x ?? 0))
+      const maxX = Math.max(...members.map(node => node.x ?? 0))
+      const minY = Math.min(...members.map(node => node.y ?? 0))
+      const maxY = Math.max(...members.map(node => (node.y ?? 0) + NODE_H))
+      const pad = 10
+      return {
+        left: minX - NODE_W / 2 - pad,
+        top: minY - 20,
+        width: maxX - minX + NODE_W + pad * 2,
+        height: maxY - minY + pad,
+      }
+    }
+
+    function liveStageRuns(workflow) {
+      let liveRuns = (workflow.runs ?? []).filter(run => run?.live === true && run.status === 'running')
+      if (liveRuns.length === 0 && workflow.run?.live === true && workflow.run.status === 'running') {
+        liveRuns = [workflow.run]
+      }
+      return liveRuns
+    }
+
+    function resolveFocusedRun(workflow, focusedRunId) {
+      const live = liveStageRuns(workflow)
+      if (focusedRunId) {
+        const picked = live.find(run => run.id === focusedRunId)
+        if (picked) return picked
+      }
+      if (workflow.run?.live === true && workflow.run.status === 'running') return workflow.run
+      return live[0] ?? null
+    }
+
+    function runHistoryRows(workflow) {
+      const history = workflow.history ?? []
+      const queued = workflow.queue ?? []
+      const liveRuns = liveStageRuns(workflow)
+      if (liveRuns.length === 0 && history.length === 0 && queued.length === 0) return null
+      const rows = liveRuns.map(run => ({
+        task: run.task,
+        status: 'running',
+        current: workflow.run?.id === run.id,
+      }))
+      for (const task of queued) rows.push({ task, status: 'queued', current: false })
+      for (const item of history) rows.push({ ...item, current: false })
+      return rows
     }
 
     function wireSvgProps(height) {
@@ -529,12 +609,9 @@ window.__ModuleLoader__.load({
           (workflow.layers ?? []).filter(layer => layer.length > 1).map(layer => {
             const members = layer.map(id => nodes.find(node => node.id === id)).filter(Boolean)
             if (members.length < 2) return null
-            const minX = Math.min(...members.map(node => node.x))
-            const maxX = Math.max(...members.map(node => node.x))
-            const y = Math.min(...members.map(node => node.y))
             return h('div', {
               key: layer.join('+'), className: 'wf-par wf-abs',
-              style: { left: minX - 108, top: y - 18, width: maxX - minX + 216, height: 92 },
+              style: parallelFrameStyle(members),
             }, h('div', { className: 'wf-plabel' }, '并行分支 · 全部通过后汇合'))
           }),
           nodes.map(node => h('div', {
@@ -547,8 +624,8 @@ window.__ModuleLoader__.load({
               if (!editing || event.target?.dataset?.port || event.target?.dataset?.remove) return
               setGesture({ kind: 'move', id: node.id, ox: event.clientX, oy: event.clientY, x: node.x, y: node.y })
             },
-            onMouseEnter: (event) => onTip?.({ x: event.clientX, y: event.clientY, node }),
-            onMouseLeave: () => onTip?.(null),
+            onMouseEnter: editing ? (event) => onTip?.({ x: event.clientX, y: event.clientY, node }) : null,
+            onMouseLeave: editing ? () => onTip?.(null) : null,
           },
             editing ? h('button', {
               type: 'button', className: 'wf-port out', 'data-port': 'out', 'aria-label': node.name,
@@ -601,13 +678,8 @@ window.__ModuleLoader__.load({
     }
 
     function Runs({ workflow }) {
-      const history = workflow.history ?? workflow.run?.history ?? []
-      const queued = workflow.queue ?? []
-      const current = workflow.run?.task
-      if (!current && history.length === 0 && queued.length === 0) return h('div', { className: 'wf-muted' }, tr('No runs yet.'))
-      const rows = history.map(item => ({ ...item, current: false }))
-      for (const task of queued) rows.push({ task, status: 'queued', current: false })
-      if (current && !rows.some(item => item.task?.id === current.id && item.status === workflow.run.status)) rows.push({ task: current, status: workflow.run.status, current: true })
+      const rows = runHistoryRows(workflow)
+      if (!rows) return h('div', { className: 'wf-muted' }, tr('No runs yet.'))
       return h('div', null, rows.map((item, index) => h('div', { key: index, className: 'wf-hist' },
         h('span', { title: item.task?.title ?? '' }, taskSummary(item.task, item)),
         h('span', { className: `wf-chip ${item.status === 'done' ? 'done' : item.status === 'running' ? 'running' : item.status === 'failed' ? 'failed' : 'queued'}` }, tr(item.status === 'done' ? 'Done' : item.status === 'running' ? 'Running' : item.status === 'failed' ? 'Failed' : 'Queued')))))
@@ -960,6 +1032,7 @@ window.__ModuleLoader__.load({
       const [tip, setTip] = useState(null)
       const [error, setError] = useState('')
       const [editing, setEditing] = useState(false)
+      const [focusedRunId, setFocusedRunId] = useState(null)
       const [rowMenu, setRowMenu] = useState(null)
       const [renaming, setRenaming] = useState(null)
       const [deleting, setDeleting] = useState(null)
@@ -1044,6 +1117,13 @@ window.__ModuleLoader__.load({
 
       const workflows = pack?.workflows ?? []
       const open = workflows.find(item => item.id === openId) ?? null
+
+      useEffect(() => {
+        if (!open) { setFocusedRunId(null); return }
+        const live = liveStageRuns(open)
+        if (live.length === 0) { setFocusedRunId(null); return }
+        if (!live.some(run => run.id === focusedRunId)) setFocusedRunId(live[0].id)
+      }, [open?.id, open?.activeCount, open?.runs?.length, focusedRunId])
 
       const loadTasks = async () => {
         const host = globalThis.__flybot__?.host
@@ -1155,7 +1235,8 @@ window.__ModuleLoader__.load({
           h('span', { className: 'wf-txt' }, h('span', { className: 'wf-t1' }, tr('Hand a task to a Workflow')))),
         error ? h('div', { className: 'wf-err', role: 'alert' }, error) : null,
         open ? portal(h(Stage, {
-          workflow: open, roster, stageLeft, drawer, tab,
+          workflow: open, roster, stageLeft, drawer, tab, focusedRunId,
+          onFocusRun: setFocusedRunId,
           editing,
           onToggleEdit: () => { setEditing(value => !value); setDrawer(true); setTab('flow') },
           onCommit: (graph) => {
@@ -1165,16 +1246,20 @@ window.__ModuleLoader__.load({
             })
           },
           onCloseDrawer: () => setDrawer(false),
+          onOpenDrawer: () => setDrawer(true),
           onToggleDrawer: () => { setDrawer(value => !value); setTab('flow') },
           onTab: (key) => { setTab(key); setDrawer(true) },
           onReset: () => { void call('workflow/reset', { workflowId: open.id }).then(value => { if (value?.workflows) setPack(value) }) },
           onAssign: () => { setAssignOpen(true); void loadTasks() },
           onTip: setTip,
-          onPause: () => {
-            void call('workflow/pause', { workflowId: open.id }).then(value => { if (value?.workflows) setPack(value) })
+          onPause: (runId) => {
+            void call('workflow/pause', { workflowId: open.id, runId }).then(value => { if (value?.workflows) setPack(value) })
           },
-          onResume: () => {
-            void call('workflow/resume', { workflowId: open.id }).then(value => { if (value?.workflows) setPack(value) })
+          onResume: (runId) => {
+            void call('workflow/resume', { workflowId: open.id, runId }).then(value => { if (value?.workflows) setPack(value) })
+          },
+          onStop: (runId) => {
+            void call('workflow/reset', { workflowId: open.id, runId }).then(value => { if (value?.workflows) setPack(value) })
           },
         })) : null,
         assignOpen ? portal(h(AssignModal, {
@@ -1244,7 +1329,16 @@ window.__ModuleLoader__.load({
 .wf-btn.wf-pri{background:var(--bt-accent,#4d6bfe);border-color:var(--bt-accent,#4d6bfe);color:#fff}
 .wf-btn.wf-dark{background:var(--bt-user,#070707);color:var(--bt-user-ink,#fcfcfc);border-color:var(--bt-user,#070707)}
 .wf-btn.wf-sm{height:28px}
-.wf-strip{margin:0 auto 4px;width:min(720px,calc(100% - 48px));border:1px solid var(--bt-line,rgba(20,20,20,.08));background:var(--bt-card,#fff);border-radius:12px;padding:9px 12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.wf-strips{display:flex;flex-direction:column;gap:8px;margin:0 auto 4px;width:min(720px,calc(100% - 48px))}
+.wf-strip{margin:0;width:100%;border:1px solid var(--bt-line,rgba(20,20,20,.08));background:var(--bt-card,#fff);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;box-sizing:border-box;cursor:pointer;text-align:left;color:inherit}
+.wf-strip:focus-visible{outline:2px solid var(--bt-accent,#4d6bfe);outline-offset:2px}
+.wf-strip-focus{border-color:var(--bt-accent,#4d6bfe);box-shadow:0 0 0 2px rgba(77,107,254,.14)}
+.wf-strip-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;width:100%}
+.wf-strip-progress{width:100%}
+.wf-strip-progress .wf-segs{width:100%}
+.wf-strip-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.wf-strip-summary{justify-content:center;border-style:dashed;background:transparent;margin-bottom:2px;cursor:default;flex-direction:row}
+.wf-btn.wf-danger-outline{border-color:rgba(229,72,77,.45);color:#e5484d}
 .wf-tk{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:min(360px,42vw)}.wf-meta{font-size:11.5px;color:var(--bt-ink-2,rgba(20,20,20,.6));white-space:nowrap}
 .wf-segs{display:flex;gap:3px;flex:1;min-width:80px}
 .wf-seg{height:5px;border-radius:3px;background:var(--bt-active,rgba(119,119,119,.17));flex:1}
@@ -1351,7 +1445,8 @@ window.__ModuleLoader__.load({
 .wf-muted{font-size:12px;color:var(--bt-ink-3,#9a9a9a);padding:4px 8px}
 .wf-err{font-size:12px;color:#e5484d;padding:4px 8px}
 .wf-assign-row{opacity:.9}
-.wf-par{position:relative;border:1px dashed var(--bt-ink-3,#9a9a9a);border-radius:14px;padding:16px 8px 8px}
+.wf-par{position:relative;z-index:0;pointer-events:none;border:1px dashed var(--bt-ink-3,#9a9a9a);border-radius:14px;padding:16px 8px 8px}
+.wf-node.wf-abs{z-index:1}
 .wf-plabel{position:absolute;top:-9px;left:50%;transform:translateX(-50%);font-size:10.5px;color:var(--bt-ink-2,rgba(20,20,20,.6));background:var(--bt-card,#fff);padding:0 6px;white-space:nowrap}
 .wf-settings-canvas{padding:16px}
 .wf-settings-layout{display:flex;flex-direction:column;gap:16px}
@@ -1388,6 +1483,7 @@ window.__ModuleLoader__.load({
     return {
       name: 'flybot-workflow', inject: ['flybot'], apply, Section, WorkflowSettings,
       tr, columnOf, shortId, stageMessages, taskSummary, chatPreview, wirePath, WIRE_SPAN, NODE_WIRE_OUT,
+      runHistoryRows, liveStageRuns, resolveFocusedRun, parallelFrameStyle, NODE_W,
       botPaletteSubtitle, botTint,
     }
   },
