@@ -442,6 +442,21 @@ function persistedRun(dir, workflowId) {
   return active ?? lane.last ?? null
 }
 
+// #1425: the plugin starts reap without awaiting it (index.js:92), so this test waits for the
+// state reap writes, never for a fixed wall-clock delay: a 20 ms sleep passes on a fast box and
+// flakes on a loaded runner, and the failure it produces looks like the bug the test hunts. The
+// deadline only bounds failure, and the message names the state the run was last in.
+async function untilRun(dir, workflowId, settled, { timeout = 2000, interval = 10 } = {}) {
+  const deadline = Date.now() + timeout
+  let last
+  for (;;) {
+    last = persistedRun(dir, workflowId)
+    if (settled(last)) return last
+    if (Date.now() >= deadline) throw new Error(`the run was not reaped within ${timeout} ms; last state: ${JSON.stringify(last)}`)
+    await new Promise((resolve) => setTimeout(resolve, interval))
+  }
+}
+
 test('a load reaps the run a restart left running: its Bots go and the run ends failed (#1388)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'wf-reap-'))
   const released = []
@@ -576,12 +591,136 @@ test('the plugin load itself reaps a run the restart left running (#1388)', asyn
       warn() {},
     }
     const loaded = apply({ flybot: { scope: () => fb }, effect(fn) { fn() } }, { dir })
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    // Loading calls reap without awaiting it; wait for what it writes, with a deadline.
+    const settled = await untilRun(dir, made.id, (run) => run?.status === 'failed' && run.ephemeral === undefined)
+    assert.equal('handed' in settled, false)
     assert.deepEqual(released, ['eph-plan'])
     const run = loaded.service.state().workflows.find(item => item.id === made.id).run
     assert.equal(run.status, 'failed')
     assert.equal(run.ephemeral, undefined)
     loaded.dispose()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// #1424: ending a run has to settle the node map with it. `publicRun` exposes
+// `running` from `nodeStatus`, and the strip paints "Running now" from that, so a
+// run that says `failed` while a node still says `running` is a ghost on screen.
+test('stopping a live run settles its node map: no node stays running (#1424)', async () => {
+  const { svc, spawned, released } = harness()
+  const made = lane(svc).workflows.find(item => item.name === 'Lane')
+  const started = await svc.runNamed({ workflow: 'Lane', brief: 'Ship the note' })
+  assert.equal(started.ok, true)
+  const live = started.workflows.find(item => item.id === made.id).run
+  assert.equal(live.status, 'running')
+  assert.deepEqual(live.running, ['plan'])
+
+  const stopped = await svc.reset({ workflowId: made.id, runId: live.id })
+  assert.equal(stopped.ok, true)
+  const run = stopped.workflows.find(item => item.id === made.id).run
+  assert.equal(run.status, 'failed')
+  assert.deepEqual(run.running, [])
+  assert.equal(run.nodeStatus.plan, 'failed')
+  assert.equal(run.nodeStatus.code, 'queued')
+  assert.deepEqual(released.sort(), spawned.map(entry => entry.id).sort())
+
+  // The ending reaches the list the stage renders, not just the run record.
+  const history = stopped.workflows.find(item => item.id === made.id).history
+  assert.equal(history.at(-1).status, 'failed')
+  assert.equal(history.at(-1).at, run.updatedAt)
+})
+
+test('a reaped run whose node map names a node the graph no longer has settles the rest (#1424)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wf-reap-1424-ghost-'))
+  const released = []
+  const clock = () => 1_700_000_000_000
+  try {
+    const svc = persistent(dir, released, clock)
+    const made = svc.define({
+      name: 'Lane',
+      nodes: [{ id: 'plan', name: 'Planner', role: 'plan', prompt: 'Write the plan.' }],
+      edges: [],
+    }).workflows.find(item => item.name === 'Lane')
+    const store = readStore(dir)
+    const lane = store.lanes[made.id] ?? { active: [], queue: [], last: null, history: [] }
+    lane.active = [...(lane.active ?? []), {
+      id: 'run-ghost',
+      workflowId: made.id,
+      task: null,
+      live: true,
+      status: 'running',
+      nodeStatus: { plan: 'running', gone: 'running' },
+      steps: 0,
+      stepBudget: 2,
+      failedOnce: {},
+      history: [],
+      startedAt: 4,
+      updatedAt: 5,
+      ephemeral: { plan: 'eph-plan', gone: 'eph-gone' },
+    }]
+    store.lanes[made.id] = lane
+    writeFileSync(join(dir, 'workflows.json'), JSON.stringify(store))
+
+    const after = persistent(dir, released, clock)
+    await after.reap()
+    assert.deepEqual(released.sort(), ['eph-gone', 'eph-plan'])
+    const run = after.state().workflows.find(item => item.id === made.id).run
+    assert.equal(run.status, 'failed')
+    assert.equal(run.nodeStatus.plan, 'failed')
+    // Nothing to move: the graph no longer has that node, so it keeps its record
+    // and the strip, which walks the graph, does not paint it.
+    assert.equal(run.nodeStatus.gone, 'running')
+    assert.deepEqual(run.running, [])
+    assert.equal(run.ephemeral, undefined)
+    assert.equal(run.handed, undefined)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('an ended run keeps its ending when reap drops the records it still holds (#1424)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wf-reap-1424-done-'))
+  const released = []
+  const clock = () => 1_700_000_000_000
+  try {
+    const svc = persistent(dir, released, clock)
+    const made = svc.define({
+      name: 'Lane',
+      nodes: [{ id: 'only', name: 'Planner', role: 'plan', prompt: 'Say it once.' }],
+      edges: [],
+    }).workflows.find(item => item.name === 'Lane')
+    const store = readStore(dir)
+    const lane = store.lanes[made.id] ?? { active: [], queue: [], last: null, history: [] }
+    lane.last = {
+      id: 'run-done',
+      workflowId: made.id,
+      task: null,
+      live: true,
+      status: 'done',
+      nodeStatus: { only: 'done' },
+      steps: 1,
+      stepBudget: 2,
+      failedOnce: {},
+      history: [{ task: null, status: 'done', at: 5 }],
+      startedAt: 4,
+      updatedAt: 6,
+      ephemeral: { only: 'eph-only' },
+    }
+    store.lanes[made.id] = lane
+    writeFileSync(join(dir, 'workflows.json'), JSON.stringify(store))
+
+    const after = persistent(dir, released, clock)
+    await after.reap()
+    assert.deepEqual(released, ['eph-only'])
+    const run = after.state().workflows.find(item => item.id === made.id).run
+    assert.equal(run.status, 'done')
+    assert.equal(run.updatedAt, 6)
+    assert.equal(run.nodeStatus.only, 'done')
+    assert.deepEqual(run.running, [])
+    assert.equal(run.history.length, 1)
+    assert.equal(run.history[0].status, 'done')
+    assert.equal(run.ephemeral, undefined)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
