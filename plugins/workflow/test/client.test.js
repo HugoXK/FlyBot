@@ -179,6 +179,21 @@ async function settle() {
   for (let i = 0; i < 4; i++) await new Promise(resolve => setImmediate(resolve))
 }
 
+// A rejected call that no `.catch` claims is an unhandled rejection: node fails the run,
+// and the page says nothing. Catch them so a test can assert "nothing was swallowed".
+async function withUnhandled(fn) {
+  const unhandled = []
+  const onUnhandled = (reason) => unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    return await fn(unhandled)
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
+}
+
+const alertsOf = view => findAll(view.tree, node => node.props?.role === 'alert').map(textOf)
+
 test('the sidebar opens the flowchart, and a drag, a wire and a dropped Bot are saved', async () => {
   const calls = []
   const graph = delivery()
@@ -949,4 +964,106 @@ test('Chinese labels follow the host Tasks translation', () => {
   } finally {
     globalThis.__flybot__ = prev
   }
+})
+
+test('a failed stage graph save is reported, not swallowed', async (t) => {
+  await withUnhandled(async (unhandled) => {
+    const graph = delivery()
+    const call = async (name) => {
+      if (name === 'workflow/state') return { workflows: [graph], templates: [{ id: 'delivery', name: '发布交付流水线' }] }
+      if (name === 'workflow/graph') throw new Error('The workflow store refused the write')
+      return { ok: true, workflows: [graph] }
+    }
+    const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+    t.after(() => view.unmount())
+    await settle()
+    findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
+    await settle()
+    findAll(view.tree, node => node.type === 'button' && textOf(node) === 'Flow')[0].props.onClick()
+    button(view.tree, 'Edit').props.onClick()
+    const coder = findAll(view.tree, node => node.props?.['data-node'] === 'coder')[0]
+    coder.props.onPointerDown({ clientX: 10, clientY: 20, target: { dataset: {} } })
+    let canvas = findAll(view.tree, node => node.props?.className === 'wf-canvas')[0]
+    canvas.props.onPointerMove({ clientX: 58, clientY: 44 })
+    canvas = findAll(view.tree, node => node.props?.className === 'wf-canvas')[0]
+    canvas.props.onPointerUp({ clientX: 58, clientY: 44, target: { dataset: {} } })
+    await settle()
+    assert.deepEqual(alertsOf(view), ['The workflow store refused the write'])
+    assert.deepEqual(unhandled, [])
+  })
+})
+
+test('a failed stage reset is reported instead of leaving the button dead', async (t) => {
+  await withUnhandled(async (unhandled) => {
+    const graph = delivery()
+    const call = async (name) => {
+      if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+      if (name === 'workflow/reset') throw new Error('The reset was refused')
+      return { ok: true, workflows: [graph] }
+    }
+    const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+    t.after(() => view.unmount())
+    await settle()
+    findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
+    await settle()
+    findAll(view.tree, node => node.type === 'button' && textOf(node) === 'Flow')[0].props.onClick()
+    button(view.tree, '↺ Reset').props.onClick()
+    await settle()
+    assert.deepEqual(alertsOf(view), ['The reset was refused'])
+    assert.deepEqual(unhandled, [])
+  })
+})
+
+test('a failed pause or stop from the run strip is reported', async (t) => {
+  await withUnhandled(async (unhandled) => {
+    const graph = delivery()
+    graph.activeCount = 1
+    let failure = ''
+    const call = async (name) => {
+      if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+      if (name === 'workflow/pause' || name === 'workflow/reset') throw new Error(failure)
+      return { ok: true, workflows: [graph] }
+    }
+    const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+    t.after(() => view.unmount())
+    await settle()
+    findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
+    await settle()
+    failure = 'The pause was refused'
+    button(view.tree, 'Pause').props.onClick()
+    await settle()
+    assert.deepEqual(alertsOf(view), ['The pause was refused'])
+    failure = 'The stop was refused'
+    button(view.tree, 'Stop').props.onClick()
+    await settle()
+    assert.deepEqual(alertsOf(view), ['The stop was refused'])
+    assert.deepEqual(unhandled, [])
+  })
+})
+
+test('a failed resume from the run strip is reported', async (t) => {
+  await withUnhandled(async (unhandled) => {
+    const graph = delivery()
+    graph.activeCount = 1
+    graph.run.paused = true
+    const call = async (name) => {
+      if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+      if (name === 'workflow/resume') throw new Error('The resume was refused')
+      return { ok: true, workflows: [graph] }
+    }
+    const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+    t.after(() => view.unmount())
+    await settle()
+    findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
+    await settle()
+    button(view.tree, 'Resume').props.onClick()
+    await settle()
+    assert.deepEqual(alertsOf(view), ['The resume was refused'])
+    assert.deepEqual(unhandled, [])
+  })
+})
+
+test('a stage control that never answers settles as an error', async () => {
+  const value = await client.settledCall(async () => new Promise(() => {}), 'workflow/pause', { workflowId: 'delivery' }, 'The run did not answer', 5)
+  assert.deepEqual(value, { ok: false, error: 'The run did not answer' })
 })
