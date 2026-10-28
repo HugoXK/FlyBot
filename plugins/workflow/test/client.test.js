@@ -1383,3 +1383,70 @@ test('the settings page injects the workflow stylesheet without the sidebar sect
     globalThis.document = prev
   }
 })
+
+// The workflow stage polls the store while a run is live, and a read that fails must
+// not be painted as "no workflows" (#1564).
+test('an active run polls the store once per tick, not twice', async (t) => {
+  const graph = delivery()
+  graph.activeCount = 1
+  const reads = []
+  const call = async (name) => {
+    if (name === 'workflow/state') { reads.push(Date.now()); return { workflows: [graph] } }
+    return { ok: true, workflows: [graph] }
+  }
+  const timers = []
+  const realSet = globalThis.setInterval
+  const realClear = globalThis.clearInterval
+  globalThis.setInterval = (fn, ms) => { timers.push({ fn, ms }); return timers.length }
+  globalThis.clearInterval = () => {}
+  try {
+    const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+    t.after(() => view.unmount())
+    await settle()
+    assert.equal(reads.length, 1, 'the first paint reads the store once')
+    assert.equal(timers.length, 1, `exactly one poll is armed for one live run, saw ${timers.length}`)
+    assert.equal(timers[0].ms, 2000)
+    timers[0].fn()
+    await settle()
+    assert.equal(reads.length, 2, 'one tick is one read')
+  } finally {
+    globalThis.setInterval = realSet
+    globalThis.clearInterval = realClear
+  }
+})
+
+test('a failed store read is reported and retried, not painted as no workflows', async (t) => {
+  await withUnhandled(async (unhandled) => {
+    const graph = delivery()
+    let reads = 0
+    const call = async (name) => {
+      if (name === 'workflow/state') {
+        reads += 1
+        if (reads === 1) throw new Error('The workflow store is unreachable')
+        return { workflows: [graph] }
+      }
+      return { ok: true, workflows: [graph] }
+    }
+    const timers = []
+    const realSet = globalThis.setInterval
+    const realClear = globalThis.clearInterval
+    globalThis.setInterval = (fn, ms) => { timers.push({ fn, ms }); return timers.length }
+    globalThis.clearInterval = () => {}
+    try {
+      const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+      t.after(() => view.unmount())
+      await settle()
+      assert.deepEqual(unhandled, [], 'a refused read is not an unhandled rejection')
+      assert.deepEqual(alertsOf(view), ['The workflow store is unreachable'], 'the failure is on screen')
+      assert.equal(htmlOf(view.tree).includes('No workflows yet.'), false, 'a failure is not an empty shelf')
+      assert.equal(timers.length, 1, 'the failed read arms a retry')
+      timers[0].fn()
+      await settle()
+      assert.deepEqual(alertsOf(view), [], 'the retry that succeeds clears the alert')
+      assert.equal(textOf(view.tree).includes('发布交付流水线'), true, 'the workflows are on screen')
+    } finally {
+      globalThis.setInterval = realSet
+      globalThis.clearInterval = realClear
+    }
+  })
+})
