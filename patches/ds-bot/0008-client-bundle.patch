@@ -1809,7 +1809,7 @@ diff --git a/client.js b/client.js
  var historyLoading = (snapshot) => snapshot?.openState === "cold" || snapshot?.openState === "loading";
  function toolArgs(root) {
    if (typeof root.args?.text === "function") {
-@@ -1597,17 +1597,43 @@ function commRunOf(order, peers, turn, hiddenTurns = []) {
+@@ -1597,17 +1597,46 @@ function commRunOf(order, peers, turn, hiddenTurns = []) {
    }
    return { count, peerIds };
  }
@@ -1853,6 +1853,9 @@ diff --git a/client.js b/client.js
 +  return /^[\s,，.。:：]*$/.test(rest) ? "" : rest;
 +}
 +var botNames = (roster) => [...roster?.bots ?? [], ...roster?.remoteBots ?? [], ...roster?.agents ?? []].map((entry) => entry?.name).filter((name) => typeof name === "string" && name !== "");
++function speechOf(text, names = []) {
++  return readableLine(text, names).replace(/```[\s\S]*?```/g, " ").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[*_`#>|~-]+/g, " ").replace(/\s+/g, " ").trim();
++}
  var formatTokens = (count) => count >= 1e6 ? `${(count / 1e6).toFixed(1)}M` : count >= 1e3 ? `${(count / 1e3).toFixed(1)}K` : String(count);
  function usageOf(list, ids) {
    let input = 0;
@@ -16515,7 +16518,7 @@ diff --git a/client.js b/client.js
      let stop = false;
      let timer;
      let seen = null;
-@@ -8612,48 +8612,42 @@ function ExchangeDialog({ pair, roster, actions }) {
+@@ -8612,48 +8612,41 @@ function ExchangeDialog({ pair, roster, actions }) {
    const right = roster.byId[pair[1]];
    let lastDay = 0;
    const paneLeft = usePaneLeft();
@@ -16575,7 +16578,7 @@ diff --git a/client.js b/client.js
  // src/client/voice.js
 -var import_react22 = require("react");
 +var import_react33 = require("react");
- var plainSpeech = (text) => stripHeader(text).replace(/```[\s\S]*?```/g, " ").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[*_`#>|~-]+/g, " ").replace(/\s+/g, " ").trim();
+-var plainSpeech = (text) => stripHeader(text).replace(/```[\s\S]*?```/g, " ").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[*_`#>|~-]+/g, " ").replace(/\s+/g, " ").trim();
  var VOICE_LABELS = {
    listening: "Listening",
 @@ -8665,14 +8665,14 @@ var VOICE_LABELS = {
@@ -16661,7 +16664,7 @@ diff --git a/client.js b/client.js
      if (!speech || !catalog || !listen) return void 0;
      const own = turn.current;
      let capture = null;
-@@ -8838,7 +8838,7 @@ function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }
+@@ -8838,12 +8838,12 @@ function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }
        setServiceLevel(0);
      };
    }, [speech, catalog, listen, cycle]);
@@ -16670,6 +16673,12 @@ diff --git a/client.js b/client.js
      if (phase !== "thinking" || running || waiting.current === null) return;
      const [count, text] = [lastReply.slice(0, lastReply.indexOf("|")), lastReply.slice(lastReply.indexOf("|") + 1)];
      if (count === waiting.current || !text.trim()) return;
+     waiting.current = null;
+-    const spoken = plainSpeech(text);
++    const spoken = speechOf(text, botNames(roster));
+     setSaid(spoken);
+     setHeard("");
+     if (!window.speechSynthesis || !spoken) {
 @@ -8858,7 +8858,7 @@ function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }
      window.speechSynthesis.cancel();
      window.speechSynthesis.speak(utterance);
