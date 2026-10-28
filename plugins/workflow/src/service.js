@@ -1016,6 +1016,7 @@ export function createWorkflowService({
       return present()
     },
     advance(body = {}) {
+      if (readOnly()) return { ok: false, code: 'read-only', error: 'The host is read-only' }
       const workflowId = String(body.workflowId ?? '')
       const outcome = body.outcome === 'failed' ? 'fail' : 'complete'
       const nodeId = String(body.nodeId ?? '')
@@ -1129,6 +1130,7 @@ export function createWorkflowService({
       })
     },
     reset(body = {}) {
+      if (readOnly()) return { ok: false, code: 'read-only', error: 'The host is read-only' }
       const workflowId = String(body.workflowId ?? '')
       const runId = body.runId ? String(body.runId) : ''
       if (runId) {
