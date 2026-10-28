@@ -7778,6 +7778,7 @@ function inboxModel({ roster, work = {}, tasks = [], sessions, now = Date.now() 
   for (const [key, entry] of lastEnded) {
     const bot = ownBot(roster, entry.botId);
     if (bot === void 0 || entry.failed === void 0 || !fresh(entry.at) || seen.has(key) || waitingAt.has(key)) continue;
+    if (bot.hidden === true && entry.roomId === void 0) continue;
     const chat = entry.roomId ?? bot.id;
     const asked = sessions?.byId ? previewOf(sessions, partOf(roster, chat), [], [], botNames(roster)) : "";
     needs.push({
