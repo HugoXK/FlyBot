@@ -1264,10 +1264,12 @@ window.__ModuleLoader__.load({
 
       const stageCall = (name, body, fallback) => settledCall(call, name, body, fallback)
 
+      const [readError, setReadError] = useState('')
+
       const refresh = async () => {
-        const value = await call('workflow/state')
-        if (value && Array.isArray(value.workflows)) setPack(value)
-        else setError(value?.error ?? 'The workflow host did not answer')
+        const value = await stageCall('workflow/state', undefined, 'The workflow host did not answer')
+        if (value && Array.isArray(value.workflows)) { setPack(value); setReadError('') }
+        else setReadError(value?.error ?? 'The workflow host did not answer')
         return value
       }
       
@@ -1305,25 +1307,16 @@ window.__ModuleLoader__.load({
         return () => { root.openWorkflowAssign = prev }
       }, [])
       
+      // One poll: while a run is live, for the Bot replies that advance nodes, and while a
+      // read error is showing, so a refused read is retried. Two effects used to test the
+      // same condition and both fired, so every tick read the whole store twice (#1564).
+      const live = (pack?.workflows ?? []).some(item => (item.activeCount ?? 0) > 0)
       useEffect(() => {
-        const live = (pack?.workflows ?? []).some(item => (item.activeCount ?? 0) > 0)
-        if (!live) return undefined
+        if (!live && !readError) return undefined
         let gone = false
         const timer = setInterval(() => { if (!gone) void refresh() }, 2000)
         return () => { gone = true; clearInterval(timer) }
-      }, [pack])
-      
-      // Refresh when a workflow has active runs - poll for Bot replies advancing nodes
-      useEffect(() => {
-        const active = (pack?.workflows ?? []).filter(item => (item.activeCount ?? 0) > 0)
-        if (active.length === 0) return undefined
-        let gone = false
-        const poll = setInterval(() => {
-          if (gone) return
-          void refresh()
-        }, 2000)
-        return () => { gone = true; clearInterval(poll) }
-      }, [pack?.workflows?.some(item => (item.activeCount ?? 0) > 0)])
+      }, [live, readError])
       
       useEffect(() => {
         if (!openId || typeof document === 'undefined') return undefined
@@ -1444,7 +1437,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'wf-sec' },
           h('span', null, tr('Workflows')),
           h('button', { type: 'button', className: 'wf-new', onClick: () => setCreating(true) }, tr('New'))),
-        workflows.length === 0 ? h('div', { className: 'wf-muted' }, tr('No workflows yet.')) : null,
+        workflows.length === 0 && !readError ? h('div', { className: 'wf-muted' }, tr('No workflows yet.')) : null,
         workflows.map(item => h('button', {
           key: item.id, type: 'button', className: `wf-row ${openId === item.id ? 'on' : ''}`,
           onClick: () => { setOpenId(item.id) },
@@ -1463,6 +1456,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'wf-ico' }, glyph()),
           h('span', { className: 'wf-txt' }, h('span', { className: 'wf-t1' }, tr('Hand a task to a Workflow')))),
         error ? h('div', { className: 'wf-err', role: 'alert' }, error) : null,
+        readError ? h('div', { className: 'wf-err', role: 'alert' }, readError) : null,
         open ? portal(h(Stage, {
           workflow: open, roster, stageLeft, drawer, tab, focusedRunId,
           onFocusRun: setFocusedRunId,
