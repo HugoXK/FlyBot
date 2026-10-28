@@ -261,6 +261,98 @@ test('the sidebar opens the flowchart, and a drag, a wire and a dropped Bot are 
   view.unmount()
 })
 
+// A drawer-sized graph: span 344 in the 364px plane is scale 0.5 exactly, so a
+// 40px pointer move is 80 world units and the rounding stays out of the numbers.
+function drawerGraph(id, name, nodes) {
+  return { ...delivery(), id, name, layers: [], nodes, edges: [] }
+}
+
+async function openDrawer(graph) {
+  const calls = []
+  const call = async (name, body) => {
+    calls.push({ name, body })
+    if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+    return { ok: true, workflows: [graph] }
+  }
+  const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+  await settle()
+  findAll(view.tree, node => node.type === 'button' && textOf(node).includes(graph.name))[0].props.onClick()
+  button(view.tree, 'Flow').props.onClick()
+  button(view.tree, 'Edit').props.onClick()
+  const nodeAt = id => findAll(view.tree, node => node.props?.['data-node'] === id)[0]
+  const canvas = () => findAll(view.tree, node => String(node.props?.className ?? '').split(' ').includes('wf-canvas'))[0]
+  return { view, calls, nodeAt, canvas }
+}
+
+test('dragging the rightmost node moves it on screen inside the frame the drag started with (#1575)', async () => {
+  const nodes = [
+    { id: 'left', name: 'Left', role: '', x: 0, y: 100 },
+    { id: 'middle', name: 'Middle', role: '', x: 172, y: 100 },
+    { id: 'right', name: 'Right', role: '', x: 344, y: 100 },
+  ]
+  const { view, calls, nodeAt, canvas } = await openDrawer(drawerGraph('wide', 'Wide graph', nodes))
+  const fit = client.fitPlane(nodes, client.DRAWER_FLOW_W)
+  assert.equal(fit.scale, 0.5, 'the fixture spans wider than the drawer room')
+  const before = Object.fromEntries(nodes.map(node => [node.id, { ...nodeAt(node.id).props.style }]))
+
+  nodeAt('right').props.onPointerDown({ clientX: 300, clientY: 100, target: { dataset: {} } })
+  canvas().props.onPointerMove({ clientX: 320, clientY: 100 })
+  canvas().props.onPointerMove({ clientX: 340, clientY: 100 })
+  assert.equal(nodeAt('right').props.style.left, before.right.left + 40, 'the rightmost node follows the pointer 1:1')
+  assert.equal(nodeAt('middle').props.style.left, before.middle.left, 'the fit did not re-centre another node')
+  assert.equal(nodeAt('left').props.style.left, before.left.left, 'the fit did not re-centre another node')
+
+  canvas().props.onPointerUp({ clientX: 340, clientY: 100, target: { dataset: {} } })
+  const saved = calls.filter(item => item.name === 'workflow/graph').at(-1)
+  assert.equal(saved.body.nodes.find(node => node.id === 'right').x, 344 + 80, 'the commit uses the start frame, not an intermediate one')
+  view.unmount()
+})
+
+test('dragging the topmost node up moves it on screen inside the frame the drag started with (#1575)', async () => {
+  const nodes = [
+    { id: 'top', name: 'Top', role: '', x: 172, y: 0 },
+    { id: 'middle', name: 'Middle', role: '', x: 172, y: 200 },
+    { id: 'bottom', name: 'Bottom', role: '', x: 172, y: 400 },
+  ]
+  const { view, calls, nodeAt, canvas } = await openDrawer(drawerGraph('tall', 'Tall graph', nodes))
+  const fit = client.fitPlane(nodes, client.DRAWER_FLOW_W)
+  assert.equal(fit.scale, 1, 'a vertical chain is not scaled')
+  const before = Object.fromEntries(nodes.map(node => [node.id, { ...nodeAt(node.id).props.style }]))
+
+  nodeAt('top').props.onPointerDown({ clientX: 100, clientY: 100, target: { dataset: {} } })
+  canvas().props.onPointerMove({ clientX: 100, clientY: 70 })
+  canvas().props.onPointerMove({ clientX: 100, clientY: 60 })
+  assert.equal(nodeAt('top').props.style.top, before.top.top - 40, 'the topmost node follows the pointer 1:1')
+  assert.equal(nodeAt('middle').props.style.top, before.middle.top, 'the fit did not push another node around')
+  assert.equal(nodeAt('bottom').props.style.top, before.bottom.top, 'the fit did not push another node around')
+
+  canvas().props.onPointerUp({ clientX: 100, clientY: 60, target: { dataset: {} } })
+  const saved = calls.filter(item => item.name === 'workflow/graph').at(-1)
+  assert.equal(saved.body.nodes.find(node => node.id === 'top').y, -40, 'the commit keeps the start frame')
+  view.unmount()
+})
+
+test('a middle-node drag keeps the frame it started with (#1575)', async () => {
+  const nodes = [
+    { id: 'left', name: 'Left', role: '', x: 0, y: 100 },
+    { id: 'middle', name: 'Middle', role: '', x: 172, y: 100 },
+    { id: 'right', name: 'Right', role: '', x: 344, y: 100 },
+  ]
+  const { view, calls, nodeAt, canvas } = await openDrawer(drawerGraph('middle', 'Middle graph', nodes))
+  const before = Object.fromEntries(nodes.map(node => [node.id, { ...nodeAt(node.id).props.style }]))
+
+  nodeAt('middle').props.onPointerDown({ clientX: 300, clientY: 100, target: { dataset: {} } })
+  canvas().props.onPointerMove({ clientX: 340, clientY: 100 })
+  assert.equal(nodeAt('middle').props.style.left, before.middle.left + 40, 'a middle node still follows the pointer')
+  assert.equal(nodeAt('left').props.style.left, before.left.left)
+  assert.equal(nodeAt('right').props.style.left, before.right.left)
+
+  canvas().props.onPointerUp({ clientX: 340, clientY: 100, target: { dataset: {} } })
+  const saved = calls.filter(item => item.name === 'workflow/graph').at(-1)
+  assert.equal(saved.body.nodes.find(node => node.id === 'middle').x, 172 + 80)
+  view.unmount()
+})
+
 test('clicking a sidebar workflow, New, or Hand-a-task keeps the section and opens the stage', async () => {
   // The shell's createPortal throws when the container is missing — the same
   // throw the sidebar slot boundary turns into an empty Workflows section (#1375).
