@@ -115,6 +115,8 @@ window.__ModuleLoader__.load({
       'Could not stop this run': '无法停止本次运行',
       'Reading workflows…': '正在读取 Workflow…',
       'Changes are saved automatically': '更改会自动保存',
+      'Try again': '重试',
+      'Could not change the model': '无法更改模型',
       'Next run: {time}': '下次运行：{time}',
       'Step {step}': '步骤 {step}',
       'Parallel branches · Merge after all pass': '并行分支 · 全部通过后汇合',
@@ -124,9 +126,11 @@ window.__ModuleLoader__.load({
       const host = globalThis.__flybot__?.t
       return typeof host === 'function' && host('Tasks') === '任务'
     }
-    // A stage control calls the host too: a throw, a rejection or a host that never answers
-    // settles as one error string, so Pause, Stop, Reset and a graph save cannot fail silently.
-    // Same shape as readWorkflows()/workflowCallError() in core/src/client/workflows.js.
+    // A host call that must end: a throw, a rejection or a host that never answers settles
+    // as one error string, so a failed read cannot leave the page on "Reading workflows…",
+    // a failed save cannot look saved, and a stage control (Pause, Stop, Reset) cannot fail
+    // silently either. Same shape as readWorkflows()/workflowCallError() in
+    // core/src/client/workflows.js, kept here because this page reads the plugin's own calls.
     const CALL_TIMEOUT_MS = 10000
     function callError(failure, fallback) {
       if (typeof failure === 'string' && failure.trim()) return failure.trim()
@@ -914,11 +918,13 @@ window.__ModuleLoader__.load({
       const [editing, setEditing] = useState(false)
       const [error, setError] = useState('')
       const [loading, setLoading] = useState(true)
-      
+      const [attempt, setAttempt] = useState(0)
+
       useEffect(() => {
         let gone = false
         setLoading(true)
-        void Promise.resolve(call('workflow/state')).then(value => {
+        setError('')
+        void settledCall(call, 'workflow/state', undefined, 'The workflow host did not answer').then(value => {
           if (gone) return
           setLoading(false)
           if (value && Array.isArray(value.workflows)) {
@@ -928,7 +934,7 @@ window.__ModuleLoader__.load({
           } else setError(value?.error ?? 'The workflow host did not answer')
         })
         return () => { gone = true }
-      }, [])
+      }, [attempt])
       
       useEffect(() => {
         ensureCss()
@@ -944,9 +950,9 @@ window.__ModuleLoader__.load({
       
       const save = (nodes, edges) => {
         if (!current) return
-        void Promise.resolve(call('workflow/graph', { workflowId: current.id, nodes, edges })).then(value => {
-          if (value?.ok === false) { setError(value.error ?? ''); return }
-          if (value?.workflows) setPack(value)
+        void settledCall(call, 'workflow/graph', { workflowId: current.id, nodes, edges }, 'Could not save this workflow').then(value => {
+          if (value?.ok === false) { setError(value.error ?? tr('Could not save this workflow')); return }
+          if (value?.workflows) { setPack(value); setError('') }
         })
       }
       
@@ -993,6 +999,9 @@ window.__ModuleLoader__.load({
       
       return h('div', { className: 'wf-settings-canvas', 'data-flybot': 'workflow-settings' },
         error ? h('div', { className: 'wf-err', role: 'alert' }, error) : null,
+        error && !pack && !loading
+          ? h('button', { type: 'button', className: 'wf-btn', onClick: () => setAttempt(value => value + 1) }, tr('Try again'))
+          : null,
         loading ? h('div', { className: 'wf-muted' }, tr('Reading workflows…')) : null,
         !loading && workflows.length === 0 ? h('div', { className: 'wf-muted' }, tr('No workflows yet.')) : null,
         current ? h('div', { className: 'wf-settings-layout' },
@@ -1010,9 +1019,9 @@ window.__ModuleLoader__.load({
                 value: current.model || '',
                 onChange: (event) => {
                   const model = event.target.value || null
-                  void Promise.resolve(call('workflow/set-model', { workflowId: current.id, model })).then(value => {
-                    if (value?.ok === false) { setError(value.error ?? ''); return }
-                    if (value?.workflows) setPack(value)
+                  void settledCall(call, 'workflow/set-model', { workflowId: current.id, model }, 'Could not change the model').then(value => {
+                    if (value?.ok === false) { setError(value.error ?? tr('Could not change the model')); return }
+                    if (value?.workflows) { setPack(value); setError('') }
                   })
                 },
               },
@@ -1037,7 +1046,7 @@ window.__ModuleLoader__.load({
               })),
             h('button', { type: 'button', className: 'wf-btn', onClick: () => setEditing(!editing) },
               editing ? tr('Finish editing') : tr('Edit')),
-            editing ? h('span', { className: 'wf-autosave-hint' }, tr('Changes are saved automatically')) : null),
+            editing && !error ? h('span', { className: 'wf-autosave-hint' }, tr('Changes are saved automatically')) : null),
           h('div', { className: 'wf-canvas-main' },
             h(GraphCanvas, {
               workflow: current,
