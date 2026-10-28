@@ -4,7 +4,9 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
-const live = { inst: null, idx: 0 }
+// `rectWidth` is what a host element reports from getBoundingClientRect, so a
+// component that measures its own container can be driven from a plain object.
+const live = { inst: null, idx: 0, rectWidth: 0 }
 const react = {
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
   useState(init) {
@@ -46,6 +48,14 @@ function mount(Component, props = {}) {
       live.inst = inst
       live.idx = 0
       return expand(node.type({ ...node.props, children: node.children }), `${path}/c`)
+    }
+    // The renderer has no DOM: a host element's ref gets a stand-in that answers
+    // getBoundingClientRect from `live.rectWidth`.
+    const ref = node.props?.ref
+    if (ref) {
+      const el = { getBoundingClientRect: () => ({ width: live.rectWidth, height: 0 }), dataset: {} }
+      if (typeof ref === 'function') ref(el)
+      else if (typeof ref === 'object') ref.current = el
     }
     return { type: node.type, props: node.props, children: node.children.map((child, i) => expand(child, `${path}.${i}`)).flat(Infinity).filter(child => child !== undefined) }
   }
@@ -425,6 +435,60 @@ test('settings can add a loop edge and a condition edge', async () => {
   settings.unmount()
 })
 
+test('the settings canvas fits the graph to its own width, and a drag follows that scale', async () => {
+  // Settings → Workflow graphs: the canvas reports 640px, so the 960px design
+  // plane is scaled down instead of growing a second scrollbar (#1483).
+  live.rectWidth = 640
+  try {
+    const calls = []
+    const graph = delivery()
+    const call = async (name, body) => {
+      calls.push({ name, body })
+      if (name === 'workflow/state') return { workflows: [graph] }
+      return { ok: true, workflows: [graph] }
+    }
+    const settings = mount(client.WorkflowSettings, { call, roster: { bots: [] } })
+    await settle()
+
+    const designW = client.WIRE_SPAN * 2
+    const plane = findAll(settings.tree, node => node.props?.['data-plane'] === '1')[0]
+    assert.ok(plane, 'the settings page draws a graph plane')
+    const width = Number(plane.props.style.width)
+    assert.equal(width, 640, 'the canvas draws the graph at the width it has, not on a 960px plane')
+    const scale = width / designW
+    const fit = findAll(settings.tree, node => node.props?.className === 'wf-canvas-fit')[0]
+    assert.ok(fit, 'the graph is drawn through a scaling layer')
+    assert.equal(fit.props.style.transform, `scale(${scale})`)
+    assert.equal(Number(plane.props.style.height), Math.round(Math.max(420, ...graph.nodes.map(node => (node.y ?? 0) + 150)) * scale))
+
+    for (const node of graph.nodes) {
+      const drawn = findAll(settings.tree, item => item.props?.['data-node'] === node.id)[0]
+      const left = Number(drawn.props.style.left)
+      assert.ok(left * scale >= -width / 2 - 0.5, `${node.id} starts inside the canvas`)
+      assert.ok((left + client.NODE_W) * scale <= width / 2 + 0.5, `${node.id} ends inside the canvas`)
+    }
+    const wires = findAll(settings.tree, node => node.props?.className === 'wf-wires')[0]
+    assert.equal(Number(wires.props.width) * scale, width, 'the wire layer spans exactly the canvas width once scaled')
+    for (const path of findAll(settings.tree, node => node.props?.className !== undefined && typeof node.props.d === 'string' && node.props.d.startsWith('M '))) {
+      for (const x of [...path.props.d.matchAll(/(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/g)].map(match => Number(match[1]))) {
+        assert.ok(x >= 0 && x <= designW, 'a wire stays inside the wire layer, not off the canvas border')
+      }
+    }
+
+    button(settings.tree, 'Edit').props.onClick()
+    const coder = findAll(settings.tree, node => node.props?.['data-node'] === 'coder')[0]
+    coder.props.onPointerDown({ clientX: 10, clientY: 20, preventDefault() {}, target: { dataset: {} } })
+    const canvas = findAll(settings.tree, node => node.props?.className === 'wf-canvas-view')[0]
+    canvas.props.onPointerMove({ clientX: 58, clientY: 44 })
+    const saved = calls.filter(item => item.name === 'workflow/graph').at(-1).body.nodes.find(node => node.id === 'coder')
+    assert.equal(saved.x, Math.round(200 + 48 / scale), 'the pointer delta is divided by the scale')
+    assert.equal(saved.y, Math.round(260 + 24 / scale))
+    settings.unmount()
+  } finally {
+    live.rectWidth = 0
+  }
+})
+
 test('sidebar preview ignores a stale busy preview when nothing is live', async () => {
   const graph = delivery()
   graph.preview = 'Coder 正在处理 #1280…'
@@ -651,10 +715,12 @@ test('the hand-a-task modal lists live Tasks board rows only', async () => {
   view.unmount()
 })
 
-test('the flowchart canvas CSS clips overflow inside its panel', () => {
+test('the room flowchart canvas scrolls in its panel, and the settings canvas leaves one scroll to the page', () => {
   const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
   assert.match(source, /\.wf-canvas\{[^}]*overflow:auto/)
-  assert.match(source, /\.wf-canvas-view\{[^}]*overflow:auto/)
+  // Settings → Workflow graphs fits its graph to the canvas width, so the
+  // canvas is not a scroll container inside the page's own scroll (#1483).
+  assert.match(source, /\.wf-canvas-view\{[^}]*overflow:visible/)
   assert.match(source, /\.wf-stage\{[^}]*overflow:hidden/)
 })
 

@@ -1002,11 +1002,30 @@ window.__ModuleLoader__.load({
 
     function GraphCanvas({ workflow, editing, selectedNode, onSelectNode, onCommit, roster }) {
       const [gesture, setGesture] = useState(null)
+      const stageRef = useRef(null)
+      const [panelWidth, setPanelWidth] = useState(0)
       const nodes = workflow?.nodes ?? []
       const edges = workflow?.edges ?? []
       const height = Math.max(420, ...nodes.map(node => (node.y ?? 0) + 150), 0)
       const run = workflow?.run?.live === true ? workflow.run : null
       const status = run?.nodeStatus ?? {}
+      // The graph is authored on the 960px design plane. Drawing it at that width
+      // inside the settings page grew a second scrollbar and cut edges at the
+      // border, so the plane is scaled down to the width the canvas has (#1483).
+      const scale = panelWidth > 0 ? Math.min(1, panelWidth / (WIRE_SPAN * 2)) : 1
+      const drawnHeight = Math.round(height * scale)
+      useEffect(() => {
+        const el = stageRef.current
+        const measure = () => {
+          const measured = el?.getBoundingClientRect?.().width
+          if (Number.isFinite(measured) && measured > 0 && Math.abs(measured - panelWidth) > 0.5) setPanelWidth(measured)
+        }
+        measure()
+        if (typeof ResizeObserver !== 'function' || !el) return undefined
+        const observer = new ResizeObserver(measure)
+        observer.observe(el)
+        return () => observer.disconnect()
+      }, [panelWidth])
       
       const commit = (nextNodes, nextEdges) => onCommit?.({ nodes: nextNodes, edges: nextEdges })
       
@@ -1014,10 +1033,12 @@ window.__ModuleLoader__.load({
         if (!gesture || gesture.kind !== 'move') return
         const node = nodes.find(n => n.id === gesture.id)
         if (!node) return
+        // The plane is scaled to the canvas, so a pointer delta in screen pixels
+        // is a larger delta in the graph's own coordinates.
         commit(nodes.map(n => n.id === gesture.id ? {
           ...n,
-          x: Math.round((node.x ?? 0) + event.clientX - gesture.ox),
-          y: Math.round((node.y ?? 0) + event.clientY - gesture.oy)
+          x: Math.round((node.x ?? 0) + (event.clientX - gesture.ox) / scale),
+          y: Math.round((node.y ?? 0) + (event.clientY - gesture.oy) / scale)
         } : n), edges)
         setGesture({ ...gesture, ox: event.clientX, oy: event.clientY })
       }
@@ -1031,8 +1052,9 @@ window.__ModuleLoader__.load({
         setGesture(null)
       }
       
-      return h('div', { className: 'wf-canvas-view', onPointerMove: movePointer, onPointerUp: endPointer },
-        h('div', { className: 'wf-plane', 'data-plane': '1', style: { height } },
+      return h('div', { className: 'wf-canvas-view', ref: stageRef, onPointerMove: movePointer, onPointerUp: endPointer },
+        h('div', { className: 'wf-plane', 'data-plane': '1', style: { width: panelWidth, height: drawnHeight } },
+          h('div', { className: 'wf-canvas-fit', style: { height, transform: `scale(${scale})` } },
           h('svg', { className: 'wf-wires', 'aria-hidden': true, ...wireSvgProps(height) },
             edges.map(edge => {
               const from = nodes.find(node => node.id === edge.from)
@@ -1063,7 +1085,7 @@ window.__ModuleLoader__.load({
                 setGesture({ kind: 'wire', from: node.id })
               },
             }) : null,
-            h(FlowNode, { node, status: status[node.id] ?? 'idle', roster: roster ?? {} })))))
+            h(FlowNode, { node, status: status[node.id] ?? 'idle', roster: roster ?? {} }))))))
     }
 
     function conversationLeft() {
@@ -1515,7 +1537,9 @@ window.__ModuleLoader__.load({
 .wf-settings-header{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .wf-autosave-hint{font-size:11px;color:var(--bt-ink-3,#9a9a9a)}
 .wf-canvas-main{flex:1;min-height:500px;display:flex;flex-direction:column;border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:12px;padding:16px;background:var(--bt-card,#fff)}
-.wf-canvas-view{width:100%;height:100%;min-height:0;position:relative;overflow:auto}
+.wf-canvas-view{width:100%;height:100%;min-height:0;position:relative;overflow:visible}
+.wf-canvas-fit{position:relative;width:0;margin:0 auto;transform-origin:50% 0}
+.wf-canvas-view .wf-wires path{stroke:var(--bt-ink-2,rgba(20,20,20,.55));stroke-width:2.5}
 .wf-cards-empty{padding:8px 4px 12px}
 .wf-context-menu{position:fixed;z-index:95;min-width:140px;background:var(--bt-card,#fff);border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:10px;padding:4px;box-shadow:0 8px 24px rgba(0,0,0,.12);display:flex;flex-direction:column;gap:2px}
 .wf-context-menu button{border:0;background:transparent;color:inherit;font:inherit;font-size:12.5px;text-align:left;padding:8px 10px;border-radius:8px;cursor:pointer}
