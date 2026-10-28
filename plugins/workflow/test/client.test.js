@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
+import { allThemes } from '../../../core/src/client/themes.js'
+
 // `rectWidth` is what a host element reports from getBoundingClientRect, so a
 // component that measures its own container can be driven from a plain object.
 const live = { inst: null, idx: 0, rectWidth: 0 }
@@ -1023,6 +1025,59 @@ test('palette chips distinguish duplicate Bot names and expose drag affordance',
   assert.equal(client.botPaletteSubtitle({ id: 'chief-a', name: 'Chief', role: 'Triage' }, roster.bots), 'Triage')
   assert.ok(client.botPaletteSubtitle({ id: 'chief-c', name: 'Chief', role: '' }, roster.bots).includes('hief-c'))
   view.unmount()
+})
+
+const workflowCss = () => {
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  return source.slice(source.indexOf('const CSS = `') + 'const CSS = `'.length)
+}
+const ruleBody = (name, css = workflowCss()) => new RegExp(`\\.${name}\\{([^}]*)\\}`).exec(css)?.[1] ?? ''
+const hexRgb = (hex) => [1, 3, 5].map(index => parseInt(hex.slice(index, index + 2), 16))
+const linear = (value) => {
+  const v = value / 255
+  return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
+}
+const luminanceOf = ([r, g, b]) => 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+const contrastOf = (a, b) => {
+  const first = luminanceOf(a)
+  const second = luminanceOf(b)
+  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05)
+}
+const declaredInk = (declared, text) => {
+  const token = /var\(--bt-ink-([23])/.exec(declared)
+  if (token) return { rgb: hexRgb(text), alpha: token[1] === '2' ? 0.6 : 0.36 }
+  const literal = /rgba?\(([^)]+)\)/.exec(declared)
+  if (!literal) throw new Error(`the .wf-rl colour cannot be resolved: ${declared}`)
+  const parts = literal[1].split(',').map(value => Number(value.trim()))
+  return { rgb: parts.slice(0, 3), alpha: parts[3] ?? 1 }
+}
+const compositeOver = ({ rgb, alpha }, background) => rgb.map((value, index) => alpha * value + (1 - alpha) * background[index])
+
+test('the flowchart node role sub-label colour is a theme token, never a bare grey', () => {
+  const body = ruleBody('wf-rl')
+  assert.match(body, /color:var\(--bt-ink-2,/, '.wf-rl must take its colour from a theme token')
+  assert.doesNotMatch(body, /color:(rgba?\(|#)/, '.wf-rl must not hardcode its colour')
+})
+
+test('the node role sub-label keeps 4.4:1 in light and 4.5:1 in every dark theme', () => {
+  const declared = /color:([^;]+)/.exec(ruleBody('wf-rl'))?.[1] ?? ''
+  const modes = []
+  for (const [id, theme] of Object.entries(allThemes())) {
+    modes.push({ id, mode: 'light', palette: theme.light })
+    modes.push({ id, mode: 'dark', palette: theme.dark })
+  }
+  assert.ok(modes.length >= 8, 'every shipped theme has a light and a dark mode')
+  for (const { id, mode, palette } of modes) {
+    const ink = declaredInk(declared, palette.text)
+    const card = hexRgb(palette.card)
+    const ratio = contrastOf(compositeOver(ink, card), card)
+    // Every dark card is dark (#1f1f1f / #1c1c1c / #2a2925 / #141c33), so 4.5:1 is the bar there.
+    // In light, --bt-ink-2 (0.6 alpha) gives 4.81 on DeepSeek's #141414 text; Paper's text is
+    // #1f1e1b, which composites to 4.42 — the token itself cannot reach 4.5 without a core token
+    // change, so light is held at 4.4:1 and never below the 4.07:1 the hardcoded grey gave.
+    const floor = mode === 'dark' ? 4.5 : 4.4
+    assert.ok(ratio >= floor, `${id} ${mode}: ${declared.trim()} on ${palette.card} is ${ratio.toFixed(2)}:1, below ${floor}:1`)
+  }
 })
 
 test('running flow nodes use a breathing border animation only while running', () => {
