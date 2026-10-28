@@ -52,6 +52,10 @@ export function apply(ctx, config = {}) {
             ephemeral: true,
             permission: permissionFor(),
             tools: spec.tools,
+            // #1544: who started the run and whose switches cap its connectors; the host reads both
+            // and refuses a connector a Bot switched off however the node names it.
+            ...(spec.createdBy ? { createdBy: spec.createdBy } : {}),
+            ...(spec.cappedBy ? { cappedBy: spec.cappedBy } : {}),
             fields: { nodeId: spec.nodeId, tools: spec.tools ?? null },
           })
           liveNames.set(name, id)
@@ -118,7 +122,8 @@ export function apply(ctx, config = {}) {
         brief: { type: 'string', required: true, description: 'What the run should do' },
         task: { type: 'string', description: 'Task id, such as #1280. Omitted ids are generated.' },
       },
-      execute: args => service.runNamed(args ?? {}),
+      // fb.tools.register hands the calling Bot to execute() as the second argument's botId (#1544).
+      execute: (args, ctx) => service.runNamed({ ...(args ?? {}), ...(ctx?.botId ? { callerBotId: ctx.botId } : {}) }),
     }))
     offs.push(fb.tools.register({
       name: 'define_workflow',
@@ -129,7 +134,7 @@ export function apply(ctx, config = {}) {
         nodes: { type: 'array', required: true, description: 'Nodes. Each may carry prompt (system prompt), role, model, tools (the connectors it may call: github, composio), inputs, outputs, and an optional local botId. Real work uses an ephemeral Bot per run, not a seated botId.' },
         edges: { type: 'array', required: true, description: 'Hand-offs { from, to }. A fork is two edges out; a join is two edges in. A condition is when: { output, eq } or { else: true }. A loop is loop: true with max (1–8, default 3) and optional until: { output, eq }.' },
       },
-      execute: args => service.define(args ?? {}),
+      execute: (args, ctx) => service.define({ ...(args ?? {}), ...(ctx?.botId ? { callerBotId: ctx.botId } : {}) }),
     }))
   }
   if (typeof fb.bot?.send?.use === 'function') {

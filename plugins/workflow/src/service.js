@@ -573,7 +573,7 @@ export function createWorkflowService({
     }
     if (!best) return null
     const task = laneOf(best.item.id).queue.shift()
-    return { item: best.item, task: { id: task.id, title: task.title } }
+    return { item: best.item, task: { id: task.id, title: task.title, ...(task.callerBotId ? { callerBotId: task.callerBotId } : {}) } }
   }
 
   function noteUnstarted(item, error) {
@@ -662,7 +662,12 @@ export function createWorkflowService({
       const holes = missingProviders(item)
       if (holes.length > 0) return { ok: false, error: `Node ${holes[0].nodeId} input ${holes[0].name} has no upstream provider` }
       try {
-        ephemeral = await spawnAll(item.nodes, bots() ?? [], spawn, item.model ?? '')
+        // #1544: the caller that started the run and the Bot that saved the graph cap the connectors
+        // this run may use; the host intersects them with each node's `tools`.
+        ephemeral = await spawnAll(item.nodes, bots() ?? [], spawn, item.model ?? '', {
+          callerBotId: task.callerBotId,
+          authorBotId: item.authoredBy,
+        })
       } catch (error) {
         await releaseAll(error.spawned ?? [], release, warn)
         return refuse(error)
@@ -690,7 +695,14 @@ export function createWorkflowService({
   function park(item, task) {
     const lane = laneOf(item.id)
     state.queueSeq = (state.queueSeq ?? 0) + 1
-    lane.queue.push({ id: task.id, title: task.title, enqueuedAt: now(), queueSeq: state.queueSeq })
+    lane.queue.push({
+      id: task.id,
+      title: task.title,
+      enqueuedAt: now(),
+      queueSeq: state.queueSeq,
+      // #1544: a parked run starts later without its caller in hand; keep it, or the ceiling is lost.
+      ...(task.callerBotId ? { callerBotId: task.callerBotId } : {}),
+    })
     push(item.id, [{ kind: 'system', text: `排队 · ${summarizeTask(task)}（前面 ${lane.queue.length - 1} 个）` }], now())
     write()
   }
@@ -865,6 +877,9 @@ export function createWorkflowService({
           ...(Array.isArray(body.edges) ? { edges: body.edges } : { layers: body.layers }),
         })
         if (!item.name) throw new Error('A workflow needs a name')
+        // #1544: the Bot that wrote the graph caps the connectors a run may reach from it.
+        const authoredBy = cleanLine(body.callerBotId ?? body.authoredBy, 80) || undefined
+        if (authoredBy) item.authoredBy = authoredBy
         const cap = Number(body.maxConcurrent)
         if (Number.isInteger(cap) && cap >= 1 && cap <= MAX_CONCURRENT) item.maxConcurrent = cap
         state.workflows.push(item)
@@ -887,6 +902,10 @@ export function createWorkflowService({
       if (!item) return { ok: false, error: 'No such workflow' }
       const task = { id: cleanLine(body.taskId ?? body.id, 80), title: cleanLine(body.title, 300) }
       if (!task.id || !task.title) return { ok: false, error: 'A task needs an id and a title' }
+      // #1544: the Bot whose tool call started this run, when a Bot started it. The board, the canvas
+      // and the API pass none, and the graph's author is the ceiling there.
+      const callerBotId = cleanLine(body.callerBotId, 80)
+      if (callerBotId) task.callerBotId = callerBotId
       if (typeof spawn !== 'function') return enqueue(item, task)
       return hostSerial(() => enqueue(item, task))
     },
@@ -1090,6 +1109,11 @@ export function createWorkflowService({
     // persist; a node that remains keeps its run status, a new one waits.
     saveGraph(body = {}) {
       return mutate(String(body.workflowId ?? ''), (item) => {
+        // #1544: a save from a Bot records it as the graph's author; a save with no Bot behind it (the
+        // canvas, the API, a template copy) is the owner's own edit and lifts the ceiling again.
+        const authoredBy = cleanLine(body.callerBotId ?? body.authoredBy, 80) || undefined
+        if (authoredBy) item.authoredBy = authoredBy
+        else delete item.authoredBy
         const seated = seat(body.nodes, bots() ?? [])
         const seenBots = new Set()
         for (const node of seated) {
@@ -1121,9 +1145,12 @@ export function createWorkflowService({
     },
     // A Bot (or the owner) writes a graph. A name that already exists is replaced.
     define(body = {}) {
+      // #1544: the graph remembers the Bot that wrote it, so a run nobody's tool call started is still
+      // capped by the switches of the Bot that chose the node's `tools`.
+      const authoredBy = cleanLine(body.callerBotId, 80) || undefined
       const existing = body.workflow ? findWorkflow(body.workflow) : undefined
       if (existing) {
-        const saved = this.saveGraph({ workflowId: existing.id, nodes: body.nodes, edges: body.edges ?? [] })
+        const saved = this.saveGraph({ workflowId: existing.id, nodes: body.nodes, edges: body.edges ?? [], ...(authoredBy ? { authoredBy } : {}) })
         if (saved.ok === false) return saved
         const name = cleanLine(body.name, 80)
         if (name) {
@@ -1132,7 +1159,7 @@ export function createWorkflowService({
         }
         return present()
       }
-      return this.create({ name: body.name, nodes: body.nodes, edges: body.edges ?? [], description: body.description })
+      return this.create({ name: body.name, nodes: body.nodes, edges: body.edges ?? [], description: body.description, ...(authoredBy ? { authoredBy } : {}) })
     },
     // Start a named workflow. `brief` is the task title; `task` is its id.
     runNamed(body = {}) {
@@ -1141,7 +1168,7 @@ export function createWorkflowService({
       const title = cleanLine(body.brief || body.title, 300)
       if (!title) return { ok: false, error: 'A run needs a brief' }
       const taskId = cleanLine(body.task || body.taskId, 80) || `task-${now().toString(36)}`
-      return this.assign({ workflowId: item.id, taskId, title })
+      return this.assign({ workflowId: item.id, taskId, title, ...(body.callerBotId ? { callerBotId: body.callerBotId } : {}) })
     },
     // Auto-assign an open board task. A miss leaves the task untouched.
     ingest(task = {}) {
