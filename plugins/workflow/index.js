@@ -105,7 +105,6 @@ export function apply(ctx, config = {}) {
     fb.api.handle('workflow/reset', body => service.reset(body)),
     fb.api.handle('workflow/pause', body => service.pause(body)),
     fb.api.handle('workflow/resume', body => service.resume(body)),
-    fb.api.handle('workflow/say', body => service.say(body)),
     fb.api.handle('workflow/graph', body => service.saveGraph(body)),
     fb.api.handle('workflow/templates', () => ({ ok: true, templates: service.state().templates }), { read: true }),
     fb.api.handle('workflow/ingest', body => service.ingest(body)),

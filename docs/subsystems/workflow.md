@@ -38,7 +38,7 @@ Everything in `plugins/workflow/`: the graph rules, the run store, the matcher, 
 ## Entry points
 
 - Endpoint `workflow/state` and `workflow/templates` are reads.
-- `workflow/create`, `workflow/rename`, `workflow/delete`, `workflow/assign`, `workflow/concurrency`, `workflow/graph`, `workflow/advance`, `workflow/reset`, `workflow/say`, `workflow/ingest` write. `workflow/concurrency` sets that workflow's `maxConcurrent` (an integer from 1 to 8); the same control is in Settings → Workflow graphs. `workflow/rename` updates a workflow's name and optional description; read-only hosts are refused. `workflow/delete` removes a workflow from state, releases its ephemeral Bots if a run exists, and cleans logs/runs/routes.
+- `workflow/create`, `workflow/rename`, `workflow/delete`, `workflow/assign`, `workflow/concurrency`, `workflow/graph`, `workflow/advance`, `workflow/reset`, `workflow/ingest` write. `workflow/concurrency` sets that workflow's `maxConcurrent` (an integer from 1 to 8); the same control is in Settings → Workflow graphs. `workflow/rename` updates a workflow's name and optional description; read-only hosts are refused. `workflow/delete` removes a workflow from state, releases its ephemeral Bots if a run exists, and cleans logs/runs/routes.
 - Tool `run_workflow` starts a named run with a brief. Tool `define_workflow` writes the same graph the canvas edits.
 - `flybot.tasks.onWrite` calls `ingest`. A new Bot match returns `{ ownerBotId }`. A Workflow match starts the run inside the plugin and leaves the card's owner to the host.
 
