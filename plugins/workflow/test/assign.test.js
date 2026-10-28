@@ -271,6 +271,40 @@ test('an open task auto-starts the matching workflow, and a miss stays unassigne
   assert.equal(svc.ingest({ id: '#53', title: 'notice', status: 'accepted' }).matched, false)
 })
 
+test('an ASCII trigger matches a whole word, and a non-ASCII trigger still matches inside one', () => {
+  const svc = service()
+  const workflows = svc.state().workflows
+  const route = title => matchTask({ id: '#1', title, status: 'open' }, { workflows, bots: [] })
+
+  // A trigger inside a longer word is not a hit: the card only mentions it.
+  assert.equal(route('noticeable bug in logging'), null)
+  assert.equal(route('notices about the release'), null)
+  assert.equal(route('noticed at last'), null)
+
+  // The whole word is there, so it still routes.
+  assert.deepEqual(route('notice'), { kind: 'workflow', id: DELIVERY_ID })
+  assert.deepEqual(route('notice: deploy paused'), { kind: 'workflow', id: DELIVERY_ID })
+  assert.deepEqual(route('缩短交付组群 notice'), { kind: 'workflow', id: DELIVERY_ID })
+
+  // Non-ASCII triggers have no word boundary and keep matching inside a longer text.
+  assert.deepEqual(route('写周报'), { kind: 'workflow', id: 'weekly' })
+  assert.deepEqual(route('周五周报'), { kind: 'workflow', id: 'weekly' })
+
+  // A two-character ASCII trigger is still legal, but only as its own word.
+  const prLanes = [{ id: 'wf-pr', name: 'PR lane', triggers: ['pr'] }]
+  const prRoute = title => matchTask({ id: '#1', title, status: 'open' }, { workflows: prLanes, bots: [] })
+  assert.equal(prRoute('Improve onboarding docs'), null)
+  assert.equal(prRoute('Prepare release notes'), null)
+  assert.equal(prRoute('Sprint planning'), null)
+  assert.deepEqual(prRoute('pr'), { kind: 'workflow', id: 'wf-pr' })
+  assert.deepEqual(prRoute('open a PR to fix it'), { kind: 'workflow', id: 'wf-pr' })
+  assert.deepEqual(prRoute('PR: bump deps'), { kind: 'workflow', id: 'wf-pr' })
+
+  // The existing under-two-characters guard is untouched.
+  const oneChar = [{ id: 'wf-one', name: 'One', triggers: ['x'] }]
+  assert.equal(matchTask({ id: '#1', title: 'x', status: 'open' }, { workflows: oneChar, bots: [] }), null)
+})
+
 test('apply registers the workflow endpoints and stays quiet when disabled', () => {
   const names = []
   const writes = []
