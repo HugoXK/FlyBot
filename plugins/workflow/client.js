@@ -617,13 +617,19 @@ window.__ModuleLoader__.load({
       const [dragPreview, setDragPreview] = useState(null)
       const [selectedNode, setSelectedNode] = useState(null)
       const status = run?.nodeStatus ?? {}
-      const nodes = workflow.nodes.map(node => ghost?.[node.id] ? { ...node, ...ghost[node.id] } : node)
+      const nodes = workflow.nodes
       const edges = workflow.edges ?? []
-      // The drawer paints a fitted copy; `nodes` stays the world graph so a drag
-      // commits the same coordinates the Settings canvas would (#1513).
+      // The drawer paints a fitted copy of the world graph (#1513). The fit is a
+      // fixed frame for the whole gesture: folding the ghost back into it re-centred
+      // and rescaled the graph under the pointer and pinned an extreme node (#1575).
       const plane = fitPlane(nodes, DRAWER_FLOW_W)
-      const fitted = new Map(plane.nodes.map(node => [node.id, node]))
       const scale = plane.scale || 1
+      const fitted = new Map(plane.nodes.map(node => [node.id, node]))
+      const drawn = new Map(fitted)
+      for (const [id, spot] of Object.entries(ghost ?? {})) {
+        const base = fitted.get(id)
+        if (base) drawn.set(id, { ...base, x: spot.x * scale + plane.offsetX, y: spot.y + plane.offsetY })
+      }
       const height = plane.height
       const locals = (roster?.bots ?? []).filter(bot => bot && bot.remote !== true && !nodes.some(node => node.botId === bot.id))
       const selected = nodes.find(node => node.id === selectedNode)
@@ -688,8 +694,8 @@ window.__ModuleLoader__.load({
         h('div', { className: 'wf-plane', 'data-plane': '1', style: { height, width: plane.width } },
           h('svg', { className: 'wf-wires', 'aria-hidden': true, ...wireSvgProps(height, plane.width) },
             edges.map(edge => {
-              const from = fitted.get(edge.from)
-              const to = fitted.get(edge.to)
+              const from = drawn.get(edge.from)
+              const to = drawn.get(edge.to)
               if (!from || !to) return null
               return h('g', { key: `${edge.from}>${edge.to}` },
                 h('path', { d: wirePath(from, to, 0) }),
@@ -700,7 +706,7 @@ window.__ModuleLoader__.load({
                 }) : null)
             })),
           (workflow.layers ?? []).filter(layer => layer.length > 1).map(layer => {
-            const members = layer.map(id => fitted.get(id)).filter(Boolean)
+            const members = layer.map(id => drawn.get(id)).filter(Boolean)
             if (members.length < 2) return null
             return h('div', {
               key: layer.join('+'), className: 'wf-par wf-abs',
@@ -708,7 +714,7 @@ window.__ModuleLoader__.load({
             }, h('div', { className: 'wf-plabel' }, tr('Parallel branches · Merge after all pass')))
           }),
           nodes.map(node => {
-            const spot = fitted.get(node.id) ?? node
+            const spot = drawn.get(node.id) ?? node
             return h('div', {
               key: node.id,
               'data-node': node.id,
