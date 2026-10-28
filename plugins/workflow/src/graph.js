@@ -697,7 +697,7 @@ export function failNode(graph, status, nodeId, ctx = {}) {
   if (recovery) {
     // Failure recovery: reset to the upstream target node
     failAttempts[edgeKey(recovery.edge)] = recovery.ran
-    const body = loopBody(graph, recovery.edge.to, nodeId)
+    const body = loopBody(graph, nodeId, recovery.edge.to)
     const next = copyStatus(status)
     const reset = []
     
