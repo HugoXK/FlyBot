@@ -354,6 +354,32 @@ test('settings and the flowchart save a node prompt and a link on the same graph
   flow.unmount()
 })
 
+test('the node inspector keeps the Tools field and explains what it selects', async () => {
+  const graph = delivery()
+  graph.nodes = graph.nodes.map(node => node.id === 'coder' ? { ...node, tools: ['github'] } : node)
+  const calls = []
+  const call = async (name, body) => {
+    calls.push({ name, body })
+    if (name === 'workflow/state') return { workflows: [graph] }
+    return { ok: true, workflows: [graph] }
+  }
+  const settings = mount(client.WorkflowSettings, { call, roster: { bots: [] } })
+  await settle()
+  button(settings.tree, 'Edit').props.onClick()
+  await settle()
+  findAll(settings.tree, node => node.props?.['data-node'] === 'coder')[0].props.onClick()
+  await settle()
+  const tools = findAll(settings.tree, node => node.type === 'input' && /github/.test(String(node.props?.placeholder ?? '')))[0]
+  assert.ok(tools, 'the inspector still has an editable Tools field')
+  const note = findAll(settings.tree, node => node.props?.['data-flybot'] === 'node-tools-note')[0]
+  assert.equal(note ? textOf(note) : '', 'Names the connectors this run Bot may use: github grants mcp__github__*, composio grants the Composio connector. File and shell access is always full, like a normal Bot. A node that names no connector gets none. Until the spawn change that passes these tools to the host lands, every connector is still refused.', 'the Tools field explains it selects connectors, not the permission')
+  tools.props.onChange({ target: { value: 'github, composio' } })
+  await settle()
+  const saved = calls.filter(item => item.name === 'workflow/graph').at(-1)
+  assert.deepEqual(saved.body.nodes.find(node => node.id === 'coder').tools, ['github', 'composio'], 'the inspector still writes node.tools')
+  settings.unmount()
+})
+
 test('apply registers the sidebar section and the settings page', () => {
   const entries = []
   const off = client.apply({
