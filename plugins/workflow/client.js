@@ -138,6 +138,12 @@ window.__ModuleLoader__.load({
     const NODE_WIRE_OUT = 56
     const NODE_W = 168
     const NODE_H = 72
+    // The room drawer is 400px wide with an 18px body padding on each side. The
+    // flow is drawn on a 960px design canvas and scaled down to that width, so
+    // the panel never grows an inner horizontal scrollbar (#1513).
+    const DRAWER_W = 400
+    const DRAWER_PAD = 18
+    const FIT_WIDTH = DRAWER_W - DRAWER_PAD * 2
 
     function workflowNodeIds(workflow) {
       return new Set((workflow?.nodes ?? []).map(node => node.id))
@@ -441,7 +447,7 @@ window.__ModuleLoader__.load({
           ['flow', 'details', 'runs'].map(key => h('button', {
             key, type: 'button', className: tab === key ? 'on' : '', onClick: () => onTab(key),
           }, tr(key === 'flow' ? 'Flow' : key === 'details' ? 'Details' : 'Runs')))),
-        tab === 'flow' ? h(Flow, { workflow, run, roster, onTip, editing, onCommit }) : null,
+        tab === 'flow' ? h(Flow, { workflow, run, roster, onTip, editing, onCommit, width: FIT_WIDTH }) : null,
         tab === 'details' ? h(Details, { workflow, roster }) : null,
         tab === 'runs' ? h(Runs, { workflow }) : null,
         h('div', { className: 'wf-ctl' },
@@ -522,6 +528,12 @@ window.__ModuleLoader__.load({
       return rows
     }
 
+    function fitScale(width) {
+      const measured = Number(width)
+      if (!Number.isFinite(measured) || measured <= 0) return 1
+      return Math.min(1, measured / (WIRE_SPAN * 2))
+    }
+
     function wireSvgProps(height) {
       return {
         width: WIRE_SPAN * 2,
@@ -530,15 +542,33 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function Flow({ workflow, run, roster, onTip, editing, onCommit }) {
+    function Flow({ workflow, run, roster, onTip, editing, onCommit, width }) {
       const [gesture, setGesture] = useState(null)
       const [ghost, setGhost] = useState(null)
       const [dragPreview, setDragPreview] = useState(null)
       const [selectedNode, setSelectedNode] = useState(null)
+      const stageRef = useRef(null)
+      const [panelWidth, setPanelWidth] = useState(() => (Number.isFinite(Number(width)) && Number(width) > 0 ? Number(width) : 0))
       const status = run?.nodeStatus ?? {}
       const nodes = workflow.nodes.map(node => ghost?.[node.id] ? { ...node, ...ghost[node.id] } : node)
       const edges = workflow.edges ?? []
       const height = Math.max(420, ...nodes.map(node => (node.y ?? 0) + 150), 0)
+      const scale = fitScale(panelWidth)
+      const drawnHeight = Math.round(height * scale)
+      useEffect(() => {
+        const el = stageRef.current
+        const measure = () => {
+          // The panel may be narrower than the drawer (body padding, a scrollbar),
+          // and the graph must fit whatever width the canvas actually has.
+          const measured = el?.getBoundingClientRect?.().width
+          if (Number.isFinite(measured) && measured > 0 && measured !== panelWidth) setPanelWidth(Math.min(measured, WIRE_SPAN * 2))
+        }
+        measure()
+        if (typeof ResizeObserver !== 'function' || !el) return undefined
+        const observer = new ResizeObserver(measure)
+        observer.observe(el)
+        return () => observer.disconnect()
+      }, [width, panelWidth])
       const locals = (roster?.bots ?? []).filter(bot => bot && bot.remote !== true && !nodes.some(node => node.botId === bot.id))
       const selected = nodes.find(node => node.id === selectedNode)
       const commit = (nextNodes, nextEdges) => onCommit?.({ nodes: nextNodes, edges: nextEdges })
@@ -549,7 +579,9 @@ window.__ModuleLoader__.load({
           return
         }
         if (gesture.kind !== 'move') return
-        setGhost({ [gesture.id]: { x: Math.round(gesture.x + event.clientX - gesture.ox), y: Math.round(gesture.y + event.clientY - gesture.oy) } })
+        // The plane is scaled down to the panel width, so a pointer delta in
+        // screen pixels is a larger delta in the graph's own coordinates.
+        setGhost({ [gesture.id]: { x: Math.round(gesture.x + (event.clientX - gesture.ox) / scale), y: Math.round(gesture.y + (event.clientY - gesture.oy) / scale) } })
       }
       const endPointer = (event) => {
         if (!gesture) return
@@ -565,8 +597,12 @@ window.__ModuleLoader__.load({
           else if (!hit) commit(workflow.nodes, rest)
         } else if (gesture.kind === 'add' && event.target?.dataset?.plane) {
           const bot = gesture.bot
-          const x = Number.isFinite(event.offsetX) ? Math.round(event.offsetX) : 24
-          const y = Number.isFinite(event.offsetY) ? Math.round(event.offsetY) : 24
+          // offsetX/Y are panel pixels; the graph keeps the 960px design space,
+          // so shift by the panel centre and undo the fit scale.
+          const left = Number.isFinite(event.offsetX) ? event.offsetX : panelWidth / 2
+          const top = Number.isFinite(event.offsetY) ? event.offsetY : 0
+          const x = Math.round((left - panelWidth / 2) / scale)
+          const y = Math.round(top / scale)
           commit(workflow.nodes.concat([{ id: nextNodeId(workflow.nodes), name: bot.name, botId: bot.id, role: bot.role ?? '', x, y }]), edges)
         }
         setGesture(null)
@@ -575,7 +611,7 @@ window.__ModuleLoader__.load({
       const updateNode = (nodeId, updates) => {
         commit(nodes.map(item => item.id === nodeId ? { ...item, ...updates } : item), edges)
       }
-      return h('div', { className: 'wf-canvas', onPointerMove: movePointer, onPointerUp: endPointer, onPointerCancel: () => { setGesture(null); setGhost(null); setDragPreview(null) } },
+      return h('div', { className: 'wf-canvas', ref: stageRef, onPointerMove: movePointer, onPointerUp: endPointer, onPointerCancel: () => { setGesture(null); setGhost(null); setDragPreview(null) } },
         editing ? h('div', { className: 'wf-palette' },
           h('p', { className: 'wf-palette-hint' }, tr('Drag a Bot here')),
           h('div', { className: 'wf-palette-row' },
@@ -596,7 +632,8 @@ window.__ModuleLoader__.load({
           'aria-hidden': true,
         }, h(PaletteBotFace, { bot: gesture.bot, size: 24 }), h('span', { className: 'wf-drag-ghost-name' }, gesture.bot?.name ?? '')) : null,
         run ? h('div', { className: 'wf-term', title: run.task?.title ?? '' }, taskSummary(run.task, run)) : null,
-        h('div', { className: 'wf-plane', 'data-plane': '1', style: { height } },
+        h('div', { className: 'wf-plane wf-plane-fit', 'data-plane': '1', style: { width: panelWidth, height: drawnHeight } },
+          h('div', { className: 'wf-fit', style: { height, transform: `scale(${scale})` } },
           h('svg', { className: 'wf-wires', 'aria-hidden': true, ...wireSvgProps(height) },
             edges.map(edge => {
               const from = nodes.find(node => node.id === edge.from)
@@ -643,7 +680,7 @@ window.__ModuleLoader__.load({
                 setSelectedNode(null)
               },
             }, '×') : null,
-            h(FlowNode, { node, status: status[node.id] ?? 'queued', roster })))),
+            h(FlowNode, { node, status: status[node.id] ?? 'queued', roster }))))),
         run?.status === 'done' ? h('div', { className: 'wf-term on' }, tr('Done')) : null,
         editing && selected ? h('div', { className: 'wf-node-inspector' },
           h('div', { className: 'wf-inspector-header' },
@@ -1426,7 +1463,7 @@ window.__ModuleLoader__.load({
 .wf-composer input{flex:1;border:0;outline:0;background:transparent;font:inherit;color:inherit}
 .wf-mic{width:28px;height:28px;border-radius:9px;border:0;background:var(--bt-accent,#4d6bfe);color:#fff;cursor:pointer}
 .wf-under{text-align:center;margin-top:6px;font-size:11px;color:var(--bt-ink-2,rgba(20,20,20,.6))}
-.wf-drawer{width:400px;flex:none;min-width:0;overflow:hidden;border-left:1px solid var(--bt-line,rgba(20,20,20,.08));display:flex;flex-direction:column;background:var(--bt-main,#fcfcfc)}
+.wf-drawer{width:${DRAWER_W}px;flex:none;min-width:0;overflow:hidden;border-left:1px solid var(--bt-line,rgba(20,20,20,.08));display:flex;flex-direction:column;background:var(--bt-main,#fcfcfc)}
 .wf-dr-head{display:flex;justify-content:flex-end;padding:12px}
 .wf-icon{width:28px;height:28px;border-radius:8px;border:1px solid var(--bt-line,rgba(20,20,20,.08));background:var(--bt-card,#fff);cursor:pointer;color:inherit}
 .wf-dr-body{flex:1;overflow:auto;padding:4px 18px 20px}
@@ -1455,6 +1492,8 @@ window.__ModuleLoader__.load({
 .wf-drag-ghost{position:fixed;z-index:100;pointer-events:none;display:inline-flex;align-items:center;gap:6px;padding:5px 10px 5px 5px;border-radius:10px;border:1px solid var(--bt-accent,#4d6bfe);background:var(--bt-card,#fff);box-shadow:0 8px 20px rgba(20,20,20,.12);opacity:.92;transform:translate(-4px,-4px)}
 .wf-drag-ghost-name{font-size:12px;font-weight:600;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wf-plane{position:relative;width:0;margin:8px auto 0;--wf-wire-span:${WIRE_SPAN}px}
+.wf-plane-fit{margin:8px auto 0}
+.wf-fit{position:relative;width:0;height:100%;margin:0 auto;transform-origin:50% 0}
 .wf-node-inspector{position:absolute;bottom:8px;right:8px;width:320px;background:var(--bt-card,#fff);border:1px solid var(--bt-line,rgba(20,20,20,.08));border-radius:12px;padding:12px;box-shadow:0 4px 12px rgba(0,0,0,.1);z-index:10}
 .wf-inspector-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:12px;font-weight:600}
 .wf-close-inspector{background:none;border:0;cursor:pointer;color:var(--bt-ink-3,#9a9a9a);font-size:18px;line-height:1;padding:0;width:20px;height:20px}

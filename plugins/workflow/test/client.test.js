@@ -197,6 +197,12 @@ test('the sidebar opens the flowchart, and a drag, a wire and a dropped Bot are 
   assert.ok(textOf(view.tree).includes(SCRIPT))
   assert.ok(textOf(view.tree).includes(HOSTILE))
 
+  // The drawer scales its 960px graph down to the panel, so a pointer delta in
+  // panel pixels is a larger delta in graph coordinates (#1513).
+  const plane = findAll(view.tree, node => node.props?.['data-plane'] === '1')[0]
+  const panelWidth = Number(plane.props.style.width)
+  const scale = panelWidth / (client.WIRE_SPAN * 2)
+
   button(view.tree, 'Edit').props.onClick()
   const coder = findAll(view.tree, node => node.props?.['data-node'] === 'coder')[0]
   coder.props.onPointerDown({ clientX: 10, clientY: 20, target: { dataset: {} } })
@@ -205,8 +211,8 @@ test('the sidebar opens the flowchart, and a drag, a wire and a dropped Bot are 
   canvas = findAll(view.tree, node => node.props?.className === 'wf-canvas')[0]
   canvas.props.onPointerUp({ clientX: 58, clientY: 44, target: { dataset: {} } })
   const moved = calls.find(item => item.name === 'workflow/graph')
-  assert.equal(moved.body.nodes.find(node => node.id === 'coder').x, 248)
-  assert.equal(moved.body.nodes.find(node => node.id === 'coder').y, 284)
+  assert.equal(moved.body.nodes.find(node => node.id === 'coder').x, Math.round(200 + 48 / scale))
+  assert.equal(moved.body.nodes.find(node => node.id === 'coder').y, Math.round(260 + 24 / scale))
 
   const port = findAll(view.tree, node => node.props?.['data-port'] === 'out' && node.props['aria-label'] === 'Writer')[0]
   port.props.onPointerDown({ preventDefault() {}, stopPropagation() {}, target: { dataset: { port: 'out' } } })
@@ -224,14 +230,59 @@ test('the sidebar opens the flowchart, and a drag, a wire and a dropped Bot are 
   const added = calls.filter(item => item.name === 'workflow/graph').at(-1)
   const seat = added.body.nodes.find(node => node.botId === 'bot-docs')
   assert.equal(seat.name, 'Docs')
-  assert.equal(seat.x, 30)
-  assert.equal(seat.y, 40)
+  assert.equal(seat.x, Math.round((30 - panelWidth / 2) / scale))
+  assert.equal(seat.y, Math.round(40 / scale))
 
   button(view.tree, 'New').props.onClick()
   const template = findAll(view.tree, node => node.type === 'button' && node.props.className === 'wf-btn' && textOf(node) === '发布交付流水线')[0]
   template.props.onClick()
   await settle()
   assert.ok(calls.some(item => item.name === 'workflow/create' && item.body.template === 'delivery'))
+  view.unmount()
+})
+
+test('the room Flow tab fits the graph to the panel, and a drag follows that scale', async () => {
+  const calls = []
+  const graph = delivery()
+  const call = async (name, body) => {
+    calls.push({ name, body })
+    if (name === 'workflow/state') return { workflows: [graph], templates: [{ id: 'delivery', name: '发布交付流水线' }] }
+    return { ok: true, workflows: [graph] }
+  }
+  const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+  await settle()
+  findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
+  findAll(view.tree, node => node.type === 'button' && textOf(node) === 'Flow')[0].props.onClick()
+
+  const designW = client.WIRE_SPAN * 2
+  const plane = findAll(view.tree, node => node.props?.['data-plane'] === '1')[0]
+  assert.ok(plane, 'the drawer draws a flow plane')
+  const width = Number(plane.props.style.width)
+  assert.ok(width > 0 && width < designW, 'the panel draws the graph at its own width, not on a 960px canvas')
+  const scale = width / designW
+  const fit = findAll(view.tree, node => node.props?.className === 'wf-fit')[0]
+  assert.ok(fit, 'the graph is drawn through a scaling layer')
+  assert.equal(fit.props.style.transform, `scale(${scale})`)
+  assert.equal(plane.props.style.height, Math.round(Math.max(420, ...graph.nodes.map(node => (node.y ?? 0) + 150)) * scale))
+
+  for (const node of graph.nodes) {
+    const drawn = findAll(view.tree, item => item.props?.['data-node'] === node.id)[0]
+    const left = Number(drawn.props.style.left)
+    const centre = (left + client.NODE_W / 2) * scale
+    assert.ok(centre - (client.NODE_W / 2) * scale >= -width / 2 - 0.5, `${node.id} starts inside the panel`)
+    assert.ok(centre + (client.NODE_W / 2) * scale <= width / 2 + 0.5, `${node.id} ends inside the panel`)
+  }
+
+  button(view.tree, 'Edit').props.onClick()
+  const coder = findAll(view.tree, node => node.props?.['data-node'] === 'coder')[0]
+  coder.props.onPointerDown({ clientX: 10, clientY: 20, target: { dataset: {} } })
+  let canvas = findAll(view.tree, node => node.props?.className === 'wf-canvas')[0]
+  canvas.props.onPointerMove({ clientX: 58, clientY: 44 })
+  canvas = findAll(view.tree, node => node.props?.className === 'wf-canvas')[0]
+  canvas.props.onPointerUp({ clientX: 58, clientY: 44, target: { dataset: {} } })
+  const saved = calls.filter(item => item.name === 'workflow/graph').at(-1).body.nodes.find(node => node.id === 'coder')
+  assert.equal(saved.x, Math.round(200 + 48 / scale), 'the pointer delta is divided by the scale')
+  assert.equal(saved.y, Math.round(260 + 24 / scale))
   view.unmount()
 })
 
