@@ -159,6 +159,16 @@ export function install(rt) {
   const STEWARD_MAX_TOKENS = 4_096
   const STEWARD_TIMEOUT_MS = 120_000
   const STEWARD_LINES = 40
+  // The steward decides whether the part moves, not how a note reads, so its retry is
+  // its own policy and not NOTE_ATTEMPTS / NOTE_COOLDOWN_MS above: a rate limit is
+  // counted per minute and recovers in seconds, and asking again costs one request
+  // instead of a whole part (#1447). A failure that outlasts these attempts below the
+  // hard line spends the round instead of the part, and the next round asks again
+  // after a wait that grows with each failure in a row.
+  const STEWARD_ATTEMPTS = 3
+  const STEWARD_RETRY_MS = 250
+  const STEWARD_RETRY_MAX_MS = 5_000
+  const STEWARD_COOLDOWN_MS = [60_000, 300_000]
   const FOLDER_RETRY_MS = 300_000
   // Making room before a step takes the turn's own signal and nothing else, so a
   // summary request stuck in retries parks the turn before its first step: no step,
@@ -543,21 +553,90 @@ export function install(rt) {
       signal: AbortSignal.timeout(STEWARD_TIMEOUT_MS),
     })) assembler.push(chunk)
     const finish = assembler.finish
-    if (finish.kind === 'error' || finish.kind === 'aborted') throw new Error(finish.failure?.message ?? finish.kind)
+    if (finish.kind === 'error' || finish.kind === 'aborted') throw stewardFailure(finish)
     return parseDecision(assembler.blocks().filter(block => block.type === 'text').map(block => block.text).join('\n'))
   }
 
+  // A failure as this side needs it: the provider's facts on the Error, not only its
+  // message. A route reports a failed request as a terminal finish chunk, and the `code`
+  // that says whether asking again can help, the `status` and the `providerRetryAfterMs`
+  // it asked for all live in that chunk's `failure` (#1447).
+  const stewardFailure = (finish) => Object.assign(new Error(finish?.failure?.message ?? finish.kind), finish?.failure ?? {})
+
+  // A failure worth asking again: a rate limit, a timeout, a 5xx. The status the provider
+  // returned is the first fact; the harness's own codes (`RATE_LIMIT`, `SERVER`,
+  // `TRANSPORT`, `TIMEOUT`) and the raw adapter codes are the ones without one. Anything
+  // else — a request the provider refused, an answer that does not parse — is asked of
+  // the same key again and comes back the same.
+  const TRANSIENT_CODES = new Set(['RATE_LIMIT', 'SERVER', 'TRANSPORT', 'TIMEOUT', 'throttling_error', 'rate_limited', 'REQUEST_TIMEOUT', 'ABORT_ERR'])
+  const transientFailure = (error) => {
+    const status = Number(error?.status ?? error?.statusCode)
+    if (status === 429 || (status >= 500 && status <= 599)) return true
+    return TRANSIENT_CODES.has(String(error?.code ?? ''))
+  }
+
+  // The wait the provider asked for, capped, or a short backoff that grows by attempt.
+  // `providerRetryAfterMs` is already milliseconds; the raw adapters ask in seconds.
+  const stewardRetryDelay = (error, attempt) => {
+    const millis = Number(error?.providerRetryAfterMs)
+    if (Number.isFinite(millis) && millis > 0) return Math.min(millis, STEWARD_RETRY_MAX_MS)
+    const asked = Number(error?.retryAfter ?? error?.retry_after)
+    if (Number.isFinite(asked) && asked > 0) return Math.min(asked * 1_000, STEWARD_RETRY_MAX_MS)
+    return STEWARD_RETRY_MS * attempt
+  }
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
+  // A steward that could not be asked, per Session: how many rounds in a row, when to
+  // ask again, and the failure that a forced move writes into its segment (#1447).
+  const stewardFailures = new Map()
+  const stewardBlame = (sessionId) => stewardFailures.get(sessionId)?.text
+
   // What the steward decides; a part that cannot be condensed, or a steward that
-  // gives no answer, moves on as it always could.
-  async function decide(agent, { midTurn }) {
+  // gives no usable answer, moves on as it always could. A rate limit is not an
+  // answer: it is asked again, and below the hard line a failure that outlasts the
+  // attempts costs the round, not the part.
+  async function decide(agent, { midTurn, hard = false }) {
     if (engineOf(agent) === undefined) return 'switch'
-    try {
-      const action = await askSteward(agent, { midTurn })
-      if (action !== undefined) return action
-      rt.warn('ds-bot: the context steward gave no usable answer for %s; moving on to a fresh part', agent.id)
-    } catch (error) {
-      rt.warn('ds-bot: the context steward failed for %s; moving on to a fresh part: %s', agent.id, error)
+    let failure
+    let transient = false
+    for (let attempt = 1; attempt <= STEWARD_ATTEMPTS; attempt += 1) {
+      try {
+        const action = await askSteward(agent, { midTurn })
+        if (action !== undefined) {
+          stewardFailures.delete(agent.id)
+          return action
+        }
+        rt.warn('ds-bot: the context steward gave no usable answer for %s; moving on to a fresh part', agent.id)
+        failure = undefined
+        transient = false
+        break
+      } catch (error) {
+        failure = error
+        transient = transientFailure(error)
+        if (!transient || attempt === STEWARD_ATTEMPTS) break
+        rt.warn('ds-bot: the context steward did not answer for %s (attempt %d of %d), asking again in %d ms: %s', agent.id, attempt, STEWARD_ATTEMPTS, stewardRetryDelay(error, attempt), error)
+        await sleep(stewardRetryDelay(error, attempt))
+      }
     }
+    if (failure !== undefined) {
+      stewardFailures.set(agent.id, {
+        count: 0,
+        until: 0,
+        text: `${failure?.code ?? failure?.status ?? 'error'}: ${String(failure?.message ?? failure).slice(0, 160)}`,
+      })
+    } else {
+      // An answer that does not parse is not a failure to report later: the move it
+      // forces must not carry an older failure it did not cause.
+      stewardFailures.delete(agent.id)
+    }
+    if (transient && !hard) {
+      const count = (stewardFailures.get(agent.id)?.count ?? 0) + 1
+      const waitMs = STEWARD_COOLDOWN_MS[Math.min(count, STEWARD_COOLDOWN_MS.length) - 1]
+      stewardFailures.set(agent.id, { ...stewardFailures.get(agent.id), count, until: Date.now() + waitMs })
+      rt.warn('ds-bot: the context steward could not be asked for %s (%d in a row, %d attempts each); the part stays and is asked again in %ds: %s', agent.id, count, STEWARD_ATTEMPTS, waitMs / 1000, failure)
+      return 'wait'
+    }
+    rt.warn('ds-bot: the context steward failed for %s; moving on to a fresh part: %s', agent.id, failure ?? 'no usable answer')
     return 'switch'
   }
 
@@ -635,14 +714,16 @@ export function install(rt) {
       : `${head} It is the note written at the end of part ${segment.noteFrom}, carried over unchanged; anything newer is in the messages below, and read_own_chat finds the rest.)\n\n${segment.note}`
   }
 
-  function handoffPackage({ room, segment, lines, number, resume, overflow, failed, bare, folder }) {
+  function handoffPackage({ room, segment, lines, number, resume, overflow, failed, bare, folder, steward }) {
     const where = room ? `your conversation in the group chat "${room.name}"` : 'your own chat with the user'
     const lookup = room
       ? 'read_group_chat shows the group\'s latest messages, and read_own_chat your own chat.'
       : 'read_own_chat searches every part, reads around an anchor such as [part 2 #1234 · …], and shows the note that closed any earlier part.'
     const reason = failed !== undefined ? `a request in the previous part kept failing (${failed})`
       : overflow ? 'the previous part overflowed the model\'s window'
-        : folder !== undefined ? `your working folder changed to ${folder}` : 'the previous part grew long'
+        : folder !== undefined ? `your working folder changed to ${folder}`
+          : steward !== undefined ? `the context steward could not be asked whether to keep it (${steward})`
+            : 'the previous part grew long'
     const { recent, earlier, unlisted, complete } = lines
     const omitted = [
       ...(unlisted > 0 ? [`(${unlisted} older messages are not listed.)`] : []),
@@ -715,6 +796,21 @@ export function install(rt) {
   const noteFailures = new Map()
   // Parts the steward is deciding about at the end of a turn.
   const checking = new Set()
+  // Earlier parts whose handoff archive a holder that ends on its own refused: a job, a
+  // turn or a subagent, never a scheduled task. Such a holder is never stopped, so the id
+  // waits here until that end is reported — its job settling, or its Session going idle —
+  // and the archive is asked for once more, with no options (#1433). A refusal that names
+  // no kind at all is not remembered: nothing says what would end.
+  const pendingArchive = new Set()
+  // Ids whose one more attempt is in flight, so a job that settles just as its Session
+  // goes idle is asked for once, not twice.
+  const attemptingArchive = new Set()
+  // The most ids that may wait: a Set keeps insertion order, so the oldest leaves first.
+  // Nothing here retries on a timer — one attempt per id at a time, and only when a
+  // holder-end signal names it — so the table cannot grow by itself. The cap is the
+  // backstop for a host that never reports the end: such a part is dropped, never forced
+  // (#896).
+  const PENDING_ARCHIVE_MAX = 32
 
   const placeOf = (sessionId) => {
     const botId = rt.chatOwners.get(sessionId)
@@ -745,10 +841,10 @@ export function install(rt) {
 
   // `hard`: past the hard line or the window, the part moves on even without a note
   // from the model. `folder`: the part moves on because its working folder changed.
-  function startSwitch(agent, { resume = false, carry = [], info, joined, overflow = false, failed, bare = false, folder = false, hard = overflow || folder } = {}) {
+  function startSwitch(agent, { resume = false, carry = [], info, joined, overflow = false, failed, bare = false, folder = false, steward, hard = overflow || folder } = {}) {
     const place = placeOf(agent.id)
     if (place === undefined || switches.has(agent.id) || readOnly()) return false
-    const job = { ...place, carry: [...carry], info, joined, resume, overflow, failed, bare, folder, hard, origin: settled(rt, agent.id) }
+    const job = { ...place, carry: [...carry], info, joined, resume, overflow, failed, bare, folder, steward, hard, origin: settled(rt, agent.id) }
     switches.set(agent.id, job)
     void runSwitch(agent, job)
       .catch(error => rt.warn('ds-bot: %s did not move on to a fresh part: %s', rt.botOf(job.botId)?.name ?? agent.id, error))
@@ -803,7 +899,14 @@ export function install(rt) {
           // refusal a scheduled task alone caused (#896 review): a job, turn or subagent
           // that holds the part is left to finish, exactly as before this fix.
           const kinds = Array.isArray(error?.activity) ? error.activity.map(entry => entry?.kind) : []
-          if (kinds.length === 0 || kinds.some(kind => kind !== 'schedule')) return
+          if (kinds.length === 0 || kinds.some(kind => kind !== 'schedule')) {
+            // A job, turn or subagent that holds the part is left to finish, and the part
+            // used to stay active for the life of the instance (#1433). Remember it for
+            // one more attempt once its holder ends; a schedule-only refusal takes the
+            // stop below.
+            if (kinds.length > 0) rememberPendingArchive(agent.id)
+            return
+          }
           // A task that could not be moved still holds the part, and leaving it active
           // forever is the leak #896 is about. Stop its activity, the way a deletion does
           // (roster.js:450): a finished part is never left running a task nobody sees.
@@ -867,7 +970,7 @@ export function install(rt) {
     }
     await rt.applyPermission(bot, freshId)
       .catch(error => rt.warn('ds-bot: permission for the fresh part of %s not applied: %s', bot.name, error))
-    const segment = { sessionId: agent.id, endedAt: Date.now(), ...(tokens !== undefined ? { tokens } : {}), ...noted }
+    const segment = { sessionId: agent.id, endedAt: Date.now(), ...(tokens !== undefined ? { tokens } : {}), ...noted, ...(job.steward === undefined ? {} : { steward: job.steward }) }
     const resume = job.resume || job.overflow
     // Commit the new part before its handoff turn can run: a handoff visible to a failure handler
     // before the segment is saved would let a second switch lose the previous part's note. A failed
@@ -930,7 +1033,7 @@ export function install(rt) {
         folderRetry.set(freshId, Date.now() + FOLDER_RETRY_MS)
         rt.warn('ds-bot: the fresh part of %s did not start in %s; it works in %s', bot.name, intended, cwd)
       }
-      const text = handoffPackage({ room, segment, lines: carried, number: number + 1, resume, overflow: job.overflow, failed: job.failed, bare: job.bare, folder })
+      const text = handoffPackage({ room, segment, lines: carried, number: number + 1, resume, overflow: job.overflow, failed: job.failed, bare: job.bare, folder, steward: job.steward })
       fresh.followup(createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) }))
       await ctx.sessions.flush(fresh.session)
       freshParts.set(freshId, estimateTokens(text))
@@ -985,8 +1088,10 @@ export function install(rt) {
     const lines = await contextLines(agent.session).catch(() => undefined)
     const tokens = tokensOf(agent.session)
     if (lines === undefined || tokens === undefined || tokens < lines.hard || !grown(agent.id, tokens, lines) || readOnly()) return next()
-    if (await decide(agent, { midTurn: payload.step > 1 }) === 'compact' && await condense(agent, lines, { inTurn: true, signal: payload.signal, keep: payload.messages })) return next()
-    return switchBeforeStep(agent, payload, { hard: true }, next)
+    // Before a step the part is already past the hard line, so a steward that cannot
+    // be asked moves the part on here; the failure still names itself in its segment.
+    if (await decide(agent, { midTurn: payload.step > 1, hard: true }) === 'compact' && await condense(agent, lines, { inTurn: true, signal: payload.signal, keep: payload.messages })) return next()
+    return switchBeforeStep(agent, payload, { hard: true, steward: stewardBlame(agent.id) }, next)
   }, { prepend: true })
 
   // `messages` left the inbox for this step, so the switch carries them along.
@@ -1071,15 +1176,19 @@ export function install(rt) {
     const tokens = tokensOf(agent.session)
     if (lines === undefined || tokens === undefined || tokens < lines.check || !grown(agent.id, tokens, lines)) return
     const hard = tokens >= lines.hard
-    if (!hard && Date.now() < (noteFailures.get(agent.id)?.until ?? 0)) return
+    // Below the hard line a part that could not be written or decided waits out its
+    // cooldown instead of asking again at every idle (#1447).
+    if (!hard && (Date.now() < (noteFailures.get(agent.id)?.until ?? 0) || Date.now() < (stewardFailures.get(agent.id)?.until ?? 0))) return
     checking.add(agent.id)
     try {
-      if (await decide(agent, { midTurn: false }) === 'compact') {
+      const decision = await decide(agent, { midTurn: false, hard })
+      if (decision === 'wait') return
+      if (decision === 'compact') {
         const condensed = await condense(agent, lines, { inTurn: false })
         if (condensed !== false) return
       }
       if (switches.has(agent.id)) return
-      startSwitch(agent, { hard: (tokensOf(agent.session) ?? tokens) >= lines.hard })
+      startSwitch(agent, { hard: (tokensOf(agent.session) ?? tokens) >= lines.hard, steward: stewardBlame(agent.id) })
     } finally {
       checking.delete(agent.id)
     }
@@ -1101,11 +1210,74 @@ export function install(rt) {
     if (end !== undefined && end.data?.reason?.kind !== 'error') rescued.delete(agent.id)
   }
 
+  function rememberPendingArchive(sessionId) {
+    pendingArchive.add(sessionId)
+    while (pendingArchive.size > PENDING_ARCHIVE_MAX) pendingArchive.delete(pendingArchive.values().next().value)
+    watchJobSettlements()
+  }
+
+  // A background job ends on its own schedule, and its Session is idle by then: the idle
+  // event came before this attempt and will not come again, and the part that was handed
+  // over never takes another turn (its input goes to the fresh part, `forward`). The job
+  // registry's own settlement is the event that names that moment (#1433), read through
+  // `ctx.get` — no inject asked, and `undefined` when the service is not there yet: a
+  // composition may provide the job registry after this plugin loads, and one without it
+  // has no job to wait for.
+  let jobUnwatch
+  function watchJobSettlements() {
+    if (jobUnwatch !== undefined) return
+    const events = ctx.get('jobs')?.events
+    if (events === undefined) return
+    jobUnwatch = events.subscribe({ owners: 'all' }, (event) => {
+      if (event?.type !== 'settled' || typeof event.job?.owner !== 'string') return
+      attemptPendingArchive(event.job.owner, 'its job')
+    })
+  }
+  ctx.effect(() => () => jobUnwatch?.(), 'ds-bot: archive a part once its job ends')
+
+  // One more archive attempt for a part whose holder has ended, with no options, so a job,
+  // a turn or a subagent is never stopped for it (#896). A refusal that still names one of
+  // those means the holder has not ended after all — the Session reported its idle while
+  // the job ran — so the id stays and the next signal tries again instead of the one
+  // chance being spent. It leaves when the attempt lands, when the refusal names no
+  // activity at all, or when a scheduled task alone names it — that one is answered by the
+  // handoff's own `stopActivity` retry, never by holding the id.
+  function attemptPendingArchive(sessionId, endedBy) {
+    if (!pendingArchive.has(sessionId) || attemptingArchive.has(sessionId)) return
+    attemptingArchive.add(sessionId)
+    void ctx.workspaceRegistry.archiveSession(sessionId)
+      .then(() => pendingArchive.delete(sessionId))
+      .catch(error => {
+        const kinds = Array.isArray(error?.activity) ? error.activity.map(entry => entry?.kind) : []
+        // A holder that ends on its own has not ended after all: keep the id and let the
+        // next signal try again, instead of spending the one chance.
+        if (kinds.some(kind => kind !== 'schedule')) {
+          rt.warn('ds-bot: earlier part %s still held by its %s after %s ended: %s', sessionId, kinds.join(', '), endedBy, error)
+          return
+        }
+        pendingArchive.delete(sessionId)
+        // A scheduled task alone is the one refusal the handoff answers by stopping the
+        // activity (#896): a task that could not be moved still holds the part, and leaving
+        // it active is the leak itself. The retry answers it the same way, and the id is
+        // spent either way — a stop that fails is not asked for again.
+        if (kinds.length > 0) {
+          void ctx.workspaceRegistry.archiveSession(sessionId, { stopActivity: true })
+            .catch(again => rt.warn('ds-bot: earlier part %s not archived after %s ended, not even stopped: %s', sessionId, endedBy, again))
+          return
+        }
+        rt.warn('ds-bot: earlier part %s not archived after %s ended: %s', sessionId, endedBy, error)
+      })
+      .finally(() => attemptingArchive.delete(sessionId))
+  }
+
   ctx.on('agent/status', ({ agent, status }) => {
-    if (status === 'idle' && rt.isBotSession(agent.id)) {
-      releaseRescued(agent)
-      void checkContext(agent).catch(error => rt.warn('ds-bot: context check for %s failed: %s', agent.id, error))
-    }
+    if (status !== 'idle') return
+    // Before the Bot check: the part that was handed over is no longer this Bot's current
+    // Session, and its holder ends in it all the same.
+    attemptPendingArchive(agent.id, 'its turn')
+    if (!rt.isBotSession(agent.id)) return
+    releaseRescued(agent)
+    void checkContext(agent).catch(error => rt.warn('ds-bot: context check for %s failed: %s', agent.id, error))
   })
 
   // The handoff package opens a part as a turn of its own, so it is the first message

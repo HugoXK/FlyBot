@@ -2016,7 +2016,14 @@ diff --git a/src/client/overlays.js b/src/client/overlays.js
 diff --git a/src/client/palette.js b/src/client/palette.js
 --- a/src/client/palette.js
 +++ b/src/client/palette.js
-@@ -7,6 +7,8 @@ import { BotAvatar, RoomAvatar } from './mark.js'
+@@ -1,16 +1,20 @@
+ import { createElement as h, Fragment, useEffect, useState } from 'react'
+ import { FishLogo } from '@deepseek-ai/dsh-client-ui-primitives'
+ import { isMainOf } from './sources.js'
+-import { currentPart, stripHeader } from './text.js'
++import { botNames, currentPart, readableLine } from './text.js'
+ import { PlusIcon, SearchIcon, PeopleIcon, CloseIcon, GearIcon } from './icons.js'
+ import { BotAvatar, RoomAvatar } from './mark.js'
  import { useEscape } from './overlay-hooks.js'
  import { QUICK_EDGES, useFlip, useGlide } from './motion.js'
  import { t } from './i18n.js'
@@ -2025,6 +2032,30 @@ diff --git a/src/client/palette.js b/src/client/palette.js
  
  // Search is a command palette: a 560px dialog, a search header, and 49px
  // rows (24px avatar, title, subtitle). Bots and groups match on name and role; past
+-// messages match on their text.
++// messages match on their text, read by `readableLine`, the same reader `previewOf` uses — a header,
++// a delegation trace and a fence are routing or data, never the row (#1347).
++const paletteText = (raw, names) => readableLine(String(raw ?? ''), names)
+ const PALETTE_EXIT_MS = 160
+ export function CommandPalette({ start, token, roster, actions, useSessions }) {
+   const [query, setQuery] = useState(start ?? '')
+@@ -24,6 +24,7 @@ export function CommandPalette({ start, token, roster, actions, useSessions }) {
+   }
+   useEscape(close)
+   const ids = [...roster.bots.map(currentPart), ...roster.rooms.map(item => item.id)]
++  const names = botNames(roster)
+   const found = useSessions((list) => {
+     if (wanted.length < 2) return '[]'
+     const hits = []
+@@ -35,7 +35,7 @@ export function CommandPalette({ start, token, roster, actions, useSessions }) {
+         const entry = outline[index]
+         if (hidden.includes(entry.turn)) continue
+         for (const raw of [entry.response, entry.prompt]) {
+-          const text = stripHeader(raw ?? '').replace(/\s+/g, ' ').trim()
++          const text = paletteText(raw, names)
+           const at = text.toLowerCase().indexOf(wanted)
+           if (at < 0) continue
+           const from = Math.max(0, at - 24)
 @@ -49,13 +49,13 @@ export function CommandPalette({ start, token, roster, actions, useSessions }) {
    const matchesName = (...fields) => wanted === '' || fields.some(field => (field ?? '').toLowerCase().includes(wanted))
    const sections = []
@@ -2063,7 +2094,7 @@ diff --git a/src/client/sidebar.js b/src/client/sidebar.js
  import { isMainOf } from './sources.js'
 -import { currentPart, previewOf, relativeShort } from './text.js'
 -import { PlusIcon, SearchIcon, GaugeIcon, PlugIcon, ClockIcon, GearIcon, PinMarkIcon, ConnectorIcon, SwitchIcon, CloudDownloadIcon } from './icons.js'
-+import { awayGroups, botRowTitle, currentPart, faceRowTitle, modelOf, nameMentions, previewOf, relativeShort, unsentReplyTurns } from './text.js'
++import { awayGroups, botNames, botRowTitle, currentPart, faceRowTitle, modelOf, nameMentions, previewOf, relativeShort, unsentReplyTurns } from './text.js'
 +import { PlusIcon, SearchIcon, GaugeIcon, PlugIcon, ClockIcon, GearIcon, PinMarkIcon, ConnectorIcon, SwitchIcon, CloudDownloadIcon, FlyBotMark } from './icons.js'
  import { MAIN_LOOK } from './characters.js'
  import { botState, BotMark, BotAvatar, RoomAvatar } from './mark.js'
@@ -2088,7 +2119,7 @@ diff --git a/src/client/sidebar.js b/src/client/sidebar.js
    const id = bot.id
    const part = currentPart(bot)
 -  const preview = useSessions(list => previewOf(list, part, roster.exchangeTurns[part]))
-+  const preview = useSessions(list => nameMentions(previewOf(list, part, roster.exchangeTurns[part], unsentReplyTurns(bot, part)), roster))
++  const preview = useSessions(list => nameMentions(previewOf(list, part, roster.exchangeTurns[part], unsentReplyTurns(bot, part), botNames(roster)), roster))
    const running = useSessionStatus(map => map.get(part)?.running === true)
    const active = useSessionRetainInfo(part, info => (info?.retainedBy?.mainView ?? 0) > 0)
    const unread = useSessionStatus(map => map.get(part)?.completionUnread === true || map.get(part)?.pendingInteraction !== undefined) || (marked && !active)
@@ -2205,7 +2236,7 @@ diff --git a/src/client/sidebar.js b/src/client/sidebar.js
    const id = room.id
 -  const fallback = useSessions(list => previewOf(list, id))
 -  const preview = room.preview?.replace(/\s+/g, ' ').trim() || fallback
-+  const fallback = useSessions(list => nameMentions(previewOf(list, id), roster))
++  const fallback = useSessions(list => nameMentions(previewOf(list, id, [], [], botNames(roster)), roster))
 +  // The host's line is the same kind of stored text as a Bot chat's, so the row reads it the same way:
 +  // a fence or a marker fragment must never reach the row (#1347).
 +  const preview = nameMentions(visibleText(room.preview), roster) || fallback
@@ -2754,7 +2785,7 @@ diff --git a/src/client/styles.js b/src/client/styles.js
  /* Usage while another page is open: out of the flow at Usage's own width, so it keeps
     its layout, and not rendered. */
  .bt-settings-usage[data-off]{position:absolute;top:0;left:198px;width:calc(min(1100px,calc(100vw - 48px)) - 198px);height:100%;box-sizing:border-box;content-visibility:hidden;pointer-events:none}
-@@ -470,13 +470,58 @@ button.bt-set-row:hover{background:var(--bt-hover)}
+@@ -470,13 +470,60 @@ button.bt-set-row:hover{background:var(--bt-hover)}
  .bt-set-card>.bt-set-row+.bt-set-row{border-top:.5px solid var(--bt-line)}
  .bt-set-row:first-child{border-top-left-radius:12px;border-top-right-radius:12px}
  .bt-set-row:last-child{border-bottom-left-radius:12px;border-bottom-right-radius:12px}
@@ -2788,11 +2819,13 @@ diff --git a/src/client/styles.js b/src/client/styles.js
 +.bt-wf-prompt{display:flex;flex-direction:column;gap:4px;font-size:12px;min-width:0}
 +.bt-wf-prompt textarea{width:100%;box-sizing:border-box;border-radius:8px;border:1px solid var(--bt-line);background:var(--bt-card);color:inherit;font:inherit;font-size:12px;padding:6px 8px;resize:vertical}
 +.bt-wf-plane{position:relative;width:0;margin:16px auto 0}
-+.bt-wf-wires{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}
++.bt-wf-wires{position:absolute;left:calc(-1 * var(--bt-wf-wire-span,480px));top:0;width:calc(2 * var(--bt-wf-wire-span,480px));overflow:visible;pointer-events:none}
 +.bt-wf-wires path{fill:none;stroke:var(--bt-ink-3);stroke-width:1.6}
 +.bt-wf-wires marker path{fill:var(--bt-ink-3);stroke:none}
 +.bt-wf-node{position:absolute;width:168px;box-sizing:border-box;border:1px solid var(--bt-line);background:var(--bt-card);border-radius:12px;padding:8px 9px;display:flex;align-items:center;gap:8px}
-+.bt-wf-node.running{border-color:var(--bt-accent);box-shadow:0 0 0 3px rgba(77,107,254,.12)}
++@keyframes bt-wf-node-live{0%,100%{border-color:var(--bt-accent);box-shadow:0 0 0 2px rgba(77,107,254,.18),0 0 0 0 rgba(77,107,254,.2)}50%{border-color:rgba(77,107,254,.85);box-shadow:0 0 0 3px rgba(77,107,254,.35),0 0 14px 2px rgba(77,107,254,.22)}}
++.bt-wf-node.running{border-color:var(--bt-accent);animation:bt-wf-node-live 1.5s ease-in-out infinite}
++@media (prefers-reduced-motion:reduce){.bt-wf-node.running{animation:none;box-shadow:0 0 0 3px rgba(77,107,254,.2)}}
 +.bt-wf-node.done{border-color:rgba(22,163,74,.35)}
 +.bt-wf-node.failed{border-color:#e5484d}
 +.bt-wf-node.queued{opacity:.78}
@@ -2986,14 +3019,16 @@ diff --git a/src/client/styles.js b/src/client/styles.js
  [data-composer-placeholder]::after{content:var(--bt-placeholder,"Message");display:block;font-size:14px;line-height:24px;color:color-mix(in srgb,var(--bt-ink) 36%,transparent)}
  /* The team's "+" (ComposerPlus) takes the seat of the shell's command-menu button. */
  [data-composer-card] button[class*="_add"]{display:none!important}
-@@ -905,6 +905,7 @@ header[class*="_header"] .bt-head{flex:1 1 auto;width:100%}
+@@ -905,7 +905,9 @@ header[class*="_header"] .bt-head{flex:1 1 auto;width:100%}
  .bt-mic:active,.bt-voice:active{scale:.9}
  [data-composer-card]:has(button[class*="_primary"]:disabled) .bt-voice{display:inline-grid}
  body[data-bt-room] .bt-voice{display:none!important}
 +body[data-bt-room] [data-composer-card] [class*="_activity"]{display:none!important}
  body[data-bt-room] [data-composer-card]:has(button[class*="_primary"]:disabled) .bt-mic:not([aria-pressed=true]){background:var(--bt-accent);color:var(--bt-accent-ink,#fff)}
++body[data-bt-workflow] [data-composer-card]{display:none!important}
  .bt-mic-note{position:absolute;right:12px;bottom:calc(100% + 8px);padding:5px 10px;border-radius:8px;background:var(--bt-user);color:var(--bt-user-ink);font-size:12px;line-height:16px;white-space:nowrap;pointer-events:none;animation:bt-rise .16s ease-out}
  [data-chain-overlay-fallback="conversation.composer"]:has(~ .bt-q){display:block!important;order:2}
+ .bt-q{order:1}
 @@ -959,6 +959,7 @@ div:has(> nav [class*="_marks"]){display:none!important}
  .bt-earlier-top{display:flex;justify-content:center;align-items:center;height:34px;flex:none}
  .bt-earlier-top .bt-soft{height:28px;font-size:12px;padding:0 12px}

@@ -128,7 +128,8 @@ function delivery() {
     name: '发布交付流水线',
     description: 'Ship a notice',
     chain: 'Planner → Writer → Coder → Reviewer ‖ Tester → Deployer',
-    preview: 'Coder 正在处理 #1280…',
+    preview: '等待任务',
+    activeCount: 0,
     trigger: 'manual',
     layers: [['planner'], ['writer'], ['coder'], ['reviewer', 'tester'], ['deployer']],
     nodes: [
@@ -149,8 +150,10 @@ function delivery() {
     ],
     messages: [{ id: 'm1', kind: 'user', text: SCRIPT }],
     run: {
+      live: true,
       status: 'running',
       task: { id: '#1280', title: '缩短交付组群 notice' },
+      taskSummary: '#1280 · 缩短交付组群 notice',
       nodeStatus: { planner: 'done', writer: 'done', coder: 'running', reviewer: 'queued', tester: 'queued', deployer: 'queued' },
       running: ['coder'],
       doneCount: 2,
@@ -180,12 +183,12 @@ test('the sidebar opens the flowchart, and a drag, a wire and a dropped Bot are 
   await settle()
   assert.ok(calls.some(item => item.name === 'workflow/state'))
   assert.ok(textOf(view.tree).includes('发布交付流水线'))
-  assert.ok(textOf(view.tree).includes('Coder 正在处理 #1280…'))
+  assert.ok(textOf(view.tree).includes('Waiting for a task'))
 
   findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
   findAll(view.tree, node => node.type === 'button' && textOf(node) === 'Flow')[0].props.onClick()
   const opened = textOf(view.tree)
-  assert.ok(opened.includes('并行分支 · 全部通过后汇合'))
+  assert.ok(opened.includes('Parallel branches · Merge after all pass'))
   assert.ok(opened.includes('Reviewer'))
   assert.ok(opened.includes('Tester'))
   const html = htmlOf(view.tree)
@@ -292,11 +295,23 @@ test('settings and the flowchart save a node prompt and a link on the same graph
   }
   const settings = mount(client.WorkflowSettings, { call, roster: { bots: [] } })
   await settle()
-  const box = findAll(settings.tree, node => node.props?.['data-prompt'] === 'coder')[0]
-  assert.equal(box.props.defaultValue, 'Implement it.')
+  // Click Edit to enable inspector and edge form
+  button(settings.tree, 'Edit').props.onClick()
+  await settle()
+  // Click the coder node to select it and open inspector
+  const coderNode = findAll(settings.tree, node => node.props?.['data-node'] === 'coder')[0]
+  assert.ok(coderNode, 'coder node should exist in canvas')
+  coderNode.props.onClick()
+  await settle()
+  // Find the textarea in the inspector
+  const inspectorAreas = findAll(settings.tree, node => node.type === 'textarea')
+  const box = inspectorAreas.find(area => area.props?.value === 'Implement it.')
+  assert.ok(box, 'inspector textarea with coder prompt should exist')
+  assert.equal(box.props.value, 'Implement it.')
   const hostile = 'Keep the diff small.\n<script>alert(1)</script>'
-  box.props.onBlur({ target: { value: hostile } })
-  const saved = calls.find(item => item.name === 'workflow/graph')
+  box.props.onChange({ target: { value: hostile } })
+  await settle()
+  const saved = calls.filter(item => item.name === 'workflow/graph').at(-1)
   assert.equal(saved.body.workflowId, 'delivery')
   assert.equal(saved.body.nodes.find(node => node.id === 'coder').prompt, hostile)
   assert.equal(htmlOf(settings.tree).includes('<script'), false)
@@ -321,10 +336,19 @@ test('settings and the flowchart save a node prompt and a link on the same graph
   findAll(flow.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
   button(flow.tree, 'Flow').props.onClick()
   button(flow.tree, 'Edit').props.onClick()
-  const area = findAll(flow.tree, node => node.props?.['data-prompt'] === 'coder')[0]
-  assert.equal(area.props.defaultValue, 'Implement it.')
-  area.props.onBlur({ target: { value: 'Keep the diff small.' } })
-  const edited = flowCalls.find(item => item.name === 'workflow/graph')
+  await settle()
+  // Click the coder node in the flowchart drawer to select it
+  const flowCoderNode = findAll(flow.tree, node => node.props?.['data-node'] === 'coder')[0]
+  assert.ok(flowCoderNode, 'coder node should exist in flow canvas')
+  flowCoderNode.props.onClick()
+  await settle()
+  // Find the textarea in the per-node inspector
+  const flowInspectorAreas = findAll(flow.tree, node => node.type === 'textarea')
+  const area = flowInspectorAreas.find(a => (a.props?.value || a.props?.defaultValue) === 'Implement it.')
+  assert.ok(area, 'inspector textarea with coder prompt should exist')
+  area.props.onChange({ target: { value: 'Keep the diff small.' } })
+  await settle()
+  const edited = flowCalls.filter(item => item.name === 'workflow/graph').at(-1)
   assert.equal(edited.body.nodes.find(node => node.id === 'coder').prompt, 'Keep the diff small.')
   assert.equal(htmlOf(flow.tree).includes('<script'), false)
   flow.unmount()
@@ -341,6 +365,412 @@ test('apply registers the sidebar section and the settings page', () => {
   })
   assert.deepEqual(entries, ['flybot.sidebar.section#workflow', 'flybot.settings.page#workflow'])
   off()
+})
+
+test('settings can add a loop edge and a condition edge', async () => {
+  const calls = []
+  const graph = delivery()
+  const call = async (name, body) => {
+    calls.push({ name, body })
+    if (name === 'workflow/state') return { workflows: [graph] }
+    return { ok: true, workflows: [graph] }
+  }
+  const settings = mount(client.WorkflowSettings, { call, roster: { bots: [] } })
+  await settle()
+  // Click Edit to enable edge form controls
+  button(settings.tree, 'Edit').props.onClick()
+  await settle()
+  const pick = (label) => findAll(settings.tree, node => node.props?.['aria-label'] === label)[0]
+  pick('Kind').props.onChange({ target: { value: 'loop' } })
+  pick('From node').props.onChange({ target: { value: 'coder' } })
+  pick('To node').props.onChange({ target: { value: 'coder' } })
+  pick('Max iterations').props.onChange({ target: { value: '3' } })
+  pick('until').props.onChange({ target: { value: 'stop' } })
+  pick('Equals').props.onChange({ target: { value: 'yes' } })
+  button(settings.tree, 'Add link').props.onClick()
+  const looped = calls.filter(item => item.name === 'workflow/graph').at(-1)
+  const loop = looped.body.edges.find(edge => edge.from === 'coder' && edge.to === 'coder')
+  assert.equal(loop.loop, true)
+  assert.equal(loop.max, 3)
+  assert.deepEqual(loop.until, { output: 'stop', eq: 'yes' })
+  settings.unmount()
+})
+
+test('sidebar preview ignores a stale busy preview when nothing is live', async () => {
+  const graph = delivery()
+  graph.preview = 'Coder 正在处理 #1280…'
+  graph.activeCount = 0
+  graph.run = null
+  const call = async (name) => {
+    if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+    return { ok: true, workflows: [graph] }
+  }
+  const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+  await settle()
+  assert.ok(textOf(view.tree).includes('Waiting for a task'))
+  assert.equal(textOf(view.tree).includes('Coder 正在处理'), false)
+  view.unmount()
+})
+
+test('two concurrent live runs each show independent progress strips', () => {
+  const workflow = {
+    runs: [
+      {
+        id: 'run-a', live: true, status: 'running',
+        task: { id: '#1422', title: 'PR 1422' },
+        running: ['planner'], doneCount: 1, nodeCount: 6,
+        marks: ['done', 'running', 'queued', 'queued', 'queued'],
+      },
+      {
+        id: 'run-b', live: true, status: 'running',
+        task: { id: '#1395', title: 'PR 1395' },
+        running: ['coder'], doneCount: 3, nodeCount: 6,
+        marks: ['done', 'done', 'done', 'running', 'queued'],
+      },
+    ],
+    run: { id: 'run-a', live: true, status: 'running' },
+  }
+  assert.equal(client.resolveFocusedRun(workflow, 'run-b').doneCount, 3)
+  assert.equal(client.resolveFocusedRun(workflow, null).id, 'run-a')
+})
+
+test('two concurrent live runs each get their own pause and stop controls', async () => {
+  const graph = delivery()
+  graph.activeCount = 2
+  graph.queueDepth = 0
+  graph.runs = [
+    { ...graph.run, id: 'run-a', task: { id: '#1422', title: 'PR 1422' }, taskSummary: '#1422 · PR 1422', doneCount: 1, marks: ['done', 'running', 'queued', 'queued', 'queued'] },
+    { ...graph.run, id: 'run-b', task: { id: '#1395', title: 'PR 1395' }, taskSummary: '#1395 · PR 1395', doneCount: 4, marks: ['done', 'done', 'done', 'done', 'running'] },
+  ]
+  graph.run = graph.runs[0]
+  const calls = []
+  const call = async (name, body) => {
+    calls.push({ name, body })
+    if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+    return { ok: true, workflows: [graph] }
+  }
+  const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+  await settle()
+  findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
+  await settle()
+  const strips = findAll(view.tree, node => node.props?.className?.includes('wf-strip') && node.props?.['data-run-id'])
+  assert.equal(strips.length, 2)
+  const progressRows = findAll(view.tree, node => node.props?.className === 'wf-strip-progress')
+  assert.equal(progressRows.length, 2)
+  const text = textOf(view.tree)
+  assert.ok(text.includes('1/6'))
+  assert.ok(text.includes('4/6'))
+  const pauseButtons = findAll(view.tree, node => node.type === 'button' && textOf(node) === 'Pause')
+  assert.equal(pauseButtons.length, 2)
+  const stopButtons = findAll(view.tree, node => node.type === 'button' && textOf(node) === 'Stop')
+  assert.equal(stopButtons.length, 2)
+  pauseButtons[1].props.onClick()
+  await settle()
+  assert.ok(calls.some(item => item.name === 'workflow/pause' && item.body.runId === 'run-b'))
+  stopButtons[0].props.onClick()
+  await settle()
+  assert.ok(calls.some(item => item.name === 'workflow/reset' && item.body.runId === 'run-a'))
+  view.unmount()
+})
+
+test('a live run shows pause, resume, and progress controls', async () => {
+  const graph = delivery()
+  graph.activeCount = 1
+  const calls = []
+  const call = async (name, body) => {
+    calls.push({ name, body })
+    if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+    return { ok: true, workflows: [graph] }
+  }
+  const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+  await settle()
+  findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
+  const labels = findAll(view.tree, node => node.type === 'button').map(node => textOf(node))
+  assert.ok(labels.includes('Pause'))
+  assert.ok(labels.includes('Progress'))
+  button(view.tree, 'Pause').props.onClick()
+  await settle()
+  assert.ok(calls.some(item => item.name === 'workflow/pause' && item.body.workflowId === 'delivery'))
+  view.unmount()
+})
+
+test('the stage has no canned demo controls', async () => {
+  const graph = delivery()
+  const call = async (name) => {
+    if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+    return { ok: true, workflows: [graph] }
+  }
+  const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+  await settle()
+  findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
+  button(view.tree, 'Flow').props.onClick()
+  const labels = findAll(view.tree, node => node.type === 'button').map(node => textOf(node))
+  assert.equal(labels.some(text => text.includes('Replay demo') || text.includes('Run demo') || text.includes('重放演示') || text.includes('演示运行')), false)
+  assert.equal(labels.some(text => text === 'Next ›' || text === '下一步 ›'), false)
+  view.unmount()
+})
+
+test('stage chat hides workflow node Bot lines but keeps owner Bots and system lines', () => {
+  const workflow = {
+    nodes: [{ id: 'coder', name: 'Coder' }, { id: 'writer', name: 'Writer' }],
+    messages: [
+      { id: '1', kind: 'system', text: '任务已进入 Workflow' },
+      { id: '2', kind: 'bot', botId: 'coder', text: 'node step output' },
+      { id: '3', kind: 'user', text: 'owner note' },
+      { id: '4', kind: 'bot', botId: 'bot-chief', text: 'Chief reply' },
+    ],
+  }
+  const roster = { byId: { 'bot-chief': { id: 'bot-chief', name: 'Chief' } } }
+  const visible = client.stageMessages(workflow, workflow.messages, roster)
+  assert.deepEqual(visible.map(message => message.id), ['1', '3', '4'])
+})
+
+test('the hand-a-task modal lists live Tasks board rows only', async () => {
+  const graph = delivery()
+  const call = async (name) => {
+    if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+    return { ok: true, workflows: [graph] }
+  }
+  const prevHost = globalThis.__flybot__
+  globalThis.__flybot__ = {
+    host: async (channel) => {
+      if (channel === 'tasks') {
+        return [{ id: 'task-live-99', title: 'Real board card', status: 'open', priority: 'P2' }]
+      }
+      return []
+    },
+  }
+  const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+  await settle()
+  findAll(view.tree, node => node.props?.className === 'wf-row wf-assign-row')[0].props.onClick()
+  await settle()
+  const text = textOf(view.tree)
+  assert.ok(text.includes('Real board card'))
+  assert.equal(text.includes('发布说明：Workflow Beta 上线'), false)
+  assert.equal(text.includes('修复群聊 @ 提及跳转错位'), false)
+  globalThis.__flybot__ = prevHost
+  view.unmount()
+})
+
+test('the flowchart canvas CSS clips overflow inside its panel', () => {
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /\.wf-canvas\{[^}]*overflow:auto/)
+  assert.match(source, /\.wf-canvas-view\{[^}]*overflow:auto/)
+  assert.match(source, /\.wf-stage\{[^}]*overflow:hidden/)
+})
+
+test('delivery workflow rows are deletable even when template ids match', async () => {
+  const graph = delivery()
+  const calls = []
+  let workflows = [graph]
+  const call = async (name, body) => {
+    calls.push({ name, body })
+    if (name === 'workflow/state') {
+      return {
+        workflows,
+        templates: [{ id: 'delivery', name: '发布交付流水线' }, { id: 'weekly', name: '周报汇总流程' }],
+      }
+    }
+    if (name === 'workflow/delete' && body.workflowId === 'delivery') {
+      workflows = []
+      return { workflows }
+    }
+    return { ok: true, workflows }
+  }
+  const prevBody = document.body
+  document.body = { nodeType: 1 }
+  try {
+    const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+    await settle()
+    const row = findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0]
+    assert.ok(row)
+    row.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 40, clientY: 40 })
+    await settle()
+    const deleteBtn = findAll(view.tree, node => node.type === 'button' && textOf(node) === 'Delete')[0]
+    assert.ok(deleteBtn, 'context menu Delete')
+    deleteBtn.props.onClick()
+    await settle()
+    const confirm = findAll(view.tree, node => node.type === 'button' && node.props.className === 'wf-btn wf-danger')[0]
+    assert.ok(confirm, 'delete confirm')
+    confirm.props.onClick()
+    await settle()
+    assert.ok(calls.some(item => item.name === 'workflow/delete' && item.body.workflowId === 'delivery'))
+    assert.equal(textOf(view.tree).includes('发布交付流水线'), false)
+    view.unmount()
+  } finally {
+    document.body = prevBody
+  }
+})
+
+test('a sidebar workflow row can be deleted from the context menu', async () => {
+  const graph = { ...delivery(), id: 'lane-a', name: 'Lane A' }
+  const calls = []
+  const call = async (name, body) => {
+    calls.push({ name, body })
+    if (name === 'workflow/state') return { workflows: [graph], templates: [{ id: 'delivery', name: 'Factory' }] }
+    if (name === 'workflow/delete') return { ok: true, workflows: [] }
+    return { ok: true, workflows: [graph] }
+  }
+  const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+  await settle()
+  const row = findAll(view.tree, node => node.type === 'button' && textOf(node).includes('Lane A'))[0]
+  row.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 40, clientY: 40 })
+  await settle()
+  const deleteBtn = findAll(view.tree, node => node.type === 'button' && textOf(node) === 'Delete')[0]
+  assert.ok(deleteBtn)
+  deleteBtn.props.onClick()
+  await settle()
+  const confirm = findAll(view.tree, node => node.type === 'button' && node.props.className === 'wf-btn wf-danger')[0]
+  confirm.props.onClick()
+  await settle()
+  assert.ok(calls.some(item => item.name === 'workflow/delete' && item.body.workflowId === 'lane-a'))
+  view.unmount()
+})
+
+test('run history lists every live run that activeCount includes', () => {
+  const workflow = {
+    activeCount: 2,
+    history: [],
+    queue: [],
+    runs: [
+      { id: 'run-a', live: true, status: 'running', task: { id: '#1422', title: 'PR 1422' } },
+      { id: 'run-b', live: true, status: 'running', task: { id: '#1395', title: 'PR 1395' } },
+    ],
+    run: { id: 'run-a', live: true, status: 'running', task: { id: '#1422', title: 'PR 1422' } },
+  }
+  const rows = client.runHistoryRows(workflow)
+  assert.equal(rows.filter(row => row.status === 'running').length, 2)
+  assert.equal(rows.length, 2)
+})
+
+test('run history does not invent a second running row when only one live run exists', () => {
+  const workflow = {
+    activeCount: 1,
+    history: [{ task: { id: '#1', title: 'Old' }, status: 'done' }],
+    queue: [],
+    runs: [{ id: 'run-a', live: true, status: 'running', task: { id: '#1422', title: 'PR 1422' } }],
+    run: { id: 'run-a', live: true, status: 'running', task: { id: '#1422', title: 'PR 1422' } },
+  }
+  const rows = client.runHistoryRows(workflow)
+  assert.equal(rows.filter(row => row.status === 'running').length, 1)
+})
+
+test('the runs tab shows one running row per concurrent live run', async () => {
+  const graph = delivery()
+  graph.activeCount = 2
+  graph.queueDepth = 0
+  graph.runs = [
+    { id: 'run-a', live: true, status: 'running', task: { id: '#1422', title: 'PR 1422' }, taskSummary: '#1422 · PR 1422' },
+    { id: 'run-b', live: true, status: 'running', task: { id: '#1395', title: 'PR 1395' }, taskSummary: '#1395 · PR 1395' },
+  ]
+  graph.run = graph.runs[0]
+  const call = async (name) => {
+    if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+    return { ok: true, workflows: [graph] }
+  }
+  const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+  await settle()
+  findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
+  button(view.tree, 'Progress').props.onClick()
+  await settle()
+  const running = findAll(view.tree, node => node.props?.className === 'wf-chip running')
+  assert.equal(running.length, 2)
+  const text = textOf(view.tree)
+  assert.ok(text.includes('PR 1422'))
+  assert.ok(text.includes('PR 1395'))
+  view.unmount()
+})
+
+test('wire paths for a linear three-node graph connect each step vertically', () => {
+  const nodes = [
+    { id: 'a', x: 0, y: 0 },
+    { id: 'b', x: 0, y: 108 },
+    { id: 'c', x: 0, y: 216 },
+  ]
+  const span = client.WIRE_SPAN
+  const out = client.NODE_WIRE_OUT
+  const ab = client.wirePath(nodes[0], nodes[1])
+  const bc = client.wirePath(nodes[1], nodes[2])
+  assert.match(ab, new RegExp(`^M ${span} ${out} C ${span} ${(out + 108) / 2}, ${span} ${(out + 108) / 2}, ${span} 108$`))
+  const y1b = 108 + out
+  assert.match(bc, new RegExp(`^M ${span} ${y1b} C ${span} ${(y1b + 216) / 2}, ${span} ${(y1b + 216) / 2}, ${span} 216$`))
+})
+
+test('wire paths between parallel nodes use orthogonal segments, not wide curves', () => {
+  const from = { x: 80, y: 260 }
+  const to = { x: 320, y: 380 }
+  const path = client.wirePath(from, to)
+  assert.match(path, /^M .+ L .+ L .+ L /)
+  assert.equal(path.includes('C '), false)
+})
+
+test('parallel branch frames wrap node bounds without hard-coded width', () => {
+  const members = [
+    { id: 'a', x: 80, y: 380 },
+    { id: 'b', x: 320, y: 380 },
+  ]
+  const frame = client.parallelFrameStyle(members)
+  assert.equal(frame.width, 320 - 80 + client.NODE_W + 20)
+  assert.equal(frame.left, 80 - client.NODE_W / 2 - 10)
+})
+
+test('the workflow stage mounts no message composer', async () => {
+  const graph = delivery()
+  const prevFlybot = globalThis.__flybot__
+  globalThis.__flybot__ = {
+    ...prevFlybot,
+    Conversation: () => null,
+    ConversationHeader: () => null,
+  }
+  const call = async (name) => {
+    if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+    return { ok: true, workflows: [graph] }
+  }
+  const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+  await settle()
+  findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
+  await settle()
+  assert.equal(findAll(view.tree, node => node.props?.className === 'wf-composer').length, 0)
+  assert.equal(findAll(view.tree, node => node.props?.className === 'wf-composer-wrap').length, 0)
+  assert.equal(findAll(view.tree, node => node.type === 'input').length, 0)
+  globalThis.__flybot__ = prevFlybot
+  view.unmount()
+})
+
+test('palette chips distinguish duplicate Bot names and expose drag affordance', async () => {
+  const graph = delivery()
+  const call = async (name) => {
+    if (name === 'workflow/state') return { workflows: [graph], templates: [] }
+    return { ok: true, workflows: [graph] }
+  }
+  const roster = {
+    bots: [
+      { id: 'chief-a', name: 'Chief', role: 'Triage', remote: false },
+      { id: 'chief-b', name: 'Chief', role: 'Verify', remote: false },
+      { id: 'chief-c', name: 'Chief', role: '', remote: false },
+    ],
+  }
+  const view = mount(client.Section, { roster, call, actions: {} })
+  await settle()
+  findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
+  button(view.tree, 'Flow').props.onClick()
+  button(view.tree, 'Edit').props.onClick()
+  await settle()
+  assert.ok(findAll(view.tree, node => node.props?.className?.includes('wf-palette-bot')).length >= 3)
+  assert.equal(client.botPaletteSubtitle({ id: 'chief-a', name: 'Chief', role: 'Triage' }, roster.bots), 'Triage')
+  assert.ok(client.botPaletteSubtitle({ id: 'chief-c', name: 'Chief', role: '' }, roster.bots).includes('hief-c'))
+  view.unmount()
+})
+
+test('running flow nodes use a breathing border animation only while running', () => {
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /@keyframes wf-node-live/)
+  assert.match(source, /\.wf-node\.running\{[^}]*animation:wf-node-live/)
+  assert.match(source, /\.wf-palette-bot\{/)
+  assert.match(source, /\.wf-drag-ghost\{/)
+  assert.match(source, /\.wf-node\.done\{/)
+  assert.doesNotMatch(source, /\.wf-node\.done\{[^}]*animation/)
+  assert.doesNotMatch(source, /\.wf-node\.queued\{[^}]*animation/)
 })
 
 test('Chinese labels follow the host Tasks translation', () => {

@@ -3,7 +3,17 @@
 // deletes it when the run finishes, fails for good, or is cancelled.
 import { cleanLine, cleanPrompt, cleanTools } from './graph.js'
 
-export function nodeConfig(node, roster = []) {
+const SHELL = new Set(['bash', 'shell', 'danger-full-access'])
+
+// A step that names a shell gets full access. Anything else can still write
+// the workspace. A node with no tools is not left on a read-only default.
+export function permissionFor(tools) {
+  const names = cleanTools(tools)
+  if (names.some(name => SHELL.has(name))) return 'danger-full-access'
+  return 'workspace-write'
+}
+
+export function nodeConfig(node, roster = [], workflowModel = '') {
   const seated = node?.botId
     ? roster.find(bot => bot && bot.id === node.botId && bot.remote !== true)
     : undefined
@@ -15,19 +25,19 @@ export function nodeConfig(node, roster = []) {
     name: node.name,
     role: cleanLine(node.role || seated?.role, 80),
     prompt,
-    model: cleanLine(node.model || seated?.model, 80),
+    model: cleanLine(workflowModel || node.model || seated?.model, 80),
     tools: cleanTools(node.tools),
     hidden: true,
     ephemeral: true,
   }
 }
 
-export async function spawnAll(nodes, roster, spawn) {
+export async function spawnAll(nodes, roster, spawn, workflowModel = '') {
   const made = []
   try {
     const ephemeral = {}
     for (const node of nodes) {
-      const spec = nodeConfig(node, roster)
+      const spec = nodeConfig(node, roster, workflowModel)
       const id = await spawn(spec)
       if (typeof id !== 'string' || id === '') throw new Error('The run could not start a Bot')
       made.push(id)
