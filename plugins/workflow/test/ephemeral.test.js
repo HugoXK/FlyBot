@@ -413,6 +413,39 @@ test('#1389: a step the host refuses is not marked as handed, and a later settle
   assert.match(warnings.join('\n'), /no-sender/)
 })
 
+// #1569: the Bot reply hook calls service.stepResult directly, so it never passes
+// through the host channel's read-only check. advance's own guard has to stop it,
+// and the refusal is reported once instead of being swallowed.
+test('#1569: a read-only host refuses the Bot reply that would advance a run', async () => {
+  let readOnly = false
+  const warnings = []
+  const { svc } = harness({ service: { readOnly: () => readOnly, warn: (...args) => warnings.push(args.join(' ')) } })
+  const made = svc.define({
+    name: 'Pair',
+    nodes: [
+      { id: 'plan', name: 'Planner', role: 'plan', prompt: 'Write the plan.' },
+      { id: 'code', name: 'Coder', role: 'code', prompt: 'Implement it.' },
+    ],
+    edges: [],
+  }).workflows.find(item => item.name === 'Pair')
+  const started = await svc.runNamed({ workflow: 'Pair', brief: 'Ship the note' })
+  const run = started.workflows.find(item => item.id === made.id).run
+  const planner = run.ephemeral.plan
+  assert.equal(run.nodeStatus.plan, 'running')
+
+  readOnly = true
+  await svc.stepResult({ botId: planner, ok: true, text: 'The plan is ready.' })
+  const after = svc.state().workflows.find(item => item.id === made.id).run
+  assert.equal(after.status, 'running')
+  assert.equal(after.nodeStatus.plan, 'running')
+  assert.equal(after.doneCount, run.doneCount)
+  assert.match(warnings.join('\n'), /read-only/)
+
+  // The same step replies again: still refused, and the warning is not repeated.
+  await svc.stepResult({ botId: planner, ok: true, text: 'The plan is ready.' })
+  assert.equal(warnings.filter(line => line.includes('read-only')).length, 1)
+})
+
 // #1388: reap is the only path that cleans up a run whose host went away, and the
 // plugin calls it exactly once, at load. A run still marked `running` at that
 // moment is what a restart leaves behind: nothing resumes it, so its ephemeral

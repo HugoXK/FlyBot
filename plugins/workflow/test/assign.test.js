@@ -129,6 +129,38 @@ test('a read-only host refuses assign', () => {
   assert.equal(refused.code, 'read-only')
 })
 
+// #1569: advance and reset are writes like pause. A read-only host refuses them
+// before they touch the run or the file, so neither the live run nor its queue moves.
+test('#1569: a read-only host refuses advance and reset without moving the run', () => {
+  let readOnly = false
+  const svc = service({ readOnly: () => readOnly })
+  svc.setConcurrency({ workflowId: DELIVERY_ID, maxConcurrent: 1 })
+  svc.assign({ workflowId: DELIVERY_ID, taskId: 'task-first', title: 'First' })
+  svc.assign({ workflowId: DELIVERY_ID, taskId: 'task-queued', title: 'Queued behind it' })
+  const before = delivery(svc.state())
+  assert.equal(before.run.nodeStatus.planner, 'running')
+  assert.equal(before.queueDepth, 1)
+
+  readOnly = true
+  const refusedAdvance = svc.advance({ workflowId: DELIVERY_ID, nodeId: 'planner', outcome: 'done' })
+  assert.deepEqual(refusedAdvance, { ok: false, code: 'read-only', error: 'The host is read-only' })
+  const refusedReset = svc.reset({ workflowId: DELIVERY_ID })
+  assert.deepEqual(refusedReset, { ok: false, code: 'read-only', error: 'The host is read-only' })
+
+  const after = delivery(svc.state())
+  assert.equal(after.activeCount, 1)
+  assert.equal(after.run.status, 'running')
+  assert.equal(after.run.nodeStatus.planner, 'running')
+  assert.equal(after.queueDepth, 1)
+  assert.deepEqual(after.queue.map(task => task.id), ['task-queued'])
+
+  // Nothing else changes on a writable host: the same call still advances.
+  readOnly = false
+  const moved = svc.advance({ workflowId: DELIVERY_ID, nodeId: 'planner', outcome: 'done' })
+  assert.equal(moved.ok, true)
+  assert.equal(delivery(moved).run.nodeStatus.writer, 'running')
+})
+
 test('the store reloads a workflow file and drops a file that does not parse', () => {
   const dir = mkdtempSync(join(tmpdir(), 'flybot-wf-'))
   try {
