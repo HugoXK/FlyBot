@@ -9,7 +9,8 @@
 //   - The owner can turn a connector off for one Bot: `bot.connectors = { composio: false }`. Absent
 //     means on, so every Bot, old or new, has the connected connector.
 //   - A friend's Bot (`remote`) never gets them. A run Bot (`ephemeral`) gets a connector
-//     only when its `stepTools` name it (`github` covers `mcp__github__*`). A Session whose
+//     only when its `stepTools` name it (`github` covers `mcp__github__*`), and never when a
+//     friend's Bot is the one that started the run (#1555). A Session whose
 //     Bot or parent chain cannot be resolved fails closed. Sessions that belong to no Bot
 //     (the DSH Agent, plain DSH sessions) are not touched: they are the owner's own, and no
 //     friend can reach them.
@@ -53,7 +54,17 @@ export function install(rt) {
     const tools = bot?.stepTools ?? []
     return tools.includes(id) || tools.includes('*') || tools.some(name => name === id || String(name).startsWith(`mcp__${id}__`))
   }
-  const allowed = (bot, id) => bot.remote === undefined && !turnedOff(bot, id) && (bot.ephemeral === undefined || stepGrants(bot, id))
+  // #1555: `run_workflow`/`define_workflow` have no `visibleTo`, so a friend's Bot can call them and a run
+  // Bot can name it as the one that started the run (`createdBy`). A remote Bot has no switch table of ours
+  // to intersect with, so it reads as "every connector switched off": the node's `tools` cannot hand the run
+  // Bot a connector. A record with no `createdBy` (the owner, the board, an older run) keeps the answer it
+  // had, and a `createdBy` that names a Bot we do not have leaves it as it was too.
+  const remoteCaller = (bot) => {
+    const id = bot?.createdBy
+    return (typeof id === 'string' && id !== '' ? rt.botOf(id) : undefined)?.remote !== undefined
+  }
+  const allowed = (bot, id) => bot.remote === undefined && !turnedOff(bot, id)
+    && (bot.ephemeral === undefined || (stepGrants(bot, id) && !remoteCaller(bot)))
 
   // The Bot an Agent works for: its own chat, a group Session and an earlier part resolve through
   // selfOf; a sub-agent Session is followed up to its parent. The answer has three shapes, and only
@@ -126,7 +137,11 @@ export function install(rt) {
     const { bot } = who
     if (allowed(bot, id)) return undefined
     if (bot.remote !== undefined) return `The ${id} connector is not available to a friend's Bot.`
-    if (bot.ephemeral !== undefined) return `The ${id} connector is not granted to this run. The step's tools list is what allows it.`
+    if (bot.ephemeral !== undefined) {
+      return remoteCaller(bot)
+        ? `The ${id} connector is not available to a run started by a friend's Bot.`
+        : `The ${id} connector is not granted to this run. The step's tools list is what allows it.`
+    }
     return `The ${id} connector is turned off for ${bot.name}. Its owner can turn it on in this Bot's settings.`
   })
 
