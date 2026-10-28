@@ -578,7 +578,7 @@ diff --git a/src/client/feedback.js b/src/client/feedback.js
 diff --git a/src/client/i18n.js b/src/client/i18n.js
 --- a/src/client/i18n.js
 +++ b/src/client/i18n.js
-@@ -5,6 +5,50 @@
+@@ -5,6 +5,59 @@
  export const NAMESPACE = 'ds-bot'
  
  const ZH = {
@@ -598,7 +598,12 @@ diff --git a/src/client/i18n.js b/src/client/i18n.js
 +    '工作流插件没有安装，或没有启用。默认安装包含 @flybot/workflow。',
 +  'Could not copy this workflow': '这个工作流复制不了。',
 +  'Could not save this workflow': '这个工作流保存不了。',
++  'Could not rename this workflow': '这个工作流改不了名。',
++  'Could not delete this workflow': '这个工作流删不掉。',
 +  'Use this': '用这个',
++  'Rename workflow': '重命名工作流',
++  'Delete workflow': '删除工作流',
++  'Are you sure you want to delete "{name}"? This cannot be undone.': '确定删除「{name}」吗？删除后无法恢复。',
 +  'Finish editing': '完成',
 +  'Drag a Bot here': '把 Bot 拖到图上',
 +  'System prompt': '系统提示词',
@@ -625,6 +630,10 @@ diff --git a/src/client/i18n.js b/src/client/i18n.js
 +  'Could not open this workflow': '打不开这个工作流',
 +  'This definition cannot be saved': '这个定义不能保存',
 +  'This definition cannot be copied': '这个定义不能复制',
++  'Select a node to edit': '选择一个节点来编辑',
++  'Node settings': '节点设置',
++  Tools: '工具',
++  'Inputs and outputs': '输入和输出',
 +  '{count} card(s) name a node this workflow draws no column for.': '有 {count} 张卡指向这个工作流不画列的节点。',
    // Shared
    'Main Bot': '主 Bot',
@@ -1178,7 +1187,7 @@ diff --git a/src/client/i18n.js b/src/client/i18n.js
    "{name} didn't answer in time": '{name} 没有及时回应',
    '{name} paused for your approval': '{name} 停下来等你批准',
    '{name} started on it': '{name} 开始做了',
-@@ -450,12 +450,30 @@ const ZH = {
+@@ -450,12 +450,31 @@ const ZH = {
    'Asked to make the tool call it wrote as text': '工具调用被写成了文字，已让它重新调用',
    'A Bot': '一个 Bot',
    '{name} is waiting for your approval': '{name} 等你批准',
@@ -1188,6 +1197,7 @@ diff --git a/src/client/i18n.js b/src/client/i18n.js
 +  '{count} updates': '{count} 条更新',
 +  'Once more if it still waits after 15 min.': '等了 15 分钟还没批准时再提醒一次。',
 +  Notifications: '通知',
++  'In other chats': '在其他对话时',
 +  'When your Bots finish, fail, or wait for your approval while you are in another chat or app.': '你的 Bot 完成、失败或等你批准时提醒你（你在别的对话或应用里时）。',
    '{first} and {second} are waiting for your approval': '{first}、{second} 等你批准',
    '{first}, {second} and {count} more are waiting for your approval': '{first}、{second} 等 {total} 个等你批准',
@@ -2369,7 +2379,7 @@ diff --git a/src/client/text.js b/src/client/text.js
  // parts) are not events in the chat, nor is a request handed back after its line was
  // already shown: deferred, resumed after a restart, or retried after a tool call
  // written as text.
-@@ -200,14 +200,27 @@ export function commRunOf(order, peers, turn, hiddenTurns = []) {
+@@ -200,18 +200,72 @@ export function commRunOf(order, peers, turn, hiddenTurns = []) {
  }
  
  // Latest visible line for a sidebar row; Bot-to-Bot exchange turns stay out of it.
@@ -2384,8 +2394,14 @@ diff --git a/src/client/text.js b/src/client/text.js
 +export const unsentReplyTurns = (bot, sessionId) => (Array.isArray(bot?.heldReplies) ? bot.heldReplies : [])
 +  .filter(reply => reply.sessionId === sessionId && reply.status !== 'approved' && reply.status !== 'auto').map(reply => reply.turn)
 +
++// `previewOf(list, id, hiddenTurns, unsentTurns, names)`: the newest visible line of that Session. An
++// empty turn is no line at all, so the walk keeps going to older turns; only a walk that ends still
++// empty reads as nothing. The line it settles on is read by `readableLine`, the one reader a search row
++// uses too, with the same `names`.
 +// `unsentTurns`: turns whose reply is held or was not sent; the preview shows their prompt instead.
-+export function previewOf(list, id, hiddenTurns = [], unsentTurns = []) {
++// `names`: the conversation's real Bot names; a delegation trace is only a trace when every hop is one
++// of them, so `Settings → Models 页面` stays a line while `Chief → 助手 Hi there` loses its routing.
++export function previewOf(list, id, hiddenTurns = [], unsentTurns = [], names = []) {
    const outline = list.projectionsBySession?.[id]?.values?.turnOutline ?? list.byId[id]?.projectionValues?.turnOutline
    if (!Array.isArray(outline)) return ''
    for (let index = outline.length - 1; index >= 0; index -= 1) {
@@ -2394,12 +2410,51 @@ diff --git a/src/client/text.js b/src/client/text.js
 -    const text = entry.response || entry.prompt || ''
 -    if (text !== '') return stripHeader(text).replace(/\s+/g, ' ').trim()
 +    const text = (unsentTurns.includes(entry.turn) ? '' : entry.response) || entry.prompt || ''
-+    // The outline flattens a reply to one line, so its trace ends at a space there. A stored line can
-+    // still carry its untrusted fence, and a row is one line someone reads: no marker reaches it (#1347).
-+    if (text !== '') return visibleText(stripTrace(stripHeader(text)).replace(/\s+/g, ' ').trim().replace(/^[^\s→]{1,40}(?: → [^\s→]{1,40})+ (?=\S)/, ''))
++    if (text === '') continue
++    return readableLine(text, names)
    }
    return ''
  }
+ 
++// `readableLine(text, names)`: one stored line a caller already holds — the line `previewOf` settled on,
++// or a line the palette renders as a search row — read the one way a person reads it, so a row cannot
++// have a second reading of what a preview shows (#1347). `names` is the conversation's real Bot names,
++// this one included; with no names nothing that merely looks like a trace is removed (#1408).
++export function readableLine(text, names = []) {
++  return dropKnownTrace(collapsedLine(text), names)
++}
++
++// The one sanitized reading of a stored line: no header, no fence, no wrap, one line of words.
++function collapsedLine(text) {
++  return visibleText(stripTrace(stripHeader(`${text}`)).replace(/\s+/g, ' ').trim())
++}
++
++// The outline flattens a reply to one line, so a delegation trace arrives as a prefix: `Chief → 助手 Hi`
++// is routing plus words, while `Settings → Models 页面` is a line someone wrote. Only a prefix whose
++// every hop is a known name — longest name first — is removed, and only when words follow it; a hop may
++// carry punctuation and a clock (`Chief → Product，03:16Z 审计。`, #1408).
++function dropKnownTrace(line, names) {
++  const known = [...new Set((Array.isArray(names) ? names : []).map(name => String(name ?? '').trim()).filter(name => name !== ''))].sort((a, b) => b.length - a.length)
++  if (known.length === 0 || line === '') return line
++  const hop = known.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
++  // A hop is a whole name: `Chief → 助手们 Hi` is not `Chief → 助手` plus words.
++  const whole = `(?:${hop})(?=[ \\t→,，.。:：]|$)`
++  const trace = new RegExp(`^${whole}(?:[ \\t]*→[ \\t]*${whole})+[ \\t]*(?:[,，.。:：][ \\t]*)?(?:\\d{1,2}:\\d{2}Z?[ \\t]*)?`)
++  const match = trace.exec(line)
++  if (!match) return line
++  // A trace with nothing after it, or only its own punctuation, is no row at all.
++  const rest = line.slice(match[0].length)
++  return /^[\s,，.。:：]*$/.test(rest) ? '' : rest
++}
++
++// The names a stored delegation trace can be built from: the roster's Bots, remote Bots and agents.
++// A chat whose roster is not loaded still reads its text, just never as a trace.
++export const botNames = roster => [...(roster?.bots ?? []), ...(roster?.remoteBots ?? []), ...(roster?.agents ?? [])]
++  .map(entry => entry?.name).filter(name => typeof name === 'string' && name !== '')
++
+ const formatTokens = count => (count >= 1e6 ? `${(count / 1e6).toFixed(1)}M` : count >= 1e3 ? `${(count / 1e3).toFixed(1)}K` : String(count))
+ 
+ // Same buckets as the shell's usage pill: every prompt-side billing bucket plus output.
 @@ -230,3 +230,35 @@ export function usageOf(list, ids) {
    const hit = input > 0 ? Math.round((cacheRead / input) * 100) : 0
    return t('{tokens} tok · Cache hit {hit}%', { tokens: formatTokens(input + output), hit })
@@ -2594,18 +2649,39 @@ diff --git a/src/host/agents.js b/src/host/agents.js
 diff --git a/src/host/approvals.js b/src/host/approvals.js
 --- a/src/host/approvals.js
 +++ b/src/host/approvals.js
-@@ -3,8 +3,21 @@
- // the group chat. A Bot's own chat keeps DSH's card; its requests are only noted, so
- // the team view can say who is waiting.
- import { randomUUID } from 'node:crypto'
+@@ -6,6 +6,43 @@
++import { EPHEMERAL_DENIED_TOOLS } from './tools.js'
 +import { OWNER, settled } from './turn-origin.js'
  
 -const OUTCOMES = { allow: 'allowed-once', reject: 'rejected' }
 +const OUTCOMES = { allow: 'allowed-once', reject: 'rejected', 'always-bot': 'allowed-once', 'always-room': 'allowed-once' }
-+
++const RUN_DENIED = new Set(EPHEMERAL_DENIED_TOOLS)
+ 
 +// DSH has no standing grant (its outcomes are one-shot, #540), so the owner's "Always
 +// allow" lives here: on the Bot or on the group, keyed by the kind of permission asked.
 +// A sandbox escalation names its mode in DSH's reason; any other ask is keyed by tool.
++// A run Bot has no chat the owner can see, so an approval card would stall the
++// step. Connector tools are allowed only when the node's stepTools name them
++// (`github` covers `mcp__github__*`). A shell escalation to full access needs
++// `bash`, `shell` or `danger-full-access`. The team-reaching tools are `rejected`
++// whatever the step names, the same names connector-access.js refuses in its guard.
++// Other calls follow the Bot's preset and are answered here, because nobody can
++// tap the card.
++export function ephemeralToolVerdict(bot, toolName, reason) {
++  if (!bot?.ephemeral) return undefined
++  const tool = String(toolName ?? '')
++  if (RUN_DENIED.has(tool)) return 'rejected'
++  const tools = new Set((bot.stepTools ?? []).map(name => String(name).toLowerCase()))
++  const grant = (name) => tools.has('*') || tools.has(String(name).toLowerCase())
++  if (tool.startsWith('mcp__')) {
++    const id = tool.split('__')[1] ?? ''
++    return grant(tool) || (id !== '' && grant(id)) ? 'allowed-once' : 'rejected'
++  }
++  const mode = /^escalate sandbox to ([\w-]+):/.exec(String(reason ?? ''))?.[1]
++  if (mode === 'danger-full-access') return grant('bash') || grant('shell') || grant('danger-full-access') ? 'allowed-once' : 'rejected'
++  return 'allowed-once'
++}
++
 +export function approvalKind(tool, reason) {
 +  const mode = /^escalate sandbox to ([\w-]+):/.exec(String(reason ?? ''))?.[1]
 +  return mode ? `${tool}:escalate:${mode}` : String(tool)
@@ -2614,21 +2690,28 @@ diff --git a/src/host/approvals.js b/src/host/approvals.js
 +  const mode = /^escalate sandbox to ([\w-]+):/.exec(String(reason ?? ''))?.[1]
 +  return mode ? `${tool} · ${mode}` : String(tool)
 +}
- 
++
  export function install(rt) {
    const { ctx } = rt
-@@ -17,6 +17,7 @@ export function install(rt) {
-     const owner = sessionId === undefined ? undefined : rt.groupOwners.get(sessionId)
-     const botId = owner?.botId ?? (sessionId === undefined ? undefined : rt.chatOwners.get(sessionId))
-     if (botId === undefined) return next()
+   /** @type {Map<string, {id:string, sessionId:string, botId:string, roomId?:string, tool:string, reason:string, detail:{text?:string, code?:string}, at:number, answer?:(outcome:string)=>void}>} */
+@@ -19,4 +19,15 @@
+-    if (botId === undefined) return next()
++    // A subagent child Session started by a run Bot is in neither index. Follow the parent chain
++    // (the same `rt.whoseAgent` secrets.js and connector-access.js use) and adopt the run Bot's
++    // answer there; an ordinary Bot's child keeps falling through to next() exactly as before.
++    let bot = botId === undefined ? undefined : rt.botOf(botId)
++    if (botId === undefined) {
++      const parent = rt.whoseAgent?.(request.agent)
++      if (parent?.bot?.ephemeral === undefined) return next()
++      bot = parent.bot
++    }
++    const step = ephemeralToolVerdict(bot, String(request.toolName ?? ''), request.reason)
++    if (step !== undefined) return step
 +    if (standingCovers(sessionId, botId, owner?.roomId, approvalKind(String(request.toolName ?? ''), request.reason))) return 'allowed-once'
      const id = randomUUID()
      const entry = {
        id,
-@@ -47,14 +47,82 @@ export function install(rt) {
-     })
-   }, { prepend: true })
- 
+@@ -50,11 +50,79 @@
 +  // A group grant covers the owner's Bots working in that group: the Bot it was granted
 +  // from and any other Bot of the same owner. Before anyone signs in there is one person,
 +  // and a Bot made then carries no owner, so every local Bot is theirs.
@@ -2709,10 +2792,7 @@ diff --git a/src/host/approvals.js b/src/host/approvals.js
      entry.answer(outcome)
    }
  
-@@ -65,5 +65,5 @@ export function install(rt) {
-     }
-   }
- 
+@@ -68,2 +68,2 @@
 -  Object.assign(rt, { approvalsView, waitsForApproval, answerApproval, cancelApprovals })
 +  Object.assign(rt, { approvalsView, waitsForApproval, answerApproval, cancelApprovals, removeStandingApproval })
  }
@@ -8762,6 +8842,14 @@ diff --git a/test/install.test.js b/test/install.test.js
      'on approval/request (prepend)',
      'on agent/inbox/discarded',
      'on session/event',
+@@ -81,6 +81,7 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
+     'on agent/pre-step (prepend)',
+     'on agent/request-error (prepend)',
+     'on agent/request-error (prepend)',
++    'effect ds-bot: archive a part once its job ends',
+     'on agent/status',
+     'on llm/stream',
+     'on llm/stream',
 @@ -91,12 +91,23 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
      'on llm/stream',
      'effect ds-bot: load secrets',

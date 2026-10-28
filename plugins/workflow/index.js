@@ -2,6 +2,7 @@
 // $DSH_HOME/bot/flybot-workflow and answers the chat surface on workflow/*.
 import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
+import { permissionFor } from './src/ephemeral.js'
 import { createWorkflowService } from './src/service.js'
 
 function runnerName(base, taken) {
@@ -24,14 +25,20 @@ export function apply(ctx, config = {}) {
   const fb = ctx.flybot.scope('flybot-workflow')
   const dshHome = process.env.DSH_HOME ?? join(process.env.HOME ?? '.', '.dsh')
   const persist = config.persist !== false
-  const liveNames = new Set()
+  // The runner names held by the ephemeral Bots this plugin spawned, keyed by
+  // Bot id, so a release gives its name back instead of keeping it for the
+  // lifetime of the process (#1387).
+  const liveNames = new Map()
   const lifecycle = typeof fb.bot?.create === 'function' ? {
     async spawn(spec) {
-      const tools = Array.isArray(spec.tools) ? spec.tools : []
-      const prompt = [spec.prompt, tools.length > 0 ? `Tools for this step: ${tools.join(', ')}.` : ''].filter(Boolean).join('\n\n')
+      // Every Workflow node Bot gets the same full tool/connector grant a normal sidebar Bot
+      // gets (GitHub, Composio, file/shell, team tools), limited only by EPHEMERAL_DENIED_TOOLS
+      // at the guard layer. spec.tools is documentation only; the tools field is always omitted
+      // from fb.bot.create so the Bot inherits all available tools.
+      const prompt = spec.prompt
       let last
       for (let n = 0; n < 4; n += 1) {
-        const taken = new Set([...(fb.bot.list?.() ?? []).map(bot => bot.name), ...liveNames])
+        const taken = new Set([...(fb.bot.list?.() ?? []).map(bot => bot.name), ...liveNames.keys()])
         const name = runnerName(spec.name, taken)
         try {
           const id = await fb.bot.create({
@@ -42,9 +49,10 @@ export function apply(ctx, config = {}) {
             ...(spec.model ? { model: spec.model } : {}),
             hidden: true,
             ephemeral: true,
-            fields: { nodeId: spec.nodeId, tools },
+            permission: permissionFor(),
+            fields: { nodeId: spec.nodeId, tools: spec.tools ?? null },
           })
-          liveNames.add(name)
+          liveNames.set(name, id)
           return id
         } catch (error) {
           last = error
@@ -54,14 +62,23 @@ export function apply(ctx, config = {}) {
       throw last
     },
     release(id) {
+      // The instance is going away, so its name is free again. Without this the
+      // allocator treats every name this process ever handed out as taken.
+      for (const [name, owner] of liveNames) if (owner === id) liveNames.delete(name)
       if (typeof fb.bot.remove !== 'function') return undefined
       return fb.bot.remove(id)
     },
     async dispatch(step) {
       const from = (fb.bot.list?.() ?? []).find(bot => bot.isMain)?.id
       if (!from || typeof fb.bot.send !== 'function') return { ok: false, code: 'no-sender' }
-      const text = `Task ${step.taskId}: ${step.brief}\nDo this step and reply with the result.`
-      return fb.bot.send({ from, to: step.botId, text, role: 'request' })
+      const lines = [`Task ${step.taskId}: ${step.brief}`]
+      for (const [name, value] of Object.entries(step.inputs ?? {})) {
+        if (value) lines.push(`Input ${name}: ${value}`)
+      }
+      const outputs = (step.outputs ?? []).map(port => port.name).filter(Boolean)
+      if (outputs.length > 0) lines.push(`When you finish, add one line per output: OUTPUT <name>: <value> (${outputs.join(', ')}).`)
+      lines.push('Reply with the result of this step.')
+      return fb.bot.send({ from, to: step.botId, text: lines.join('\n'), role: 'request' })
     },
   } : {}
   const service = createWorkflowService({
@@ -76,10 +93,15 @@ export function apply(ctx, config = {}) {
   const offs = [
     fb.api.handle('workflow/state', () => service.state(), { read: true }),
     fb.api.handle('workflow/create', body => service.create(body)),
+    fb.api.handle('workflow/rename', body => service.rename(body)),
+    fb.api.handle('workflow/delete', body => service.delete(body)),
     fb.api.handle('workflow/assign', body => service.assign(body)),
+    fb.api.handle('workflow/concurrency', body => service.setConcurrency(body)),
+    fb.api.handle('workflow/set-model', body => service.setModel(body)),
     fb.api.handle('workflow/advance', body => service.advance(body)),
-    fb.api.handle('workflow/demo-step', body => service.demoStep(body)),
     fb.api.handle('workflow/reset', body => service.reset(body)),
+    fb.api.handle('workflow/pause', body => service.pause(body)),
+    fb.api.handle('workflow/resume', body => service.resume(body)),
     fb.api.handle('workflow/say', body => service.say(body)),
     fb.api.handle('workflow/graph', body => service.saveGraph(body)),
     fb.api.handle('workflow/templates', () => ({ ok: true, templates: service.state().templates }), { read: true }),
@@ -98,15 +120,35 @@ export function apply(ctx, config = {}) {
     }))
     offs.push(fb.tools.register({
       name: 'define_workflow',
-      description: 'Create or replace a Workflow graph. nodes are { id, name, prompt?, role?, model?, tools?, botId?, x?, y? } and edges are { from, to }. prompt is that node\'s Bot system prompt. The Settings page and the flowchart edit the same graph. A friend\'s Bot is refused.',
+      description: 'Create or replace a Workflow graph. nodes are { id, name, prompt?, role?, model?, tools?, botId?, inputs?, outputs?, x?, y? } and edges are { from, to, when?, loop?, max?, until? }. prompt is that node\'s Bot system prompt. tools name what the ephemeral run Bot may use (github grants mcp__github__*; bash grants a shell). A node does not need a permanent botId. inputs and outputs are { name, type?, required? }. A required input must be produced upstream, or be task, title, or brief on a root. when chooses an edge; loop with max (and optional until) is the only cycle. The Settings page and the flowchart edit the same graph. A friend\'s Bot is refused.',
       parameters: {
         name: { type: 'string', required: true, description: 'Workflow name' },
         workflow: { type: 'string', description: 'Existing id or name to replace. Omit to create.' },
-        nodes: { type: 'array', required: true, description: 'Nodes. Each may carry prompt (system prompt), role, model, tools, and an optional local botId.' },
-        edges: { type: 'array', required: true, description: 'Hand-offs { from, to }. A fork is two edges out; a join is two edges in.' },
+        nodes: { type: 'array', required: true, description: 'Nodes. Each may carry prompt (system prompt), role, model, tools (github, bash, read, edit, …), inputs, outputs, and an optional local botId. Real work uses an ephemeral Bot per run, not a seated botId.' },
+        edges: { type: 'array', required: true, description: 'Hand-offs { from, to }. A fork is two edges out; a join is two edges in. A condition is when: { output, eq } or { else: true }. A loop is loop: true with max (1–8, default 3) and optional until: { output, eq }.' },
       },
       execute: args => service.define(args ?? {}),
     }))
+  }
+  if (typeof fb.bot?.send?.use === 'function') {
+    const off = fb.bot.send.use({
+      name: 'workflow-step',
+      priority: fb.bot.send.priority?.ROUTING,
+      async handle(msg) {
+        const from = typeof msg.from === 'string' ? msg.from : ''
+        if (msg.role !== 'reply' || !from || service.ownsBot(from) !== true) return undefined
+        const text = String(msg.text ?? '')
+        const failed = /could not answer your message|model call failed/i.test(text)
+        // The reply advances the run only. It must not land in a persistent Bot chat (e.g. Chief).
+        try {
+          await Promise.resolve(service.stepResult({ botId: from, text, ok: !failed }))
+        } catch (error) {
+          fb.warn?.('flybot-workflow: step result failed: %s', error)
+        }
+        return { action: 'deny', reason: 'workflow step result stays on the run surface' }
+      },
+    })
+    if (typeof off === 'function') offs.push(off)
   }
   if (typeof fb.tasks?.onWrite === 'function') {
     offs.push(fb.tasks.onWrite(task => {
@@ -117,7 +159,13 @@ export function apply(ctx, config = {}) {
       return null
     }))
   }
-  const dispose = () => { service.dispose(); for (const off of offs.splice(0)) off() }
+  // The hooks come off at once; the Bot release is behind a promise, so hand it
+  // back instead of dropping it (#1387).
+  const dispose = () => {
+    const released = service.dispose()
+    for (const off of offs.splice(0)) off()
+    return released
+  }
   if (typeof ctx.effect === 'function') ctx.effect(() => dispose, 'flybot-workflow')
   else ctx.on?.('dispose', dispose)
   return { service, enabled: true, dispose }

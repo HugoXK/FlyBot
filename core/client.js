@@ -56,7 +56,12 @@ var ZH = {
   "The Workflow plugin is not installed or not enabled. A default install includes @flybot/workflow.": "工作流插件没有安装，或没有启用。默认安装包含 @flybot/workflow。",
   "Could not copy this workflow": "这个工作流复制不了。",
   "Could not save this workflow": "这个工作流保存不了。",
+  "Could not rename this workflow": "这个工作流改不了名。",
+  "Could not delete this workflow": "这个工作流删不掉。",
   "Use this": "用这个",
+  "Rename workflow": "重命名工作流",
+  "Delete workflow": "删除工作流",
+  'Are you sure you want to delete "{name}"? This cannot be undone.': "确定删除「{name}」吗？删除后无法恢复。",
   "Finish editing": "完成",
   "Drag a Bot here": "把 Bot 拖到图上",
   "System prompt": "系统提示词",
@@ -82,6 +87,10 @@ var ZH = {
   "Could not open this workflow": "打不开这个工作流",
   "This definition cannot be saved": "这个定义不能保存",
   "This definition cannot be copied": "这个定义不能复制",
+  "Select a node to edit": "选择一个节点来编辑",
+  "Node settings": "节点设置",
+  Tools: "工具",
+  "Inputs and outputs": "输入和输出",
   "{count} card(s) name a node this workflow draws no column for.": "有 {count} 张卡指向这个工作流不画列的节点。",
   // Shared
   "Main Bot": "主 Bot",
@@ -895,6 +904,7 @@ var ZH = {
   "{count} updates": "{count} 条更新",
   "Once more if it still waits after 15 min.": "等了 15 分钟还没批准时再提醒一次。",
   Notifications: "通知",
+  "In other chats": "在其他对话时",
   "When your Bots finish, fail, or wait for your approval while you are in another chat or app.": "你的 Bot 完成、失败或等你批准时提醒你（你在别的对话或应用里时）。",
   "{first} and {second} are waiting for your approval": "{first}、{second} 等你批准",
   "{first}, {second} and {count} more are waiting for your approval": "{first}、{second} 等 {total} 个等你批准",
@@ -2492,17 +2502,36 @@ function heldReplyOf(bot, sessionId, turn) {
   return found;
 }
 var unsentReplyTurns = (bot, sessionId) => (Array.isArray(bot?.heldReplies) ? bot.heldReplies : []).filter((reply) => reply.sessionId === sessionId && reply.status !== "approved" && reply.status !== "auto").map((reply) => reply.turn);
-function previewOf(list, id, hiddenTurns = [], unsentTurns = []) {
+function previewOf(list, id, hiddenTurns = [], unsentTurns = [], names = []) {
   const outline = list.projectionsBySession?.[id]?.values?.turnOutline ?? list.byId[id]?.projectionValues?.turnOutline;
   if (!Array.isArray(outline)) return "";
   for (let index = outline.length - 1; index >= 0; index -= 1) {
     const entry = outline[index];
     if (hiddenTurns.includes(entry.turn)) continue;
     const text = (unsentTurns.includes(entry.turn) ? "" : entry.response) || entry.prompt || "";
-    if (text !== "") return visibleText(stripTrace(stripHeader(text)).replace(/\s+/g, " ").trim().replace(/^[^\s→]{1,40}(?: → [^\s→]{1,40})+ (?=\S)/, ""));
+    if (text === "") continue;
+    return readableLine(text, names);
   }
   return "";
 }
+function readableLine(text, names = []) {
+  return dropKnownTrace(collapsedLine(text), names);
+}
+function collapsedLine(text) {
+  return visibleText(stripTrace(stripHeader(`${text}`)).replace(/\s+/g, " ").trim());
+}
+function dropKnownTrace(line2, names) {
+  const known = [...new Set((Array.isArray(names) ? names : []).map((name) => String(name ?? "").trim()).filter((name) => name !== ""))].sort((a, b) => b.length - a.length);
+  if (known.length === 0 || line2 === "") return line2;
+  const hop = known.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const whole = `(?:${hop})(?=[ \\t→,，.。:：]|$)`;
+  const trace = new RegExp(`^${whole}(?:[ \\t]*→[ \\t]*${whole})+[ \\t]*(?:[,，.。:：][ \\t]*)?(?:\\d{1,2}:\\d{2}Z?[ \\t]*)?`);
+  const match = trace.exec(line2);
+  if (!match) return line2;
+  const rest = line2.slice(match[0].length);
+  return /^[\s,，.。:：]*$/.test(rest) ? "" : rest;
+}
+var botNames = (roster) => [...roster?.bots ?? [], ...roster?.remoteBots ?? [], ...roster?.agents ?? []].map((entry) => entry?.name).filter((name) => typeof name === "string" && name !== "");
 var formatTokens = (count) => count >= 1e6 ? `${(count / 1e6).toFixed(1)}M` : count >= 1e3 ? `${(count / 1e3).toFixed(1)}K` : String(count);
 function usageOf(list, ids) {
   let input = 0;
@@ -4233,11 +4262,13 @@ button.bt-set-row:hover{background:var(--bt-hover)}
 .bt-wf-prompt{display:flex;flex-direction:column;gap:4px;font-size:12px;min-width:0}
 .bt-wf-prompt textarea{width:100%;box-sizing:border-box;border-radius:8px;border:1px solid var(--bt-line);background:var(--bt-card);color:inherit;font:inherit;font-size:12px;padding:6px 8px;resize:vertical}
 .bt-wf-plane{position:relative;width:0;margin:16px auto 0}
-.bt-wf-wires{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}
+.bt-wf-wires{position:absolute;left:calc(-1 * var(--bt-wf-wire-span,480px));top:0;width:calc(2 * var(--bt-wf-wire-span,480px));overflow:visible;pointer-events:none}
 .bt-wf-wires path{fill:none;stroke:var(--bt-ink-3);stroke-width:1.6}
 .bt-wf-wires marker path{fill:var(--bt-ink-3);stroke:none}
 .bt-wf-node{position:absolute;width:168px;box-sizing:border-box;border:1px solid var(--bt-line);background:var(--bt-card);border-radius:12px;padding:8px 9px;display:flex;align-items:center;gap:8px}
-.bt-wf-node.running{border-color:var(--bt-accent);box-shadow:0 0 0 3px rgba(77,107,254,.12)}
+@keyframes bt-wf-node-live{0%,100%{border-color:var(--bt-accent);box-shadow:0 0 0 2px rgba(77,107,254,.18),0 0 0 0 rgba(77,107,254,.2)}50%{border-color:rgba(77,107,254,.85);box-shadow:0 0 0 3px rgba(77,107,254,.35),0 0 14px 2px rgba(77,107,254,.22)}}
+.bt-wf-node.running{border-color:var(--bt-accent);animation:bt-wf-node-live 1.5s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){.bt-wf-node.running{animation:none;box-shadow:0 0 0 3px rgba(77,107,254,.2)}}
 .bt-wf-node.done{border-color:rgba(22,163,74,.35)}
 .bt-wf-node.failed{border-color:#e5484d}
 .bt-wf-node.queued{opacity:.78}
@@ -4734,6 +4765,7 @@ body[data-bt-friend-chat] [data-composer-stats]{display:none!important}
 body[data-bt-room] .bt-voice{display:none!important}
 body[data-bt-room] [data-composer-card] [class*="_activity"]{display:none!important}
 body[data-bt-room] [data-composer-card]:has(button[class*="_primary"]:disabled) .bt-mic:not([aria-pressed=true]){background:var(--bt-accent);color:var(--bt-accent-ink,#fff)}
+body[data-bt-workflow] [data-composer-card]{display:none!important}
 .bt-mic-note{position:absolute;right:12px;bottom:calc(100% + 8px);padding:5px 10px;border-radius:8px;background:var(--bt-user);color:var(--bt-user-ink);font-size:12px;line-height:16px;white-space:nowrap;pointer-events:none;animation:bt-rise .16s ease-out}
 [data-chain-overlay-fallback="conversation.composer"]:has(~ .bt-q){display:block!important;order:2}
 .bt-q{order:1}
@@ -7635,7 +7667,7 @@ function latestActivity(card, { roster, work, sessions }) {
     const entry = card.executingBot ? runningIn(work, card.executingBot, roster.roomsById?.[card.chat] ? card.chat : void 0) : void 0;
     if (entry) options.push(`${workPhrase(entry.tool)}…`);
   }
-  if (sessions?.byId && card.chat) options.push(previewOf(sessions, partOf(roster, card.chat)));
+  if (sessions?.byId && card.chat) options.push(previewOf(sessions, partOf(roster, card.chat), [], [], botNames(roster)));
   return options.find((text) => typeof text === "string" && text !== "" && text !== card.title && text !== card.reason) ?? "";
 }
 function toolCalls(card, { roster, work }) {
@@ -7747,7 +7779,7 @@ function inboxModel({ roster, work = {}, tasks = [], sessions, now = Date.now() 
     const bot = ownBot(roster, entry.botId);
     if (bot === void 0 || entry.failed === void 0 || !fresh(entry.at) || seen.has(key) || waitingAt.has(key)) continue;
     const chat = entry.roomId ?? bot.id;
-    const asked = sessions?.byId ? previewOf(sessions, partOf(roster, chat)) : "";
+    const asked = sessions?.byId ? previewOf(sessions, partOf(roster, chat), [], [], botNames(roster)) : "";
     needs.push({
       id: `turn:${entry.id}`,
       kind: "turn",
@@ -7790,7 +7822,7 @@ function inboxModel({ roster, work = {}, tasks = [], sessions, now = Date.now() 
       const part = currentPart(bot);
       const at = sessions.byId[part]?.updatedAt;
       if (!fresh(at)) continue;
-      const text = previewOf(sessions, part);
+      const text = previewOf(sessions, part, [], [], botNames(roster));
       if (text === "") continue;
       done.push({ id: `chat:${bot.id}`, kind: "chat", status: "done", bot, at, title: text, place: "", chat: bot.id, ...people(roster, bot.id) });
     }
@@ -8842,7 +8874,7 @@ var workLine = (lead, tool, more) => (0, import_react16.createElement)(Shimmer, 
 function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessionRetainInfo, useActivity, useWork, wide, marked, asRow = false }) {
   const id = bot.id;
   const part = currentPart(bot);
-  const preview = useSessions((list) => nameMentions(previewOf(list, part, roster.exchangeTurns[part], unsentReplyTurns(bot, part)), roster));
+  const preview = useSessions((list) => nameMentions(previewOf(list, part, roster.exchangeTurns[part], unsentReplyTurns(bot, part), botNames(roster)), roster));
   const running = useSessionStatus((map) => map.get(part)?.running === true);
   const active = useSessionRetainInfo(part, (info) => (info?.retainedBy?.mainView ?? 0) > 0);
   const unread = useSessionStatus((map) => map.get(part)?.completionUnread === true || map.get(part)?.pendingInteraction !== void 0) || marked && !active;
@@ -8977,7 +9009,7 @@ function FaceMark() {
 }
 function RoomRow({ room: room2, roster, actions, useSessions, useSessionStatus, useSessionRetainInfo, useWork, wide, marked }) {
   const id = room2.id;
-  const fallback = useSessions((list) => nameMentions(previewOf(list, id), roster));
+  const fallback = useSessions((list) => nameMentions(previewOf(list, id, [], [], botNames(roster)), roster));
   const preview = nameMentions(visibleText(room2.preview), roster) || fallback;
   const active = useSessionRetainInfo(id, (info) => (info?.retainedBy?.mainView ?? 0) > 0);
   const unread = useSessionStatus((map) => map.get(id)?.completionUnread === true) || marked && !active;
@@ -13294,6 +13326,7 @@ button.bt-face-bot:hover{color:var(--bt-ink);text-decoration:underline;text-unde
 // src/client/palette.js
 var import_react29 = require("react");
 var import_dsh_client_ui_primitives3 = require("@deepseek-ai/dsh-client-ui-primitives");
+var paletteText = (raw, names) => readableLine(String(raw ?? ""), names);
 var PALETTE_EXIT_MS = 160;
 function CommandPalette({ start, token, roster, actions, useSessions }) {
   const [query, setQuery] = (0, import_react29.useState)(start ?? "");
@@ -13307,6 +13340,7 @@ function CommandPalette({ start, token, roster, actions, useSessions }) {
   };
   useEscape(close);
   const ids = [...roster.bots.map(currentPart), ...roster.rooms.map((item) => item.id)];
+  const names = botNames(roster);
   const found = useSessions((list) => {
     if (wanted.length < 2) return "[]";
     const hits = [];
@@ -13318,7 +13352,7 @@ function CommandPalette({ start, token, roster, actions, useSessions }) {
         const entry = outline[index2];
         if (hidden.includes(entry.turn)) continue;
         for (const raw of [entry.response, entry.prompt]) {
-          const text = stripHeader(raw ?? "").replace(/\s+/g, " ").trim();
+          const text = paletteText(raw, names);
           const at = text.toLowerCase().indexOf(wanted);
           if (at < 0) continue;
           const from = Math.max(0, at - 24);
@@ -14441,9 +14475,10 @@ function hitNode(event) {
   return (nested ?? direct)?.dataset?.node || "";
 }
 var WIRE_SPAN = 480;
+var NODE_WIRE_OUT = 56;
 function wirePath(from, to) {
   const x1 = from.x + WIRE_SPAN;
-  const y1 = from.y + 48;
+  const y1 = from.y + NODE_WIRE_OUT;
   const x2 = to.x + WIRE_SPAN;
   const y2 = to.y;
   const mid = (y1 + y2) / 2;
@@ -14511,7 +14546,7 @@ function GraphCanvas({ graph, editing, roster, onCommit }) {
     ))) : null,
     (0, import_react34.createElement)(
       "div",
-      { className: "bt-wf-plane", "data-plane": "1", style: { height } },
+      { className: "bt-wf-plane", "data-plane": "1", style: { height, "--bt-wf-wire-span": `${WIRE_SPAN}px` } },
       (0, import_react34.createElement)(
         "svg",
         {
@@ -14519,8 +14554,7 @@ function GraphCanvas({ graph, editing, roster, onCommit }) {
           "aria-hidden": true,
           width: WIRE_SPAN * 2,
           height,
-          viewBox: `0 0 ${WIRE_SPAN * 2} ${height}`,
-          style: { left: -WIRE_SPAN, width: WIRE_SPAN * 2, height }
+          viewBox: `0 0 ${WIRE_SPAN * 2} ${height}`
         },
         (0, import_react34.createElement)(
           "defs",
@@ -14603,7 +14637,7 @@ function GraphCanvas({ graph, editing, roster, onCommit }) {
     )
   );
 }
-function Row2({ item, source, onOpen }) {
+function Row2({ item, source, onOpen, onRename, onDelete }) {
   return (0, import_react34.createElement)(
     "button",
     {
@@ -14619,6 +14653,30 @@ function Row2({ item, source, onOpen }) {
       (0, import_react34.createElement)("span", null, item.name),
       (0, import_react34.createElement)("span", { className: "bt-set-hint" }, item.preview || chainOf(item) || item.description || "")
     ),
+    source === "own" ? (0, import_react34.createElement)(
+      "span",
+      { className: "bt-set-actions" },
+      (0, import_react34.createElement)("button", {
+        type: "button",
+        className: "bt-set-action",
+        "aria-label": t("Rename"),
+        title: t("Rename"),
+        onClick: (event) => {
+          event.stopPropagation();
+          onRename?.(item);
+        }
+      }, "✎"),
+      (0, import_react34.createElement)("button", {
+        type: "button",
+        className: "bt-set-action",
+        "aria-label": t("Delete"),
+        title: t("Delete"),
+        onClick: (event) => {
+          event.stopPropagation();
+          onDelete?.(item);
+        }
+      }, "×")
+    ) : null,
     (0, import_react34.createElement)("span", { className: "bt-chevron", "aria-hidden": true }, "›")
   );
 }
@@ -14626,7 +14684,7 @@ function alertCopy(error) {
   if (error === WORKFLOW_PLUGIN_HINT) return t("The Workflow plugin is not installed or not enabled. A default install includes @flybot/workflow.");
   return error || t("Could not read workflows");
 }
-function WorkflowsView({ phase = "loading", pack = null, error = "", opened = null, editing = false, roster = null, onOpen, onBack, onEditing, onRetry, onUse, onCommit }) {
+function WorkflowsView({ phase = "loading", pack = null, error = "", opened = null, editing = false, roster = null, onOpen, onBack, onEditing, onRetry, onUse, onCommit, onRename, onDelete }) {
   const graph = phase === "ready" ? openedGraph(pack, opened) : null;
   const templates = pack?.templates ?? [];
   const templateIds = new Set(templates.map((item) => item.id));
@@ -14670,7 +14728,7 @@ function WorkflowsView({ phase = "loading", pack = null, error = "", opened = nu
         (0, import_react34.createElement)(
           "div",
           { className: "bt-set-card" },
-          yours.length === 0 ? (0, import_react34.createElement)("div", { className: "bt-set-row" }, (0, import_react34.createElement)("span", { className: "bt-set-hint" }, t("No workflows of your own yet."))) : yours.map((item) => (0, import_react34.createElement)(Row2, { key: item.id, item, source: "own", onOpen: () => onOpen?.(item, "own") }))
+          yours.length === 0 ? (0, import_react34.createElement)("div", { className: "bt-set-row" }, (0, import_react34.createElement)("span", { className: "bt-set-hint" }, t("No workflows of your own yet."))) : yours.map((item) => (0, import_react34.createElement)(Row2, { key: item.id, item, source: "own", onOpen: () => onOpen?.(item, "own"), onRename, onDelete }))
         )
       )
     ) : null,
@@ -14695,12 +14753,60 @@ function WorkflowsView({ phase = "loading", pack = null, error = "", opened = nu
     ) : null
   );
 }
+function RenameModal({ workflow, onClose, onConfirm }) {
+  const [name, setName] = (0, import_react34.useState)(workflow?.name ?? "");
+  return (0, import_react34.createElement)(
+    "div",
+    { className: "bt-modal-mask", onClick: (event) => {
+      if (event.target === event.currentTarget) onClose?.();
+    } },
+    (0, import_react34.createElement)(
+      "div",
+      { className: "bt-modal", role: "dialog", "aria-modal": true, "aria-label": t("Rename workflow") },
+      (0, import_react34.createElement)("h3", null, t("Rename workflow")),
+      (0, import_react34.createElement)(
+        "label",
+        { className: "bt-field" },
+        t("Name"),
+        (0, import_react34.createElement)("input", { type: "text", value: name, onChange: (event) => setName(event.target.value), autoFocus: true })
+      ),
+      (0, import_react34.createElement)(
+        "div",
+        { className: "bt-modal-actions" },
+        (0, import_react34.createElement)("button", { type: "button", onClick: onClose }, t("Cancel")),
+        (0, import_react34.createElement)("button", { type: "button", onClick: () => onConfirm?.(name) }, t("Rename"))
+      )
+    )
+  );
+}
+function DeleteModal({ workflow, onClose, onConfirm }) {
+  return (0, import_react34.createElement)(
+    "div",
+    { className: "bt-modal-mask", onClick: (event) => {
+      if (event.target === event.currentTarget) onClose?.();
+    } },
+    (0, import_react34.createElement)(
+      "div",
+      { className: "bt-modal", role: "dialog", "aria-modal": true, "aria-label": t("Delete workflow") },
+      (0, import_react34.createElement)("h3", null, t("Delete workflow")),
+      (0, import_react34.createElement)("p", null, t('Are you sure you want to delete "{name}"? This cannot be undone.', { name: workflow?.name ?? "" })),
+      (0, import_react34.createElement)(
+        "div",
+        { className: "bt-modal-actions" },
+        (0, import_react34.createElement)("button", { type: "button", onClick: onClose }, t("Cancel")),
+        (0, import_react34.createElement)("button", { type: "button", className: "bt-danger", onClick: onConfirm }, t("Delete"))
+      )
+    )
+  );
+}
 function WorkflowsPage({ call: call4, roster }) {
   const [phase, setPhase] = (0, import_react34.useState)("loading");
   const [pack, setPack] = (0, import_react34.useState)(null);
   const [error, setError] = (0, import_react34.useState)("");
   const [opened, setOpened] = (0, import_react34.useState)(null);
   const [editing, setEditing] = (0, import_react34.useState)(false);
+  const [renaming, setRenaming] = (0, import_react34.useState)(null);
+  const [deleting, setDeleting] = (0, import_react34.useState)(null);
   const invoke = typeof call4 === "function" ? call4 : () => Promise.reject(new Error("Could not read workflows"));
   const apply2 = (settled) => {
     setPhase(settled.phase);
@@ -14754,6 +14860,44 @@ function WorkflowsPage({ call: call4, roster }) {
       setError(workflowCallError(failure, t("Could not copy this workflow")));
     });
   };
+  const rename = (item) => {
+    setRenaming(item);
+  };
+  const confirmRename = (workflowId, name) => {
+    if (!name.trim()) return;
+    Promise.resolve(invoke("workflow/rename", { workflowId, name: name.trim() })).then((value) => {
+      const settled = settleWorkflowRead(value);
+      if (settled.phase === "error") {
+        setError(settled.error);
+        return;
+      }
+      setPack(settled.pack);
+      setPhase("ready");
+      setError("");
+      setRenaming(null);
+    }).catch((failure) => {
+      setError(workflowCallError(failure, t("Could not rename this workflow")));
+    });
+  };
+  const deleteWorkflow = (item) => {
+    setDeleting(item);
+  };
+  const confirmDelete = (workflowId) => {
+    Promise.resolve(invoke("workflow/delete", { workflowId })).then((value) => {
+      const settled = settleWorkflowRead(value);
+      if (settled.phase === "error") {
+        setError(settled.error);
+        return;
+      }
+      setPack(settled.pack);
+      setPhase(settled.phase);
+      setError("");
+      setDeleting(null);
+      if (opened?.id === workflowId) setOpened(null);
+    }).catch((failure) => {
+      setError(workflowCallError(failure, t("Could not delete this workflow")));
+    });
+  };
   const commit = (graph) => {
     if (!opened || opened.source !== "own") return;
     Promise.resolve(invoke("workflow/graph", { workflowId: opened.id, nodes: graph.nodes, edges: graph.edges })).then((value) => {
@@ -14769,23 +14913,39 @@ function WorkflowsPage({ call: call4, roster }) {
       setError(workflowCallError(failure, t("Could not save this workflow")));
     });
   };
-  return (0, import_react34.createElement)(WorkflowsView, {
-    phase,
-    pack,
-    error,
-    opened,
-    editing,
-    roster,
-    onOpen: open,
-    onBack: () => {
-      setOpened(null);
-      setEditing(false);
-    },
-    onEditing: setEditing,
-    onRetry: retry,
-    onUse: useTemplate,
-    onCommit: commit
-  });
+  return (0, import_react34.createElement)(
+    "div",
+    null,
+    (0, import_react34.createElement)(WorkflowsView, {
+      phase,
+      pack,
+      error,
+      opened,
+      editing,
+      roster,
+      onOpen: open,
+      onBack: () => {
+        setOpened(null);
+        setEditing(false);
+      },
+      onEditing: setEditing,
+      onRetry: retry,
+      onUse: useTemplate,
+      onCommit: commit,
+      onRename: rename,
+      onDelete: deleteWorkflow
+    }),
+    renaming ? (0, import_react34.createElement)(RenameModal, {
+      workflow: renaming,
+      onClose: () => setRenaming(null),
+      onConfirm: (name) => confirmRename(renaming.id, name)
+    }) : null,
+    deleting ? (0, import_react34.createElement)(DeleteModal, {
+      workflow: deleting,
+      onClose: () => setDeleting(null),
+      onConfirm: () => confirmDelete(deleting.id)
+    }) : null
+  );
 }
 
 // src/client/usage-data.js
@@ -16561,8 +16721,7 @@ function GeneralPage({ roster, actions, run }) {
       SetSection,
       { key: "notify", title: t("Notifications") },
       (0, import_react39.createElement)(SwitchRow, {
-        label: t("Notifications"),
-        showLabel: false,
+        label: t("In other chats"),
         hint: t("When your Bots finish, fail, or wait for your approval while you are in another chat or app."),
         on: prefs.notifications !== false,
         onChange: (on) => run(actions.setPrefs({ notifications: on }))

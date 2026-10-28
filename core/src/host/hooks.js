@@ -22,6 +22,7 @@ import { faceMentions, mentionedByHandle } from './face-mentions.js'
 import { FEED_EVENTS, installFeed } from './flybot-feed.js'
 import { createPluginModel } from './plugin-model.js'
 import { defineTool } from './tool-schema.js'
+import { EPHEMERAL_DENIED_TOOLS } from './tools.js'
 
 export const FLYBOT_API_VERSION = 1
 export const SHARED = 'shared'
@@ -154,9 +155,24 @@ export function install(rt) {
   })
   const persist = () => rt.save().catch(error => warn('flybot: save failed: %s', error))
 
-  async function create({ name, systemPrompt, fields, role, instructions, createdBy, plugin = SHARED, hidden, ephemeral, model } = {}) {
+  const TOOL_NAME = /^[a-z][a-z0-9_-]{0,63}$/
+  function cleanStepTools(value) {
+    if (!Array.isArray(value)) return []
+    const tools = []
+    for (const item of value) {
+      const name = String(item ?? '').trim().toLowerCase()
+      if (!TOOL_NAME.test(name) || tools.includes(name)) continue
+      tools.push(name)
+      if (tools.length === 16) break
+    }
+    return tools
+  }
+
+  async function create({ name, systemPrompt, fields, role, instructions, createdBy, plugin = SHARED, hidden, ephemeral, model, tools, permission } = {}) {
     checkName('plugin', plugin)
     await rt.load()
+    const stepTools = ephemeral === true ? cleanStepTools(tools) : []
+    const preset = ephemeral === true ? String(permission ?? '').trim() : ''
     const bot = await rt.createBot({
       name, role, instructions, createdBy,
       ...(systemPrompt ? { systemPrompt } : {}),
@@ -166,6 +182,17 @@ export function install(rt) {
       // The marker names this plugin. A caller cannot stamp another plugin's name.
       ...(ephemeral === true ? { ephemeral: { plugin } } : {}),
     })
+    const record = rt.botOf(bot.id)
+    if (record && stepTools.length > 0) record.stepTools = stepTools
+    if (record && preset) {
+      try {
+        await rt.setPermission(record, preset)
+      } catch (error) {
+        await rt.deleteBot(bot.id).catch(error => warn('flybot: could not remove the Bot after a permission failure: %s', error))
+        throw error
+      }
+    }
+    if (record && (stepTools.length > 0 || preset)) await rt.save()
     for (const [key, value] of Object.entries(fields ?? {})) fire('change', { botId: bot.id, plugin, key, value: clone(value), prev: undefined })
     return bot.id
   }
@@ -797,9 +824,29 @@ export function install(rt) {
     // it as known, or every other resolve lifts the mask and the next sets it again, and the
     // chat shows "Tool added" / "Tool removed" on each turn (#276).
     for (const name of current?.deny ?? []) known.add(name)
-    const deny = [...gatedTools.values()].filter(def => known.has(def.name) && !visible(def, bot.id)).map(def => def.name).sort()
-    const key = deny.join(',')
+    const pluginDeny = [...gatedTools.values()].filter(def => known.has(def.name) && !visible(def, bot.id)).map(def => def.name)
+    let deny = pluginDeny
+    let stays = []
+    if (bot.ephemeral !== undefined) {
+      // A run Bot is not a team member: the team-reaching names are hidden through the same mask
+      // the guard refuses with, so a node's own list agrees with the refusal. restrict() can name
+      // only what the global view serves; a name the Agent itself serves stays listed — the guard,
+      // not the list, is the refusal — and the warn line says which one it was.
+      const runNames = EPHEMERAL_DENIED_TOOLS.filter(name => known.has(name))
+      let global
+      try { global = ctx.tools.schemas?.() } catch { global = undefined }
+      if (global === undefined) {
+        stays = runNames
+      } else {
+        const maskable = new Set(global.map(schema => schema.name))
+        deny = [...pluginDeny, ...runNames.filter(name => maskable.has(name))]
+        stays = runNames.filter(name => !maskable.has(name))
+      }
+    }
+    deny = [...new Set(deny)].sort()
+    const key = `${deny.join(',')}|${stays.join(',')}`
     if ((current?.key ?? '') === key) return
+    if (stays.length > 0) warn('flybot: %s stay listed for %s: the tool mask cannot name a tool the Agent serves itself', stays.join(', '), bot.name)
     try {
       current?.dispose?.()
       masks.set(agent, { key, deny, dispose: deny.length ? agent.ctx.tools.restrict({ deny }) : undefined })

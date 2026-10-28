@@ -14,7 +14,7 @@ import { workPhrase } from './cells.js'
 import { elapsedLabel } from './activity-row.js'
 import { useEscape } from './overlay-hooks.js'
 import { alwaysChoices } from './member-status.js'
-import { currentPart, previewOf, relativeShort } from './text.js'
+import { botNames, currentPart, previewOf, relativeShort } from './text.js'
 import { hostText, t } from './i18n.js'
 import { failureSentence } from '../shared/failure-copy.js'
 
@@ -129,7 +129,7 @@ function latestActivity(card, { roster, work, sessions }) {
     const entry = card.executingBot ? runningIn(work, card.executingBot, roster.roomsById?.[card.chat] ? card.chat : undefined) : undefined
     if (entry) options.push(`${workPhrase(entry.tool)}…`)
   }
-  if (sessions?.byId && card.chat) options.push(previewOf(sessions, partOf(roster, card.chat)))
+  if (sessions?.byId && card.chat) options.push(previewOf(sessions, partOf(roster, card.chat), [], [], botNames(roster)))
   return options.find(text => typeof text === 'string' && text !== '' && text !== card.title && text !== card.reason) ?? ''
 }
 
@@ -230,7 +230,7 @@ export function inboxModel({ roster, work = {}, tasks = [], sessions, now = Date
     const bot = ownBot(roster, entry.botId)
     if (bot === undefined || entry.failed === undefined || !fresh(entry.at) || seen.has(key) || waitingAt.has(key)) continue
     const chat = entry.roomId ?? bot.id
-    const asked = sessions?.byId ? previewOf(sessions, partOf(roster, chat)) : ''
+    const asked = sessions?.byId ? previewOf(sessions, partOf(roster, chat), [], [], botNames(roster)) : ''
     needs.push({
       id: `turn:${entry.id}`, kind: 'turn', status: 'failed', bot, at: entry.at,
       title: asked || t('The last turn did not finish'), reason: entry.failed,
@@ -261,7 +261,7 @@ export function inboxModel({ roster, work = {}, tasks = [], sessions, now = Date
       const part = currentPart(bot)
       const at = sessions.byId[part]?.updatedAt
       if (!fresh(at)) continue
-      const text = previewOf(sessions, part)
+      const text = previewOf(sessions, part, [], [], botNames(roster))
       if (text === '') continue
       done.push({ id: `chat:${bot.id}`, kind: 'chat', status: 'done', bot, at, title: text, place: '', chat: bot.id, ...people(roster, bot.id) })
     }

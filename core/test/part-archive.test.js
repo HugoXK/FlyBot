@@ -109,7 +109,18 @@ async function start({ schedule, activities = {} } = {}) {
   for (const dir of [team, project]) mkdirSync(dir, { recursive: true })
   writeFileSync(join(home, 'state.json'), JSON.stringify(TEAM))
 
-  const ctx = fakeContext({ services: schedule === undefined ? {} : { schedule } })
+  // DSH's job registry, as the host sees it: the background job a Session owns holds the
+  // Session open, and its settlement is the event #1433 waits for.
+  const jobListeners = []
+  const jobs = {
+    events: {
+      subscribe(filter, listener) {
+        jobListeners.push({ filter, listener })
+        return () => {}
+      },
+    },
+  }
+  const ctx = fakeContext({ services: { ...(schedule === undefined ? {} : { schedule }), jobs } })
   const created = []
   const cwds = new Map()
   const agents = new Map()
@@ -134,6 +145,7 @@ async function start({ schedule, activities = {} } = {}) {
   }
   const archived = []
   const stopped = []
+  const attempts = []
   const registry = new Map([['w1', { id: 'w1', path: team, title: 'DS Bot' }]])
   Object.assign(ctx, {
     llm: { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}) },
@@ -143,6 +155,7 @@ async function start({ schedule, activities = {} } = {}) {
       resolveByPath: async path => [...registry.values()].find(workspace => workspace.path === path),
       create: async path => ({ id: 'w-new', path }),
       async archiveSession(sessionId, options) {
+        attempts.push(sessionId)
         const kinds = [...(schedule?.armedOn(sessionId).length > 0 ? ['schedule'] : []), ...(activities[sessionId] ?? [])]
         if (kinds.length > 0 && options?.stopActivity !== true) throw activeSessionError(sessionId, kinds)
         if (options?.stopActivity === true) {
@@ -185,7 +198,11 @@ async function start({ schedule, activities = {} } = {}) {
   }
   // Loading once fills the Session-owner indexes.
   await tool('list_bots', {}, 'a')
-  return { ctx, created, agentOf, call, state, archived, stopped, activities, home, project, until, settle, stop }
+  // The job registry's settlement, for the Session that owned the job.
+  const settleJob = (sessionId) => {
+    for (const { listener } of jobListeners) listener({ type: 'settled', job: { id: 'job-1', owner: sessionId, status: 'succeeded' } })
+  }
+  return { ctx, created, agentOf, call, state, archived, stopped, attempts, activities, settleJob, home, project, until, settle, stop }
 }
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 20))
@@ -237,9 +254,98 @@ test('#896: a part held by a job is never force-archived', async (t) => {
   assert.equal(answer.ok, true, answer.error?.message)
   await h.until(() => h.state().bots.b.sessionId === 's1')
   await drained()
-  assert.equal(archivedEntry(h.archived, 'b'), undefined, 'the earlier part stays active, as before this fix')
   assert.deepEqual(h.stopped, [], 'a stop request never reaches a job')
   assert.deepEqual(h.activities.b, ['job'], 'the job still runs')
+  assert.equal(archivedEntry(h.archived, 'b'), undefined, 'the part stays active while the job holds it')
+  // The job ends and its registry says so: that settlement is the retry #1433 adds, and it
+  // asks for no options — the part ends up archived without anything being stopped.
+  delete h.activities.b
+  h.settleJob('b')
+  await h.until(() => archivedEntry(h.archived, 'b') !== undefined)
+  assert.deepEqual(archivedEntry(h.archived, 'b'), 'b', 'the earlier part is archived once the job ended')
+  assert.deepEqual(h.stopped, [], 'a job is archived, never stopped')
+})
+
+// #1433: a part a job holds at handoff used to stay active for the life of the instance.
+// The Session is idle while the job runs, so its idle event has already been published by
+// the time the archive is refused, and the part that was handed over takes no further turn
+// (its input goes to the fresh part): the job's own settlement is the signal that names the
+// end. A refused retry keeps the id rather than spending the one chance.
+test('#1433: an idle before the job ended spends nothing, and the part is archived when it ends', async (t) => {
+  const schedule = scheduleService()
+  const h = await start({ schedule, activities: { b: ['job'] } })
+  t.after(h.stop)
+  const answer = await h.call('update-bot', { id: 'b', workDir: h.project })
+  assert.equal(answer.ok, true, answer.error?.message)
+  await h.until(() => h.state().bots.b.sessionId === 's1')
+  await drained()
+  assert.equal(archivedEntry(h.archived, 'b'), undefined, 'the first attempt is refused while the job holds the part')
+  assert.deepEqual(h.stopped, [], 'the refusal stops nothing')
+  // The Session reports idle while the job still runs: this attempt is refused as well and
+  // nothing is forced, but the id is kept for the end that has not happened yet.
+  h.ctx.emit('agent/status', { agent: h.agentOf('b'), status: 'idle' })
+  await drained()
+  assert.equal(archivedEntry(h.archived, 'b'), undefined, 'a refused retry archives nothing')
+  assert.deepEqual(h.stopped, [], 'a refused retry stops nothing')
+  assert.deepEqual(h.activities.b, ['job'], 'the job still runs')
+  assert.equal(h.attempts.filter(id => id === 'b').length, 2, 'the retry was actually attempted')
+  // The job ends: that settlement still finds the id, because the refusal above kept it.
+  delete h.activities.b
+  h.settleJob('b')
+  await h.until(() => archivedEntry(h.archived, 'b') !== undefined)
+  assert.deepEqual(archivedEntry(h.archived, 'b'), 'b', 'the part is archived once the job ended')
+  assert.deepEqual(h.stopped, [], 'nothing was ever stopped for it')
+})
+
+test('#1433: one idle after the job ended archives the part, and the id is dropped once it lands', async (t) => {
+  const schedule = scheduleService()
+  const h = await start({ schedule, activities: { b: ['job'] } })
+  t.after(h.stop)
+  const answer = await h.call('update-bot', { id: 'b', workDir: h.project })
+  assert.equal(answer.ok, true, answer.error?.message)
+  await h.until(() => h.state().bots.b.sessionId === 's1')
+  await drained()
+  assert.deepEqual(h.stopped, [], 'the refusal stops nothing')
+  delete h.activities.b
+  h.ctx.emit('agent/status', { agent: h.agentOf('b'), status: 'idle' })
+  await h.until(() => archivedEntry(h.archived, 'b') !== undefined)
+  assert.deepEqual(archivedEntry(h.archived, 'b'), 'b', 'the earlier part is archived once the job ended')
+  assert.deepEqual(h.stopped, [], 'the retry asks for no options')
+  const landed = h.attempts.filter(id => id === 'b').length
+  assert.equal(landed, 2, 'one attempt at the handoff and one after the job ended')
+  // The id left the table when the attempt landed, so no later signal asks again — a
+  // long-lived instance collects no queue of them and retries nothing in a loop.
+  h.ctx.emit('agent/status', { agent: h.agentOf('b'), status: 'idle' })
+  h.settleJob('b')
+  await drained()
+  assert.equal(h.attempts.filter(id => id === 'b').length, landed, 'no second attempt after it landed')
+})
+
+// #1433: the retry can also meet a refusal a scheduled task alone caused — the handoff's
+// task move failed (`failPut`), so the task is still armed on the earlier part when the job
+// ends. That refusal is the one the handoff answers by stopping the activity (`#896`), and
+// the retry has to answer it the same way instead of dropping the id and leaving the part
+// active for the life of the instance.
+test('#1433: a scheduled task alone still holding the part takes the handoff stop on the retry', async (t) => {
+  const schedule = scheduleService({ failPut: true })
+  const h = await start({ schedule, activities: { b: ['job'] } })
+  t.after(h.stop)
+  schedule.arm('b')
+  const answer = await h.call('update-bot', { id: 'b', workDir: h.project })
+  assert.equal(answer.ok, true, answer.error?.message)
+  await h.until(() => h.state().bots.b.sessionId === 's1')
+  await drained()
+  // The job holds the part at handoff, so neither the part nor its task is forced.
+  assert.equal(archivedEntry(h.archived, 'b'), undefined, 'the job holds the part at handoff, so nothing is forced')
+  assert.deepEqual(h.stopped, [], 'the handoff stops nothing while a job holds the part')
+  assert.equal(schedule.armedOn('b').length, 1, 'the failed move left the task on the earlier part')
+  // The job ends on its own; the task is still armed, so this refusal names the schedule alone.
+  delete h.activities.b
+  h.settleJob('b')
+  await h.until(() => archivedEntry(h.archived, 'b') !== undefined)
+  assert.deepEqual(archivedEntry(h.archived, 'b'), ['b', { stopActivity: true }], 'the retry stops the task and archives the part')
+  assert.deepEqual(schedule.armedOn('b'), [], 'no armed task is left on the finished part')
+  assert.deepEqual(h.stopped, ['b'], 'the one stop came from the schedule-only refusal, never for the job')
 })
 
 // The refusal the three cases above can meet when `TMPDIR` sits inside `DSH_HOME`, from a

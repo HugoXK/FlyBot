@@ -8,9 +8,11 @@
 //     parent's Bot.
 //   - The owner can turn a connector off for one Bot: `bot.connectors = { composio: false }`. Absent
 //     means on, so every Bot, old or new, has the connected connector.
-//   - A friend's Bot (`remote`) never gets them, and neither does a Session whose Bot or parent chain
-//     cannot be resolved (fail closed). Sessions that belong to no Bot (the DSH Agent, plain DSH
-//     sessions) are not touched: they are the owner's own, and no friend can reach them.
+//   - A friend's Bot (`remote`) never gets them. A run Bot (`ephemeral`) gets a connector
+//     only when its `stepTools` name it (`github` covers `mcp__github__*`). A Session whose
+//     Bot or parent chain cannot be resolved fails closed. Sessions that belong to no Bot
+//     (the DSH Agent, plain DSH sessions) are not touched: they are the owner's own, and no
+//     friend can reach them.
 //   - A group room turn carries neither the composio tools nor the four schedule tools (#1237): 8
 //     tools, ~20.4k characters (≈5.2k tokens at the measured 3.92 chars/token) re-sent on every call
 //     of every room turn, and a room round uses neither — an outside app is reached from the Bot's own
@@ -24,6 +26,7 @@
 // The switches change only through `bot-connectors` on the channel, which Bots do not call.
 
 import { GITHUB, COMPOSIO } from './connectors.js'
+import { EPHEMERAL_DENIED_TOOLS, EPHEMERAL_REFUSAL } from './tools.js'
 import { OWNER, OTHER, settled } from './turn-origin.js'
 
 export const CONNECTOR_IDS = [GITHUB, COMPOSIO]
@@ -34,6 +37,7 @@ export const connectorOfTool = name => (typeof name === 'string' ? CONNECTOR_IDS
 // refuses a name this profile does not serve, so a name missing here only means the tool stays.
 export const SCHEDULE_TOOLS = ['schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete']
 const SCHEDULES = new Set(SCHEDULE_TOOLS)
+const RUN_DENIED = new Set(EPHEMERAL_DENIED_TOOLS)
 const MAX_DEPTH = 8
 
 export function install(rt) {
@@ -42,7 +46,14 @@ export function install(rt) {
   // Only an explicit false turns it off; a Bot with no record has it (a team saved by #346, where an
   // absent record meant off, therefore starts on).
   const turnedOff = (bot, id) => bot?.connectors?.[id] === false
-  const allowed = (bot, id) => bot.remote === undefined && !turnedOff(bot, id)
+  // A run Bot is not a team member. It gets a connector only when the step
+  // named it (`github` → mcp__github__*), so a node that did not ask cannot
+  // open pull requests.
+  const stepGrants = (bot, id) => {
+    const tools = bot?.stepTools ?? []
+    return tools.includes(id) || tools.includes('*') || tools.some(name => name === id || String(name).startsWith(`mcp__${id}__`))
+  }
+  const allowed = (bot, id) => bot.remote === undefined && !turnedOff(bot, id) && (bot.ephemeral === undefined || stepGrants(bot, id))
 
   // The Bot an Agent works for: its own chat, a group Session and an earlier part resolve through
   // selfOf; a sub-agent Session is followed up to its parent. The answer has three shapes, and only
@@ -93,8 +104,14 @@ export function install(rt) {
     const name = exec?.name
     const id = connectorOfTool(name)
     const schedule = SCHEDULES.has(name)
-    if (id === undefined && !schedule) return undefined
+    const team = RUN_DENIED.has(name)
+    if (id === undefined && !schedule && !team) return undefined
     const who = whoseAgent(exec.agent)
+    // A run Bot is not a team member: a tool whose effect reaches past its own Session is refused
+    // whatever the node's `tools` names, before the connector or the room answer. Everything that
+    // stays (list_bots, the memory reads and writes of its own scope, …) is in
+    // EPHEMERAL_ALLOWED_TOOLS next to it, and approvals.js answers `rejected` for the same names.
+    if (team && who.bot?.ephemeral !== undefined) return EPHEMERAL_REFUSAL
     if (who.plain === true) return undefined
     // #1237: a room Session is one of the Bot's own Sessions (store.js indexes it as groupOwners), so
     // the room rule reads the same session id whoseAgent already resolved. The tip is in the reason:
@@ -109,6 +126,7 @@ export function install(rt) {
     const { bot } = who
     if (allowed(bot, id)) return undefined
     if (bot.remote !== undefined) return `The ${id} connector is not available to a friend's Bot.`
+    if (bot.ephemeral !== undefined) return `The ${id} connector is not granted to this run. The step's tools list is what allows it.`
     return `The ${id} connector is turned off for ${bot.name}. Its owner can turn it on in this Bot's settings.`
   })
 
