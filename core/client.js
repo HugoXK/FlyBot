@@ -14052,6 +14052,29 @@ ${listed}`, { axis: "y", ...QUICK_EDGES });
 // src/client/exchange.js
 var import_react32 = require("react");
 var SHEET_EXIT_MS = 220;
+function exchangeText(text) {
+  if (typeof text !== "string") return "";
+  const CLOSE = "</untrusted-message>";
+  let body = text;
+  for (let previous; previous !== body; ) {
+    previous = body;
+    const open = body.indexOf("<untrusted-message");
+    if (open < 0) break;
+    const close = body.lastIndexOf(CLOSE);
+    const inner = close > open ? body.slice(body.indexOf(">", open) + 1, close) : body;
+    body = stripFence(body.slice(0, open) + inner + (close > open ? body.slice(close + CLOSE.length) : ""));
+  }
+  return stripFence(stripTrace(body.replace(/^\s+/, ""))).trim();
+}
+function ExchangeLine({ entry, roster, actions }) {
+  const bot = roster.byId[entry.from] ?? { id: entry.from, name: t("You"), color: "gray" };
+  return (0, import_react32.createElement)(
+    "div",
+    { className: "bt-group-msg" },
+    (0, import_react32.createElement)("span", { className: "bt-group-name", style: { color: inkText(colorOf(bot)) } }, bot.name),
+    (0, import_react32.createElement)(Bubbles, { texts: [exchangeText(entry.text)], roster, selfId: bot.id, actions, lead: (0, import_react32.createElement)("span", { className: "bt-lead" }, (0, import_react32.createElement)(BotMark, { bot, size: 22 })) })
+  );
+}
 function ExchangeDialog({ pair, roster, actions }) {
   const [entries2, setEntries] = (0, import_react32.useState)(null);
   const [leaving, setLeaving] = (0, import_react32.useState)(false);
@@ -14104,19 +14127,13 @@ function ExchangeDialog({ pair, roster, actions }) {
         "div",
         { className: "bt-dialog-log", role: "log", "aria-label": t("Bot exchange transcript") },
         entries2 === null ? (0, import_react32.createElement)("div", { className: "bt-hint" }, t("Loading…")) : entries2.length === 0 ? (0, import_react32.createElement)("div", { className: "bt-hint" }, t("No messages yet")) : entries2.map((entry) => {
-          const bot = roster.byId[entry.from] ?? { id: entry.from, name: t("You"), color: "gray" };
           const showDay = entry.time - lastDay > 30 * 60 * 1e3;
           lastDay = entry.time;
           return (0, import_react32.createElement)(
             import_react32.Fragment,
             { key: entry.id },
             showDay ? (0, import_react32.createElement)("time", { className: "bt-time" }, dayLabel(entry.time)) : null,
-            (0, import_react32.createElement)(
-              "div",
-              { className: "bt-group-msg" },
-              (0, import_react32.createElement)("span", { className: "bt-group-name", style: { color: inkText(colorOf(bot)) } }, bot.name),
-              (0, import_react32.createElement)(Bubbles, { texts: [entry.text], roster, selfId: bot.id, actions, lead: (0, import_react32.createElement)("span", { className: "bt-lead" }, (0, import_react32.createElement)(BotMark, { bot, size: 22 })) })
-            )
+            (0, import_react32.createElement)(ExchangeLine, { entry, roster, actions })
           );
         })
       ),
