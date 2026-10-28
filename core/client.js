@@ -2532,6 +2532,9 @@ function dropKnownTrace(line2, names) {
   return /^[\s,，.。:：]*$/.test(rest) ? "" : rest;
 }
 var botNames = (roster) => [...roster?.bots ?? [], ...roster?.remoteBots ?? [], ...roster?.agents ?? []].map((entry) => entry?.name).filter((name) => typeof name === "string" && name !== "");
+function speechOf(text, names = []) {
+  return readableLine(text, names).replace(/```[\s\S]*?```/g, " ").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[*_`#>|~-]+/g, " ").replace(/\s+/g, " ").trim();
+}
 var formatTokens = (count) => count >= 1e6 ? `${(count / 1e6).toFixed(1)}M` : count >= 1e3 ? `${(count / 1e3).toFixed(1)}K` : String(count);
 function usageOf(list, ids) {
   let input = 0;
@@ -14144,7 +14147,6 @@ function ExchangeDialog({ pair, roster, actions }) {
 
 // src/client/voice.js
 var import_react33 = require("react");
-var plainSpeech = (text) => stripHeader(text).replace(/```[\s\S]*?```/g, " ").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[*_`#>|~-]+/g, " ").replace(/\s+/g, " ").trim();
 var VOICE_LABELS = {
   listening: "Listening",
   thinking: "Thinking",
@@ -14333,7 +14335,7 @@ function VoiceMode({ sessionId, roster, actions, useSessions, useSessionStatus }
     const [count, text] = [lastReply.slice(0, lastReply.indexOf("|")), lastReply.slice(lastReply.indexOf("|") + 1)];
     if (count === waiting.current || !text.trim()) return;
     waiting.current = null;
-    const spoken = plainSpeech(text);
+    const spoken = speechOf(text, botNames(roster));
     setSaid(spoken);
     setHeard("");
     if (!window.speechSynthesis || !spoken) {

@@ -332,6 +332,18 @@ function dropKnownTrace(line, names) {
 export const botNames = roster => [...(roster?.bots ?? []), ...(roster?.remoteBots ?? []), ...(roster?.agents ?? [])]
   .map(entry => entry?.name).filter(name => typeof name === 'string' && name !== '')
 
+// What voice mode reads aloud: a reply's words, read the one way a row reads a stored line — header,
+// fence and a known-name delegation trace dropped (#1395, #1408) — and then with the Markdown a speech
+// synthesiser would otherwise say out loud (a code fence, a link's target, emphasis marks).
+export function speechOf(text, names = []) {
+  return readableLine(text, names)
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[*_`#>|~-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 const formatTokens = count => (count >= 1e6 ? `${(count / 1e6).toFixed(1)}M` : count >= 1e3 ? `${(count / 1e3).toFixed(1)}K` : String(count))
 
 // Same buckets as the shell's usage pill: every prompt-side billing bucket plus output.
