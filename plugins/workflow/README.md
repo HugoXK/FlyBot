@@ -15,7 +15,7 @@ This is not the workflow-definition engine (`workflows/<id>.json`, #1272). This 
   3. `assignee` naming a workflow
   4. a `bot:<id or name>` token
   5. `assignee` naming a local Bot (a remote Bot never matches)
-  6. a workflow trigger contained in the title, note or criteria (longest trigger wins)
+  6. a workflow trigger in the title, note, criteria or tags (longest trigger wins; an ASCII trigger must be a whole word, so `notice` does not match `noticeable` and `pr` does not match `Improve`, while a non-ASCII trigger matches inside a longer text)
 - A miss stays unassigned for the manual picker.
 
 ## A live run
