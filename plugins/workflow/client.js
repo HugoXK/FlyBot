@@ -107,6 +107,11 @@ window.__ModuleLoader__.load({
       'No open tasks on the Tasks board.': 'Tasks 看板上没有可分配的任务。',
       'Could not rename this workflow': '无法重命名该 Workflow',
       'Could not delete this workflow': '无法删除该 Workflow',
+      'Could not save this workflow': '无法保存该 Workflow',
+      'Could not reset this workflow': '无法重置该 Workflow',
+      'Could not pause this run': '无法暂停本次运行',
+      'Could not resume this run': '无法继续本次运行',
+      'Could not stop this run': '无法停止本次运行',
       'Reading workflows…': '正在读取 Workflow…',
       'Changes are saved automatically': '更改会自动保存',
       'Next run: {time}': '下次运行：{time}',
@@ -117,6 +122,39 @@ window.__ModuleLoader__.load({
     function zhUi() {
       const host = globalThis.__flybot__?.t
       return typeof host === 'function' && host('Tasks') === '任务'
+    }
+    // A stage control calls the host too: a throw, a rejection or a host that never answers
+    // settles as one error string, so Pause, Stop, Reset and a graph save cannot fail silently.
+    // Same shape as readWorkflows()/workflowCallError() in core/src/client/workflows.js.
+    const CALL_TIMEOUT_MS = 10000
+    function callError(failure, fallback) {
+      if (typeof failure === 'string' && failure.trim()) return failure.trim()
+      const message = typeof failure?.message === 'string' ? failure.message.trim() : ''
+      return message || fallback
+    }
+    function settledCall(call, name, body, fallback, timeoutMs = CALL_TIMEOUT_MS) {
+      return new Promise((resolve) => {
+        let settled = false
+        const finish = (value) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve(value)
+        }
+        const timer = setTimeout(() => finish({ ok: false, error: fallback }), timeoutMs)
+        let pending
+        try {
+          pending = body === undefined ? call(name) : call(name, body)
+        } catch (failure) {
+          finish({ ok: false, error: callError(failure, fallback) })
+          return
+        }
+        Promise.resolve(pending)
+          .then((value) => finish(value === null || value === undefined
+            ? { ok: false, error: fallback }
+            : (value.ok === false ? { ok: false, error: callError(value.error, fallback) } : value)))
+          .catch((failure) => finish({ ok: false, error: callError(failure, fallback) }))
+      })
     }
     function fill(text, params) {
       return params ? text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match)) : text
@@ -1073,6 +1111,8 @@ window.__ModuleLoader__.load({
       const [deleting, setDeleting] = useState(null)
       const stageLeft = useConversationInset()
 
+      const stageCall = (name, body, fallback) => settledCall(call, name, body, fallback)
+
       const refresh = async () => {
         const value = await call('workflow/state')
         if (value && Array.isArray(value.workflows)) setPack(value)
@@ -1283,8 +1323,9 @@ window.__ModuleLoader__.load({
           editing,
           onToggleEdit: () => { setEditing(value => !value); setDrawer(true); setTab('flow') },
           onCommit: (graph) => {
-            void call('workflow/graph', { workflowId: open.id, nodes: graph.nodes, edges: graph.edges }).then(value => {
+            void stageCall('workflow/graph', { workflowId: open.id, nodes: graph.nodes, edges: graph.edges }, 'Could not save this workflow').then(value => {
               if (value?.ok === false) { setError(value.error ?? ''); return }
+              setError('')
               if (value?.workflows) setPack(value)
             })
           },
@@ -1292,17 +1333,35 @@ window.__ModuleLoader__.load({
           onOpenDrawer: () => setDrawer(true),
           onToggleDrawer: () => { setDrawer(value => !value); setTab('flow') },
           onTab: (key) => { setTab(key); setDrawer(true) },
-          onReset: () => { void call('workflow/reset', { workflowId: open.id }).then(value => { if (value?.workflows) setPack(value) }) },
+          onReset: () => {
+            void stageCall('workflow/reset', { workflowId: open.id }, 'Could not reset this workflow').then(value => {
+              if (value?.ok === false) { setError(value.error ?? ''); return }
+              setError('')
+              if (value?.workflows) setPack(value)
+            })
+          },
           onAssign: () => { setAssignOpen(true); void loadTasks() },
           onTip: setTip,
           onPause: (runId) => {
-            void call('workflow/pause', { workflowId: open.id, runId }).then(value => { if (value?.workflows) setPack(value) })
+            void stageCall('workflow/pause', { workflowId: open.id, runId }, 'Could not pause this run').then(value => {
+              if (value?.ok === false) { setError(value.error ?? ''); return }
+              setError('')
+              if (value?.workflows) setPack(value)
+            })
           },
           onResume: (runId) => {
-            void call('workflow/resume', { workflowId: open.id, runId }).then(value => { if (value?.workflows) setPack(value) })
+            void stageCall('workflow/resume', { workflowId: open.id, runId }, 'Could not resume this run').then(value => {
+              if (value?.ok === false) { setError(value.error ?? ''); return }
+              setError('')
+              if (value?.workflows) setPack(value)
+            })
           },
           onStop: (runId) => {
-            void call('workflow/reset', { workflowId: open.id, runId }).then(value => { if (value?.workflows) setPack(value) })
+            void stageCall('workflow/reset', { workflowId: open.id, runId }, 'Could not stop this run').then(value => {
+              if (value?.ok === false) { setError(value.error ?? ''); return }
+              setError('')
+              if (value?.workflows) setPack(value)
+            })
           },
         })) : null,
         assignOpen ? portal(h(AssignModal, {
@@ -1530,7 +1589,7 @@ window.__ModuleLoader__.load({
       name: 'flybot-workflow', inject: ['flybot'], apply, Section, WorkflowSettings,
       tr, columnOf, shortId, stageMessages, taskSummary, wirePath, WIRE_SPAN, NODE_WIRE_OUT,
       runHistoryRows, liveStageRuns, resolveFocusedRun, parallelFrameStyle, NODE_W,
-      botPaletteSubtitle, botTint,
+      botPaletteSubtitle, botTint, settledCall,
     }
   },
 })
