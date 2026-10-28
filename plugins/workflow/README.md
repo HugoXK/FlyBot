@@ -42,7 +42,7 @@ An edge may be a condition, a loop, or a failure recovery. A condition is `when:
 
 A loop is `loop: true` on the edge that returns to the body, with `max` from 1 to 8 (default 3) and an optional `until: { output, eq }`. The body runs again while `until` does not match and the run count is still under `max`. A branch the previous pass skipped can be chosen the next time. The forward edges wait until the loop stops. A loop is the only cycle the graph allows for success paths.
 
-A failure recovery is `onFail: true` on an edge pointing from the failing node back to an upstream node, with `max` from 1 to 8 (default 3). When the node fails and recovery attempts remain, the workflow resets to the recovery target and runs through the failing node again. After `max` recovery attempts, the node fails permanently and the run stops. Failure recovery edges do not interfere with success-path loops or `failOnce` retry behavior.
+A failure recovery is `onFail: true` on an edge pointing from the failing node back to an upstream node, with `max` from 1 to 8 recoveries (default 3). When the node fails and fewer than `max` recoveries have run, the workflow resets the body from the recovery target through the failing node and runs it again. After `max` recoveries, the node fails permanently and the run stops. Failure recovery edges do not interfere with success-path loops or `failOnce` retry behavior.
 
 Settings → Workflow graphs can add a link, a condition, or a loop. A failure recovery edge is added through `define_workflow` (`onFail: true`); the Settings canvas has no control for it yet. After a live run finishes, the stage keeps showing that run until a new one starts.
 
