@@ -12075,7 +12075,7 @@ diff --git a/client.js b/client.js
    );
    const toLatest = () => {
      const scroller = document.querySelector("[data-conversation-scroll]");
-@@ -5702,31 +5702,129 @@ function NewMessagePills({ sessionId, useSessions, useUi, useTurnClock }) {
+@@ -5702,31 +5702,147 @@ function NewMessagePills({ sessionId, useSessions, useUi, useTurnClock }) {
      if (back) back.click();
      else scroller?.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
    };
@@ -12145,7 +12145,9 @@ diff --git a/client.js b/client.js
 +    slots.set(id, { dep, off: setup() ?? (() => {
 +    }) });
 +  };
-+  const apply2 = () => {
++  let running = false;
++  let again = false;
++  const pass = () => {
 +    const list = sessions.getSnapshot();
 +    const state = roster.getSnapshot();
 +    const row = Object.values(list?.byId ?? {}).find((entry) => (entry?.retainedBy?.mainView ?? 0) > 0);
@@ -12187,6 +12189,22 @@ diff --git a/client.js b/client.js
 +        delete doc.body.dataset.btRoom;
 +      };
 +    });
++  };
++  const apply2 = () => {
++    if (running) {
++      again = true;
++      return;
++    }
++    running = true;
++    try {
++      pass();
++    } finally {
++      running = false;
++    }
++    if (again) {
++      again = false;
++      apply2();
++    }
 +  };
 +  apply2();
 +  const offSessions = sessions.subscribe(apply2);
