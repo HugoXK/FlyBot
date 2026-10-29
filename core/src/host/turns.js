@@ -137,6 +137,7 @@ export function install(rt) {
     if (entry === undefined) live.set(id, entry = { texts: [] })
     return entry
   }
+  const eventTime = event => (Number.isFinite(event?.time) ? event.time : Date.now())
 
   // What each running Bot is doing right now, for its mascot. Process-local: it is
   // rebuilt from live events and never saved.
@@ -163,13 +164,28 @@ export function install(rt) {
     if (name !== undefined) setActivity(id, name === 'ask_user' ? undefined : activityOf(name))
     else if (entry.turn !== undefined) setActivity(id, 'thinking')
   }
-  const startCall = (id, entry, callId, name, args) => {
-    if (typeof callId === 'string') (entry.calls ??= new Map()).set(callId, { name, args })
+  const startCall = (id, entry, callId, name, args, at) => {
+    if (typeof callId === 'string') (entry.calls ??= new Map()).set(callId, { name, args, at })
     showCall(id, entry)
   }
   const endCall = (id, entry, callId) => {
     entry.calls?.delete(callId)
     showCall(id, entry)
+  }
+
+  // The foreground wait a Session is blocked on, and how long it has been open (#1509): the
+  // oldest call of a running turn that has no result yet. The times come from the events
+  // themselves, so a call that ends stops counting at once instead of on a timer's word.
+  rt.foregroundWait = (sessionId) => {
+    const entry = live.get(sessionId)
+    if (entry?.turn === undefined) return undefined
+    let oldest
+    for (const call of entry.calls?.values() ?? []) {
+      if (!Number.isFinite(call.at)) continue
+      if (oldest === undefined || call.at < oldest.at) oldest = call
+    }
+    if (oldest === undefined) return undefined
+    return { tool: oldest.name, since: oldest.at, ageMs: Math.max(0, Date.now() - oldest.at) }
   }
 
   const markExchangeTurn = (sessionId, turn) => {
@@ -386,7 +402,7 @@ export function install(rt) {
     switch (event.type) {
       case 'tool/call': {
         const name = String(event.data?.name ?? '')
-        startCall(id, entry, event.data?.callId, name, String(event.data?.arguments ?? ''))
+        startCall(id, entry, event.data?.callId, name, String(event.data?.arguments ?? ''), eventTime(event))
         if (entry.turn !== undefined) entry.toolCalls = (entry.toolCalls ?? 0) + 1
         // A program is as quick as the tools it runs, so its sub-calls decide.
         if (rt.groupOwners.has(id) && name !== PROGRAM_TOOL) rt.workRoomTurn?.(id, name)
@@ -394,7 +410,7 @@ export function install(rt) {
       }
       case 'tool/ptc-dispatch-start': {
         const name = String(event.data?.name ?? '')
-        startCall(id, entry, event.data?.subCallId, name, JSON.stringify(event.data?.arguments ?? {}))
+        startCall(id, entry, event.data?.subCallId, name, JSON.stringify(event.data?.arguments ?? {}), eventTime(event))
         if (rt.groupOwners.has(id)) rt.workRoomTurn?.(id, name)
         break
       }

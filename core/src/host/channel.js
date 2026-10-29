@@ -15,6 +15,10 @@ const LANGUAGES = { zh: 'Chinese (简体中文)', en: 'English' }
 const SETTLE_MS = 1_500
 // How many windows a held burst is retried on its own before it waits for the user's next line.
 const SETTLE_RETRIES = 3
+// How long a foreground tool or job wait may hold a person's line before it is aborted the way
+// Stop aborts it (#1509): a quick command keeps running, and a wait this old is the case the
+// owner called stuck. Fixed on purpose — a new setting is not part of this change.
+const WAIT_STOP_MS = 60_000
 
 const invalid = message => Object.assign(new Error(message), { code: 'bot/invalid' })
 // Programming and file system errors are DS Bot's own faults, logged with their stack;
@@ -85,6 +89,19 @@ export function install(rt) {
     if (held.lines.length > 0) armSettled(sessionId, held)
     else settling.delete(sessionId)
   }
+  // A person's line that reaches a Session whose turn is blocked on a foreground tool or job
+  // wait that has already lasted over a minute (#1509). The step boundary the queued line needs
+  // is not coming, so the wait is aborted the way Stop aborts it, keeping the inbox. A turn that
+  // is already waiting for the person (a question, an approval) is left alone: that wait is the
+  // person's own turn to answer, and aborting it would take the question away from them.
+  const abortLongWait = async (sessionId) => {
+    const wait = rt.foregroundWait?.(sessionId)
+    if (wait === undefined || wait.ageMs < WAIT_STOP_MS || wait.tool === 'ask_user') return
+    if (rt.waitsForApproval?.(sessionId) || state.questions?.[sessionId] !== undefined) return
+    const agent = await rt.resolveAgent(sessionId).catch(() => undefined)
+    agent?.cancel({ kind: 'user' }, { keepInbox: true })
+  }
+
   // True when the line was held for the window; false means the caller opens its own turn.
   const settleLine = async (sessionId, text) => {
     if (turnRunning(sessionId)) {
@@ -607,6 +624,10 @@ export function install(rt) {
           // line to the round it belongs to (#642), so its line must not wait behind a timer.
           if (room === undefined && await settleLine(sessionId, text)) return ok(true)
           await rt.ensureCapabilities(sessionId)
+          // Abort before queueing, never after: a run that is already going takes queued input at
+          // its own boundary, and the abort's unwind only re-opens a turn the line itself woke, so
+          // a line queued behind the abort is the one that opens the next turn (#1509).
+          if (room === undefined) await abortLongWait(sessionId)
           await ctx.sessionController.prompt({
             requestId: randomUUID(),
             sessionId,

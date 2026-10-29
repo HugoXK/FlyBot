@@ -5782,6 +5782,47 @@ diff --git a/src/host/turns.js b/src/host/turns.js
    const roomInbox = new Map()
    const queueRoomMessage = (roomId, item) => roomInbox.set(roomId, [...(roomInbox.get(roomId) ?? []), item])
    // Member turns of a group round the user stopped: what they end with stays out of the group.
+@@ -106,6 +106,7 @@ export function install(rt) {
+     if (entry === undefined) live.set(id, entry = { texts: [] })
+     return entry
+   }
++  const eventTime = event => (Number.isFinite(event?.time) ? event.time : Date.now())
+ 
+   // What each running Bot is doing right now, for its mascot. Process-local: it is
+   // rebuilt from live events and never saved.
+@@ -132,8 +132,8 @@ export function install(rt) {
+     if (name !== undefined) setActivity(id, name === 'ask_user' ? undefined : activityOf(name))
+     else if (entry.turn !== undefined) setActivity(id, 'thinking')
+   }
+-  const startCall = (id, entry, callId, name, args) => {
+-    if (typeof callId === 'string') (entry.calls ??= new Map()).set(callId, { name, args })
++  const startCall = (id, entry, callId, name, args, at) => {
++    if (typeof callId === 'string') (entry.calls ??= new Map()).set(callId, { name, args, at })
+     showCall(id, entry)
+   }
+   const endCall = (id, entry, callId) => {
+@@ -141,6 +141,21 @@ export function install(rt) {
+     showCall(id, entry)
+   }
+ 
++  // The foreground wait a Session is blocked on, and how long it has been open (#1509): the
++  // oldest call of a running turn that has no result yet. The times come from the events
++  // themselves, so a call that ends stops counting at once instead of on a timer's word.
++  rt.foregroundWait = (sessionId) => {
++    const entry = live.get(sessionId)
++    if (entry?.turn === undefined) return undefined
++    let oldest
++    for (const call of entry.calls?.values() ?? []) {
++      if (!Number.isFinite(call.at)) continue
++      if (oldest === undefined || call.at < oldest.at) oldest = call
++    }
++    if (oldest === undefined) return undefined
++    return { tool: oldest.name, since: oldest.at, ageMs: Math.max(0, Date.now() - oldest.at) }
++  }
++
+   const markExchangeTurn = (sessionId, turn) => {
+     const turns = state.exchangeTurns[sessionId] ??= []
+     if (!turns.includes(turn)) {
 @@ -162,17 +162,31 @@ export function install(rt) {
    // Roles whose turn owes the sender a reply: a 'stopped' notice asks the Bot to
    // acknowledge, exactly like a request.
@@ -5923,14 +5964,24 @@ diff --git a/src/host/turns.js b/src/host/turns.js
    // Where a Session speaks, for the diagnostics log.
    const placeOf = (id) => {
      const room = rt.roomOf(rt.groupOwners.get(id)?.roomId) ?? rt.roomOf(id)
-@@ -266,6 +266,7 @@ export function install(rt) {
+@@ -265,14 +265,15 @@ export function install(rt) {
+     switch (event.type) {
        case 'tool/call': {
          const name = String(event.data?.name ?? '')
-         startCall(id, entry, event.data?.callId, name, String(event.data?.arguments ?? ''))
+-        startCall(id, entry, event.data?.callId, name, String(event.data?.arguments ?? ''))
++        startCall(id, entry, event.data?.callId, name, String(event.data?.arguments ?? ''), eventTime(event))
 +        if (entry.turn !== undefined) entry.toolCalls = (entry.toolCalls ?? 0) + 1
          // A program is as quick as the tools it runs, so its sub-calls decide.
          if (rt.groupOwners.has(id) && name !== PROGRAM_TOOL) rt.workRoomTurn?.(id, name)
          break
+       }
+       case 'tool/ptc-dispatch-start': {
+         const name = String(event.data?.name ?? '')
+-        startCall(id, entry, event.data?.subCallId, name, JSON.stringify(event.data?.arguments ?? {}))
++        startCall(id, entry, event.data?.subCallId, name, JSON.stringify(event.data?.arguments ?? {}), eventTime(event))
+         if (rt.groupOwners.has(id)) rt.workRoomTurn?.(id, name)
+         break
+       }
 @@ -288,11 +288,17 @@ export function install(rt) {
          entry.since = event.time ?? Date.now()
          entry.texts = []
