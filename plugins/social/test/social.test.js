@@ -2612,27 +2612,27 @@ test('when the last peer leaves, the face room moves to Past rooms', async (t) =
   assert.equal(again.endedAt, past.endedAt)
 })
 
-// #1606: face-start seats the peer here at once while the server's member list still lags; one
-// peerless snapshot must not end the room (it flipped to closed 1-3 s after face-start).
-test('#1606: one snapshot with no peer listed does not close an open face room', async (t) => {
+// #1606/#1612: face-start seats the peer here at once while the server's member list still lags,
+// and the start response is itself a snapshot. Only polls may count toward a peer leave, so one
+// lagging poll after start must not end the room; a second agreeing poll still does.
+test('#1612: one lagging poll after face-start does not close the face room', async (t) => {
   const { ctx, call, server } = await faceSocial(t)
-  const room = server.face.peer('160616')
-  await call('flybot/social/face-join', { code: '160616' })
-  room.status = 'open'
-  room.started_at = new Date().toISOString()
-  await call('flybot/social/face-rooms', { poll: true })
-  assert.equal(ctx.flybot.rooms.ofFace('frm_160616').face.status, 'open')
-  // A snapshot whose member list has not caught up: the room must stay open and keep its seat.
+  const room = server.face.peer('161216')
+  await call('flybot/social/face-join', { code: '161216' })
+  // #1606's lag: the peer is still seated here, but the server's member list has not caught up.
   room.members = []
-  const first = (await call('flybot/social/face-rooms', { poll: true })).value.rooms.find(item => item.faceRoomId === 'frm_160616')
-  assert.equal(first.status, 'open', 'one peerless snapshot keeps the room open')
-  assert.equal(ctx.flybot.rooms.ofFace('frm_160616').face.status, 'open')
+  await call('flybot/social/face-start', { faceRoomId: 'frm_161216' })
+  assert.equal(ctx.flybot.rooms.ofFace('frm_161216').face.status, 'open', 'face-start opens the room')
+  const first = (await call('flybot/social/face-rooms', { poll: true })).value.rooms.find(item => item.faceRoomId === 'frm_161216')
+  assert.equal(first.status, 'open', 'one lagging poll after face-start is not proof the peer left')
+  assert.equal(ctx.flybot.rooms.ofFace('frm_161216').face.status, 'open')
   assert.equal(room.status, 'open', 'the room was not left on Bot Social')
-  assert.equal(server.calls.some(c => c.name === 'REST POST /frm_160616/leave'), false, 'no face-leave for one snapshot')
-  // Two snapshots in a row that agree are a peer leave: the room ends and this home leaves it.
-  await call('flybot/social/face-rooms', { poll: true })
-  assert.equal(ctx.flybot.rooms.ofFace('frm_160616').face.status, 'closed')
-  assert.ok(server.calls.some(c => c.name === 'REST POST /frm_160616/leave'))
+  assert.equal(server.calls.some(c => c.name === 'REST POST /frm_161216/leave'), false, 'no face-leave for one lagging poll')
+  // A second poll that still lists no peer is a real leave: the room ends and this home leaves it.
+  const second = (await call('flybot/social/face-rooms', { poll: true })).value.rooms.find(item => item.faceRoomId === 'frm_161216')
+  assert.equal(second.status, 'closed')
+  assert.equal(ctx.flybot.rooms.ofFace('frm_161216').face.status, 'closed')
+  assert.ok(server.calls.some(c => c.name === 'REST POST /frm_161216/leave'))
 })
 
 // #1103: B left room 739184 and A's pane showed both "SelfB1025 left the room" and the
