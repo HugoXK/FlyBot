@@ -949,16 +949,21 @@ window.__ModuleLoader__.load({
     function Runs({ workflow }) {
       const rows = runHistoryRows(workflow)
       if (!rows) return h('div', { className: 'wf-muted' }, tr('No runs yet.'))
-      return h('div', null, rows.map((item, index) => h('div', { key: index, className: 'wf-hist' },
-        h('span', { className: 'wf-hist-task', title: item.task?.title ?? '' }, taskSummary(item.task, item)),
-        h('span', { className: 'wf-hist-meta' },
-          item.at ? h('span', { className: 'wf-hist-time' }, runTime(item.at)) : null,
-          item.supersededBy ? h('span', { className: 'wf-hist-retry', title: item.supersededBy }, `superseded by ${item.supersededBy}`) : null,
-          item.retryOf ? h('span', { className: 'wf-hist-retry', title: item.retryOf }, `retry of ${item.retryOf}`) : null,
-          item.status === 'failed'
-            ? h('span', { className: 'wf-hist-reason', title: failureText(item) }, failureText(item))
-            : null),
-        h('span', { className: `wf-chip ${item.status === 'done' ? 'done' : item.status === 'running' ? 'running' : item.status === 'failed' ? 'failed' : 'queued'}` }, tr(STATUS_KEY[item.status] ?? 'Queued')))))
+      return h('div', null, rows.map((item, index) => {
+        const label = tr(STATUS_KEY[item.status] ?? 'Queued')
+        // #1618: the reason is added information, and a failure the host never named says
+        // "Failed" in the reason column and in the status chip — two inks for one fact, the
+        // clipped copy reading as a stray "F". Only a reason the chip cannot say is drawn.
+        const reason = item.status === 'failed' ? failureText(item) : ''
+        return h('div', { key: index, className: 'wf-hist' },
+          h('span', { className: 'wf-hist-task', title: item.task?.title ?? '' }, taskSummary(item.task, item)),
+          h('span', { className: 'wf-hist-meta' },
+            item.at ? h('span', { className: 'wf-hist-time' }, runTime(item.at)) : null,
+            item.supersededBy ? h('span', { className: 'wf-hist-retry', title: item.supersededBy }, `superseded by ${item.supersededBy}`) : null,
+            item.retryOf ? h('span', { className: 'wf-hist-retry', title: item.retryOf }, `retry of ${item.retryOf}`) : null,
+            reason && reason !== label ? h('span', { className: 'wf-hist-reason', title: reason }, reason) : null),
+          h('span', { className: `wf-chip ${item.status === 'done' ? 'done' : item.status === 'running' ? 'running' : item.status === 'failed' ? 'failed' : 'queued'}` }, label))
+      }))
     }
 
     function RenameModal({ workflow, onClose, onConfirm }) {
@@ -1872,8 +1877,9 @@ window.__ModuleLoader__.load({
 .wf-kv{display:flex;justify-content:space-between;gap:16px;padding:8px 0;font-size:12px}
 .wf-kv span:first-child{color:var(--bt-ink-2,rgba(20,20,20,.6))}
 .wf-hist{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--bt-line,rgba(20,20,20,.08));font-size:12px}
-.wf-hist-task{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wf-hist-meta{display:flex;align-items:center;gap:8px;min-width:0;margin-left:auto}
+.wf-hist-task{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wf-hist-meta{display:flex;align-items:center;gap:8px;min-width:0;margin-left:auto;flex:0 0 auto}
+.wf-hist>.wf-chip{flex:none;white-space:nowrap}
 .wf-hist-time{color:var(--bt-ink-3,#9a9a9a);font-variant-numeric:tabular-nums;white-space:nowrap}
 .wf-hist-reason{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e5484d}
 .wf-ctl{display:flex;gap:6px;flex-wrap:wrap;margin-top:14px}

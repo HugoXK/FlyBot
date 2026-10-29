@@ -1820,6 +1820,90 @@ test('#1493: a failed sibling run stays on the stage, and its row carries time a
   view.unmount()
 })
 
+// #1618: a failed run the host never named painted "Failed" twice — once in the reason
+// column and once in the status chip — and the clipped copy read as a stray red "F".
+test('#1618: a Failed row draws the failure once, never a reason plus a chip', async () => {
+  const graph = delivery()
+  graph.runs = [{ id: 'run-1618', live: true, status: 'running', task: { id: '#1618', title: 'runs drawer' }, taskSummary: '#1618 · runs drawer', updatedAt: 1_700_000_000_000 }]
+  graph.run = graph.runs[0]
+  graph.history = [
+    { id: 'run-unnamed', task: { id: '#1445', title: 'a run the host did not name' }, status: 'failed', at: 1_700_000_000_000 },
+    {
+      id: 'run-named',
+      task: { id: '#1460', title: 'a run with a reason' },
+      status: 'failed',
+      at: 1_699_999_000_000,
+      failure: { code: 'step-failed', nodeName: 'Writer', text: 'the reply came back empty' },
+    },
+  ]
+  const call = async (name) => {
+    if (name === 'workflow/state') return { workflows: [graph], templates: [{ id: 'delivery', name: '发布交付流水线' }] }
+    return { ok: true, workflows: [graph] }
+  }
+  const view = mount(client.Section, { roster: { bots: [] }, call, actions: {} })
+  await settle()
+  findAll(view.tree, node => node.type === 'button' && textOf(node).includes('发布交付流水线'))[0].props.onClick()
+  button(view.tree, 'Progress').props.onClick()
+  await settle()
+
+  const rows = findAll(view.tree, node => node.props?.className === 'wf-hist')
+  const unnamed = rows.find(node => textOf(node).includes('#1445'))
+  assert.ok(unnamed, 'the unnamed failed run has no Runs row')
+  const painted = (textOf(unnamed).match(/Failed/g) ?? []).length
+  assert.equal(painted, 1, `the Failed row paints "Failed" ${painted} times: the reason column repeats the status chip`)
+  assert.equal(
+    findAll(unnamed, node => node.props?.className === 'wf-hist-reason').length,
+    0,
+    'an unnamed failure still renders a reason column beside its status chip',
+  )
+  assert.equal(textOf(unnamed).includes('a run the host did not name'), true, 'the row lost its task')
+
+  // A failure that does say why keeps its reason: the chip is not a replacement for it.
+  const named = rows.find(node => textOf(node).includes('#1460'))
+  assert.ok(named, 'the failed run with a reason has no Runs row')
+  assert.equal(textOf(named).includes('Writer failed · the reply came back empty'), true, 'a named failure lost its reason')
+  view.unmount()
+})
+
+// #1618: the row is three columns. Only the task title may shrink and clip itself; the
+// duration column and the status chip keep their own width, so a nowrap time can never
+// paint inside the Done pill.
+test('#1618: only the task column gives way, so the duration stays out of the status chip', () => {
+  const css = workflowCss()
+  const ruleFor = (selector) => {
+    const literal = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return new RegExp(`${literal}\\{([^}]*)\\}`).exec(css)?.[1] ?? ''
+  }
+  const shrink = (body) => {
+    const shorthand = /(?:^|;)flex:([^;]+)/.exec(body)?.[1]?.trim()
+    if (shorthand !== undefined) {
+      if (shorthand === 'none') return 0
+      const parts = shorthand.split(/\s+/)
+      return parts.length > 1 ? Number(parts[1]) : 1
+    }
+    const explicit = /(?:^|;)flex-shrink:\s*([\d.]+)/.exec(body)?.[1]
+    return explicit === undefined ? 1 : Number(explicit)
+  }
+  const row = ruleFor('.wf-hist')
+  const task = ruleFor('.wf-hist-task')
+  const meta = ruleFor('.wf-hist-meta')
+  const chip = ruleFor('.wf-hist>.wf-chip')
+  assert.match(row, /gap:\s*[1-9]\d*px/, 'the Runs row declares no gap, so its columns can share one ink box')
+  assert.equal(shrink(task), 1, 'the task title no longer shrinks, so a long title pushes the row instead of clipping itself')
+  assert.match(task, /min-width:0/, 'the task title cannot shrink below its content, so it pushes the duration and the chip')
+  assert.match(task, /overflow:hidden/, 'the task title does not clip itself, so it overlaps its neighbours')
+  assert.equal(
+    shrink(meta),
+    0,
+    'the duration column still shrinks (flex-shrink 1): its nowrap digits paint outside their box and land inside the status chip',
+  )
+  assert.equal(shrink(chip), 0, 'the status chip still shrinks: it can be squeezed under its own label')
+  assert.match(chip, /white-space:nowrap/, 'the status chip label can wrap inside the pill')
+  for (const [name, body] of [['duration column', meta], ['status chip', chip]]) {
+    assert.doesNotMatch(body, /position:absolute|!important/, `the ${name} is nudged into place instead of laid out`)
+  }
+})
+
 test('the drawer details name the permission every node Bot actually runs with', async () => {
   // #1535 made every node Bot danger-full-access, so a row claiming each Bot follows
   // its own permission was stale (#1548): the details must say the run's full access

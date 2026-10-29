@@ -1,0 +1,1 @@
+A Workflow room's Runs tab keeps a run's duration in its own column, clear of the status chip, and names a failure once: a failed run the host never explained no longer paints "Failed" beside its own chip as a clipped stray `F` ([#1618](https://github.com/ThinkFlowLab/FlyBot/issues/1618)).
