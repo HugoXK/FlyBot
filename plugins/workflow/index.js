@@ -52,9 +52,8 @@ export function apply(ctx, config = {}) {
             ephemeral: true,
             permission: permissionFor(),
             tools: spec.tools,
-            // #1544: who started the run and whose switches cap its connectors; the host reads both
-            // and refuses a connector a Bot switched off however the node names it.
-            ...(spec.createdBy ? { createdBy: spec.createdBy } : {}),
+            // #1544/#1582: whose switches cap the run's connectors. The caller is in `cappedBy` with
+            // the graph's author; the run Bot carries no `createdBy`, which the roster reads as a maker.
             ...(spec.cappedBy ? { cappedBy: spec.cappedBy } : {}),
             fields: { nodeId: spec.nodeId, tools: spec.tools ?? null },
           })

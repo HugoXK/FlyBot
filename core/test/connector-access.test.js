@@ -588,21 +588,25 @@ test('a run Bot does not reopen a connector the Bot that started the run switche
       ...(cappedBy === undefined ? {} : { cappedBy }),
     }
   }
-  runBot('caller-off', { createdBy: 'writer' })
-  runBot('caller-on', { createdBy: 'chief' })
-  runBot('caller-gone', { createdBy: 'removed-bot' })
-  runBot('author-off', { cappedBy: ['writer'] })
-  runBot('both-on', { createdBy: 'chief', cappedBy: ['chief'] })
+  // #1582: the caller now travels in `cappedBy` with the graph's author, so the ceiling reads one
+  // field. A run record written before it named the caller in `createdBy` still gets the same answer.
+  runBot('caller-off', { cappedBy: ['writer'] })
+  runBot('caller-on', { cappedBy: ['chief'] })
+  runBot('caller-gone', { cappedBy: ['removed-bot'] })
+  runBot('author-off', { cappedBy: ['chief', 'writer'] })
+  runBot('both-on', { cappedBy: ['chief'] })
+  runBot('legacy-caller-off', { createdBy: 'writer' })
   const { agentFor, hiddenFrom, guard, stop } = await setup({ state })
   t.after(stop)
-  await Promise.all(['caller-off', 'caller-on', 'caller-gone', 'author-off', 'both-on'].map(id => agentFor(id)))
+  await Promise.all(['caller-off', 'caller-on', 'caller-gone', 'author-off', 'both-on', 'legacy-caller-off'].map(id => agentFor(id)))
 
   assert.match(guard(GITHUB[0], 'caller-off'), /turned off for Writer; the step's tools list cannot turn it back on/, 'the switch is the reason, not the step list')
   assert.deepEqual(sorted(hiddenFrom('caller-off')), sorted([...COMPOSIO, ...GITHUB]), 'and the tool is out of the run Bot\'s list too')
+  assert.match(guard(GITHUB[0], 'legacy-caller-off'), /turned off for Writer; the step's tools list cannot turn it back on/, 'a pre-#1582 record keeps its ceiling')
   assert.equal(guard(GITHUB[0], 'caller-on'), undefined, 'a caller that still has github keeps the #1535 answer')
   assert.deepEqual(sorted(hiddenFrom('caller-on')), sorted(COMPOSIO))
   // A run nobody's tool call started (the board, the canvas, the API) has no caller; the Bot that
-  // saved the graph is the ceiling then.
+  // saved the graph is the ceiling then. Both ids are caps in the same list.
   assert.match(guard(GITHUB[0], 'author-off'), /turned off for Writer; the step's tools list cannot turn it back on/)
   assert.deepEqual(sorted(hiddenFrom('author-off')), sorted([...COMPOSIO, ...GITHUB]))
   assert.equal(guard(GITHUB[0], 'both-on'), undefined)
@@ -611,29 +615,33 @@ test('a run Bot does not reopen a connector the Bot that started the run switche
 })
 
 // #1555: `run_workflow` / `define_workflow` have no `visibleTo`, so a friend's Bot can call them. A run
-// Bot then names that remote Bot as the one that started it, and a remote Bot has no switch table of ours
-// to intersect with — so the caller reads as "every connector switched off", and the step list cannot hand
-// the run Bot anything. Nothing changes for a team Bot: its own switch and the node's `tools` still decide.
+// Bot then names that remote Bot among the Bots that cap it (`cappedBy`, #1582; `createdBy` before it),
+// and a remote Bot has no switch table of ours to intersect with — so the cap reads as "every connector
+// switched off", and the step list cannot hand the run Bot anything. Nothing changes for a team Bot: its
+// own switch and the node's `tools` still decide.
 test('a run Bot started by a friend\'s Bot reaches no connector', async (t) => {
   const state = team()
   state.bots.friend = { id: 'friend', sessionId: 'friend', name: 'Bob', role: 'Bot', instructions: '', createdAt: 5, remote: { handle: '@bob.home' } }
-  const run = (id, { createdBy, stepTools = ['github'] } = {}) => {
+  const run = (id, { createdBy, cappedBy, stepTools = ['github'] } = {}) => {
     state.bots[id] = {
       id, sessionId: id, name: id, role: 'Run', instructions: '', createdAt: 6,
       hidden: true, ephemeral: { plugin: 'flybot-workflow' }, stepTools,
       ...(createdBy === undefined ? {} : { createdBy }),
+      ...(cappedBy === undefined ? {} : { cappedBy }),
     }
   }
-  run('remote-run', { createdBy: 'friend' })
-  run('team-run', { createdBy: 'chief' })
+  run('remote-run', { cappedBy: ['friend'] })
+  run('team-run', { cappedBy: ['chief'] })
+  run('legacy-remote-run', { createdBy: 'friend' })
   const { agentFor, hiddenFrom, guard, stop } = await setup({ state })
   t.after(stop)
-  await Promise.all(['remote-run', 'team-run'].map(id => agentFor(id)))
+  await Promise.all(['remote-run', 'team-run', 'legacy-remote-run'].map(id => agentFor(id)))
 
   // Red before this change: the node names github, so the step list alone let the run Bot through.
   assert.match(guard(GITHUB[0], 'remote-run'), /started by a friend's Bot/, 'the caller is the reason, not the step list')
   assert.deepEqual(sorted(hiddenFrom('remote-run')), sorted([...COMPOSIO, ...GITHUB]), 'and both connectors are out of its list too')
   assert.match(guard(COMPOSIO[0], 'remote-run'), /started by a friend's Bot/)
+  assert.match(guard(GITHUB[0], 'legacy-remote-run'), /started by a friend's Bot/, 'a pre-#1582 record keeps the refusal')
   // The no-over-refusal case: a team Bot started this run, its switch is on, the node names github.
   assert.equal(guard(GITHUB[0], 'team-run'), undefined, 'a team caller keeps what the node names')
   assert.deepEqual(sorted(hiddenFrom('team-run')), sorted(COMPOSIO), 'only the connector the node did not name stays out')

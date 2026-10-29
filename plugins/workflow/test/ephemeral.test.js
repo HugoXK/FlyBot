@@ -797,11 +797,12 @@ test('the built-in delivery nodes hand their connector list to the host', async 
   for (const spec of created) assert.equal(spec.permission, 'danger-full-access', 'file and shell rights are a normal Bot\'s')
 })
 
-// #1544: a connector a Bot switched off must not be reopened by a Workflow. The run records the Bot
-// that started it (createdBy) and every Bot whose switches cap its connectors (cappedBy): the caller
-// when a Bot's tool call started the run, and the Bot that saved the graph when the board, the canvas
-// or the API did. `core/src/host/connector-access.js` intersects the node's `tools` with them.
-test('#1544: the run Bot records the Bot that started the run, and the Bot that saved the graph caps it', async () => {
+// #1544: a connector a Bot switched off must not be reopened by a Workflow. The run carries every Bot
+// whose switches cap its connectors (cappedBy): the caller when a Bot's tool call started the run, and
+// the Bot that saved the graph when the board, the canvas or the API did. Both travel in `cappedBy` and
+// the run Bot carries no `createdBy` (#1582: the roster reads that field as a maker, and a run must not
+// take the starter's model). `core/src/host/connector-access.js` intersects the node's `tools` with them.
+test('#1544: the run Bot is capped by the Bot that started the run and the Bot that saved the graph', async () => {
   const { svc, spawned } = harness()
   svc.define({
     name: 'Launder',
@@ -812,7 +813,7 @@ test('#1544: the run Bot records the Bot that started the run, and the Bot that 
   const started = await svc.runNamed({ workflow: 'Launder', brief: 'Ship the note', callerBotId: 'main' })
   assert.equal(started.ok, true)
   const spec = spawned.at(-1).spec
-  assert.equal(spec.createdBy, 'main')
+  assert.equal('createdBy' in spec, false, 'the caller is a ceiling, not a maker (#1582)')
   assert.deepEqual(spec.cappedBy, ['main', 'bot-planner'])
   assert.deepEqual(spec.tools, ['github'])
 })
@@ -866,7 +867,7 @@ test('#1544: a parked run keeps the caller and the author across the queue', asy
   const before = spawned.length
   await svc.reset({ workflowId: made.id, runId: first.workflows.find(item => item.id === made.id).run.id })
   const drained = spawned.slice(before).map(entry => entry.spec)
-  assert.deepEqual(drained.map(spec => spec.createdBy), ['main'])
+  assert.deepEqual(drained.map(spec => 'createdBy' in spec), [false])
   assert.deepEqual(drained.map(spec => spec.cappedBy), [['main', 'bot-planner']])
 })
 
@@ -901,7 +902,7 @@ test('#1544: the workflow tools hand the calling Bot on to the run they start', 
   }, { botId: 'main' })
   await one.specs.run_workflow.execute({ workflow: 'Caller lane', brief: 'Ship the note' }, { botId: 'bot-planner' })
   const spawnedSpec = one.created.at(-1)
-  assert.equal(spawnedSpec.createdBy, 'bot-planner')
+  assert.equal('createdBy' in spawnedSpec, false, 'the caller is carried by cappedBy (#1582)')
   assert.deepEqual(spawnedSpec.cappedBy, ['bot-planner', 'main'])
 })
 
