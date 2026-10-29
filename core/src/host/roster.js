@@ -77,7 +77,10 @@ export function install(rt) {
     // maker's effective model and thinking level (#410; the level resolved against that
     // model, as applyModel does for the maker), set before its first request, so it never
     // tries an unconfigured profile default first. A friend's Bot is never a maker here.
-    const maker = !model && !pickModel && !isRemote && createdBy ? rt.botOf(createdBy) : undefined
+    // A run Bot (#1582) is not a Bot's child either: `createdBy` on one names the caller whose
+    // connector switches cap it, not a maker, so it starts on the profile default like the board,
+    // the canvas and the API do. Its model must not change with whoever pressed start.
+    const maker = !model && !pickModel && !isRemote && !ephemeral && createdBy ? rt.botOf(createdBy) : undefined
     // A brief is a parent's context (`create_bot`), so it becomes instructions only when
     // another Bot made this one. A line the user typed in the new-Bot card is their first
     // request: the client sends it as a turn, and it is never saved as a standing rule (#645).

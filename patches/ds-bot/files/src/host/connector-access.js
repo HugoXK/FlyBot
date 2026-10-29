@@ -54,11 +54,11 @@ export function install(rt) {
     const tools = bot?.stepTools ?? []
     return tools.includes(id) || tools.includes('*') || tools.some(name => name === id || String(name).startsWith(`mcp__${id}__`))
   }
-  // #1544: a run Bot must not reopen a connector a Bot switched off. The record names the Bots whose
-  // switches cap it — the caller that started the run (createdBy), and the Bot that saved the graph
-  // (cappedBy), which is the ceiling when the board, the canvas or the API started the run. A Bot that
-  // no longer exists, and a record with neither field (an older run), leave the answer as it was:
-  // there is no switch list to intersect with.
+  // #1544: a run Bot must not reopen a connector a Bot switched off. `cappedBy` names the Bots whose
+  // switches cap it — the caller that started the run, and the Bot that saved the graph, which is the
+  // ceiling when the board, the canvas or the API started the run. `createdBy` still counts for a Bot
+  // made by another Bot (and for a run record written before #1582). A Bot that no longer exists, and
+  // a record with neither field (an older run), leave the answer as it was: there is no switch list.
   const capsOf = (bot) => {
     const ids = [bot?.createdBy, ...(Array.isArray(bot?.cappedBy) ? bot.cappedBy : [])]
       .filter(id => typeof id === 'string' && id !== '')
@@ -71,14 +71,12 @@ export function install(rt) {
   }
   const capOff = (bot, id) => capsOf(bot).find(cap => turnedOff(cap, id))
   // #1555: `run_workflow`/`define_workflow` have no `visibleTo`, so a friend's Bot can call them and a run
-  // Bot can name it as the one that started the run (`createdBy`). A remote Bot has no switch table of ours
-  // to intersect with, so it reads as "every connector switched off": the node's `tools` cannot hand the run
-  // Bot a connector. A record with no `createdBy` (the owner, the board, an older run) keeps the answer it
-  // had, and a `createdBy` that names a Bot we do not have leaves it as it was too.
-  const remoteCaller = (bot) => {
-    const id = bot?.createdBy
-    return (typeof id === 'string' && id !== '' ? rt.botOf(id) : undefined)?.remote !== undefined
-  }
+  // Bot can name it among the Bots whose switches cap the run (`cappedBy`; a record written before #1582
+  // named it in `createdBy`). A remote Bot has no switch table of ours to intersect with, so it reads as
+  // "every connector switched off": the node's `tools` cannot hand the run Bot a connector. A run with no
+  // cap (the owner, the board, an older run) keeps the answer it had, and a cap that names a Bot we do not
+  // have leaves it as it was too.
+  const remoteCaller = (bot) => capsOf(bot).some(cap => cap.remote !== undefined)
   const allowed = (bot, id) => bot.remote === undefined && !turnedOff(bot, id)
     && (bot.ephemeral === undefined || (stepGrants(bot, id) && capOff(bot, id) === undefined && !remoteCaller(bot)))
 
