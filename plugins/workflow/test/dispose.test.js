@@ -307,3 +307,90 @@ test('#1472: dispose() releases the Bots of every concurrent live run, not just 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// #1616: releaseAll() reports the ids its release could not remove, and that Bot
+// is still there. Dropping the id first left a hidden Bot no state named, so the
+// record must keep naming it until the host really removed it, or nothing can
+// ever find it again.
+test('#1616: an id whose release failed stays in the record and the next load retries it', async () => {
+  // (1) releaseRun(): the normal end of every run used to forget the id first.
+  const endDir = mkdtempSync(join(tmpdir(), 'wf-1616-end-'))
+  try {
+    const svc = createWorkflowService({
+      dir: endDir,
+      persist: true,
+      now: () => CLOCK,
+      bots: () => roster,
+      spawn: async (spec) => `eph-${spec.nodeId}`,
+      release: async (id) => { if (id === 'eph-only') throw new Error('host call failed') },
+      dispatch: async () => ({ ok: true }),
+    })
+    const one = svc.define({
+      name: 'One',
+      nodes: [{ id: 'only', name: 'Planner', prompt: 'Say it once.' }],
+      edges: [],
+    }).workflows.find(item => item.name === 'One')
+    await svc.runNamed({ workflow: 'One', brief: 'One step' })
+    await svc.advance({ workflowId: one.id, nodeId: 'only', outcome: 'done' })
+    const finished = readStore(endDir).lanes[one.id].last
+    assert.equal(finished.status, 'done')
+    assert.deepEqual(finished.ephemeral, { only: 'eph-only' })
+
+    const retried = []
+    const after = createWorkflowService({
+      dir: endDir,
+      persist: true,
+      now: () => CLOCK + 60_000,
+      bots: () => roster,
+      spawn: async (spec) => `eph2-${spec.nodeId}`,
+      release: async (id) => { retried.push(id) },
+      dispatch: async () => ({ ok: true }),
+    })
+    await after.reap()
+    assert.deepEqual(retried, ['eph-only'])
+    assert.equal(readStore(endDir).lanes[one.id].last.ephemeral, undefined)
+  } finally {
+    rmSync(endDir, { recursive: true, force: true })
+  }
+
+  // (2) dispose(): one of the two Bots refuses to go; only the other is forgotten.
+  const dir = mkdtempSync(join(tmpdir(), 'wf-1616-dispose-'))
+  const warned = []
+  try {
+    const svc = createWorkflowService({
+      dir,
+      persist: true,
+      now: () => CLOCK,
+      bots: () => roster,
+      spawn: async (spec) => `eph-${spec.nodeId}`,
+      release: async (id) => { if (id === 'eph-code') throw new Error('host call failed') },
+      warn: (line) => warned.push(line),
+      dispatch: async () => ({ ok: true }),
+    })
+    const made = pair('Leak', svc)
+    const started = await svc.runNamed({ workflow: 'Leak', brief: 'Ship it' })
+    const run = started.workflows.find(item => item.id === made.id).run
+    await svc.dispose()
+
+    const row = storedRun(readStore(dir), made.id, run.id)
+    assert.equal(row.status, 'failed')
+    assert.deepEqual(row.ephemeral, { code: 'eph-code' })
+    assert.deepEqual(warned, ['flybot-workflow: could not remove eph-code: host call failed'])
+
+    const retried = []
+    const after = createWorkflowService({
+      dir,
+      persist: true,
+      now: () => CLOCK + 60_000,
+      bots: () => roster,
+      spawn: async (spec) => `eph2-${spec.nodeId}`,
+      release: async (id) => { retried.push(id) },
+      dispatch: async () => ({ ok: true }),
+    })
+    await after.reap()
+    assert.deepEqual(retried, ['eph-code'])
+    assert.equal(storedRun(readStore(dir), made.id, run.id).ephemeral, undefined)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
