@@ -89,6 +89,17 @@ function botReply(workflow, nodeId, text) {
   return { kind: 'bot', botId: nodeId, step: stepLabel(workflow, nodeId), text }
 }
 
+// A step can end the run early without failing (#1537, #1538): the row names why it
+// stopped instead of the failure copy, and a Bot reply is still quoted when there is one.
+function earlyEndLines(workflow, event) {
+  if (event.earlyEnd == null) return null
+  const reply = quoted(event.text)
+  return [
+    ...(reply ? [botReply(workflow, event.nodeId, reply)] : []),
+    frame('system', '⏹ Ended early · {reason}', { reason: event.earlyEnd }, `⏹ 提前结束 · ${event.earlyEnd}`),
+  ]
+}
+
 // A live run quotes the Bot when event.text is set; otherwise a frame fills in.
 function liveLines(workflow, task, event) {
   const label = summarizeTask(task)
@@ -100,6 +111,8 @@ function liveLines(workflow, task, event) {
     return [frame('system', 'Started · {task} · {nodes}', { task: label, nodes }, `开始 · ${label} · ${nodes}`, { tone: 'accent' })]
   }
   if (event.type === 'fail') {
+    const ended = earlyEndLines(workflow, event)
+    if (ended) return ended
     if (event.recovered === true && event.started.length > 0) {
       const target = names(workflow, event.started)
       return [
@@ -147,6 +160,8 @@ export function linesFor(workflow, task, event) {
     return [frame('system', 'Task {task} entered the workflow; {nodes} claimed it', { task: label, nodes }, `任务 ${label} 已进入 Workflow，${nodes} 认领`, { tone: 'accent' })]
   }
   if (event.type === 'fail') {
+    const ended = earlyEndLines(workflow, event)
+    if (ended) return ended
     if (event.recovered === true && event.started.length > 0) {
       const target = names(workflow, event.started)
       return [
