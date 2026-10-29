@@ -135,7 +135,7 @@ export function createWorkflowService({
   state.claims ??= {}
   state.lanes ??= {}
   if (!state.laneFormat) migrateRuns(state)
-  purgeDemos(state)
+  purgeDemos(state, historyRow)
   let seq = state.seq ?? 1
   // One lock for every start and release to serialize drain operations.
   let hostTail = Promise.resolve()
@@ -1388,7 +1388,7 @@ export function createWorkflowService({
         for (const { run, names } of endedRuns) {
           lane.active = lane.active.filter(itemRun => itemRun.id !== run.id)
           lane.last = run
-          lane.history = [...lane.history, { task: run.task, status: run.status, at: run.updatedAt }].slice(-20)
+          lane.history = [...lane.history, historyRow(run)].slice(-20)
           push(item.id, [{ kind: 'system', tone: 'bad', text: `■ 已停止 · ${summarizeTask(run.task)}（图编辑删除了正在运行的节点：${names.join('、')}）` }], now())
         }
       })
@@ -1616,7 +1616,7 @@ function seed() {
   }
 }
 
-function purgeDemos(state) {
+function purgeDemos(state, historyRow) {
   if (!state.demos || typeof state.demos !== 'object') {
     delete state.demos
     return
@@ -1626,7 +1626,7 @@ function purgeDemos(state) {
     const lane = state.lanes[id] ?? emptyLane()
     const finished = run.status === 'done' || run.status === 'failed'
     if (finished && run.task) {
-      lane.history = [...lane.history, { task: run.task, status: run.status, at: run.updatedAt ?? 0 }].slice(-20)
+      lane.history = [...lane.history, historyRow(run)].slice(-20)
     }
     if (lane.last?.live !== true) lane.last = null
     state.lanes[id] = lane
