@@ -595,7 +595,6 @@ export function createWorkflowService({
     // with the Bots, or a timer fires into a run that no longer exists.
     clearRunTimers(run.id)
     const ids = Object.values(run.ephemeral ?? {})
-    delete run.ephemeral
     delete run.handed
     delete run.paused
     delete run.releasePending
@@ -605,7 +604,10 @@ export function createWorkflowService({
     if (run.status === 'done' || run.status === 'failed') {
       lane.history = [...lane.history, historyRow(run)].slice(-20)
     }
-    await releaseAll(ids, release, warn)
+    // A Bot the host could not remove keeps its id on the record: the next
+    // load's reap() is the only thing that retries the removal (#1616).
+    const failed = await releaseAll(ids, release, warn)
+    keepUnreleased(run, failed)
     write()
   }
 
@@ -1479,6 +1481,7 @@ export function createWorkflowService({
     reap() {
       if (typeof release !== 'function') return Promise.resolve()
       const stale = []
+      const staleRuns = []
       const abandoned = []
       let wrote = false
       for (const [workflowId, lane] of Object.entries(state.lanes ?? {})) {
@@ -1501,7 +1504,7 @@ export function createWorkflowService({
           if (hasEphemeral) {
             clearRunTimers(run.id)
             stale.push(...Object.values(run.ephemeral))
-            delete run.ephemeral
+            staleRuns.push(run)
             delete run.handed
             wrote = true
           }
@@ -1513,7 +1516,7 @@ export function createWorkflowService({
           if (run.ephemeral) stale.push(...Object.values(run.ephemeral))
           endRun(workflow(workflowId), run, { code: 'host-ended' })
           push(workflowId, [failureLine(run)], now())
-          delete run.ephemeral
+          staleRuns.push(run)
           delete run.handed
           archiveCutoffRun(workflowId, run)
           wrote = true
@@ -1526,7 +1529,12 @@ export function createWorkflowService({
         write()
         return Promise.resolve()
       }
-      return releaseAll(stale, release, warn).then(() => { write() })
+      return releaseAll(stale, release, warn).then((failed) => {
+        // Only the ids the host really removed leave the record. A failed one
+        // stays named so this same path retries it on the next load (#1616).
+        for (const run of staleRuns) keepUnreleased(run, failed)
+        write()
+      })
     },
     dispose() {
       for (const key of [...timers.keys()]) clearTimerAt(key)
@@ -1556,15 +1564,28 @@ export function createWorkflowService({
       // release cannot skip the write. The caller awaits this: a disposer that
       // returns before the Bots are gone is not a cleanup.
       const shouldWrite = ids.length > 0 || endedLive
-      return releaseAll(ids, release, warn).then(() => {
+      return releaseAll(ids, release, warn).then((failed) => {
         for (const run of runs) {
-          delete run.ephemeral
+          keepUnreleased(run, failed)
           delete run.handed
         }
         if (shouldWrite) write()
       })
     },
   }
+}
+
+// releaseAll() reports the ids it could not remove, and those Bots are still
+// there. A record that forgets one leaves a hidden Bot that no state can name
+// again, so keep exactly those named and drop the ids the host did remove (a
+// second remove of a gone id throws, #1476). The next load's reap() retries the
+// rest (#1616).
+function keepUnreleased(run, failed) {
+  if (!run?.ephemeral) return
+  for (const [nodeId, id] of Object.entries(run.ephemeral)) {
+    if (!failed.includes(id)) delete run.ephemeral[nodeId]
+  }
+  if (Object.keys(run.ephemeral).length === 0) delete run.ephemeral
 }
 
 function seat(nodes, roster) {
