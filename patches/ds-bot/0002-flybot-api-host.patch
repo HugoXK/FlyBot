@@ -530,7 +530,7 @@ diff --git a/src/host/roster.js b/src/host/roster.js
        next = others.with(at, id)
      } else if (primary) {
        next = [id, ...others]
-@@ -417,12 +417,30 @@ export function install(rt) {
+@@ -417,14 +417,38 @@ export function install(rt) {
      }
      // The sidebar shows every Main Bot, so a hidden Bot would vanish again once demoted.
      if (main) delete bot.hidden
@@ -540,9 +540,9 @@ diff --git a/src/host/roster.js b/src/host/roster.js
 -    }
      state.mainBotIds = next
 +    rt.syncDesignatedChief()
-+    await rt.save()
-+  }
-+
+     await rt.save()
+   }
+ 
 +  // #638: retire a Bot instead of deleting it. The tree already reads fields['flybot-tree'].retired:
 +  // adoption skips the record and it no longer counts against maxChildren, while its chat, its parts
 +  // and its memory stay where they are. `hidden` keeps it out of the default Bot list the way the
@@ -560,11 +560,19 @@ diff --git a/src/host/roster.js b/src/host/roster.js
 +      bot.fields['flybot-tree'].retired = true
 +    }
 +    bot.hidden = true
-     await rt.save()
-+    return bot
-   }
- 
++    // A retired Bot means what a deleted one does to the board (#1709): the cards it holds fail
++    // instead of waiting for a Bot that will not run again. `hooks` does this for deletion.
++    await rt.taskBotDeleted?.(id, 'the responsible Bot was retired')
++    // Retiring disarms its own chat Session (#1709): `schedules` installs after `roster`, and a
++    // host without the module (a test that mounts only the roster) simply has nothing to pause.
++    const freed = typeof rt.pauseBotSchedules === 'function' ? await rt.pauseBotSchedules(id) : undefined
++    await rt.save()
++    return { bot, freed }
++  }
++
    async function deleteBot(id) {
+     const bot = rt.botOf(id)
+     if (bot === undefined) throw new Error('Unknown Bot')
 @@ -434,22 +434,42 @@ export function install(rt) {
      const current = rt.chatOf(id)
      // Questions and exchange turns are kept per Session, so every part of the chat is cleared.
@@ -630,7 +638,7 @@ diff --git a/src/host/roster.js b/src/host/roster.js
 diff --git a/src/host/store.js b/src/host/store.js
 --- a/src/host/store.js
 +++ b/src/host/store.js
-@@ -1,21 +1,45 @@
+@@ -1,21 +1,50 @@
  // Store: the saved team (state.json), its migrations, the lock that keeps a second dsh
  // host on the same data from writing it, and the indexes that map a Session to the Bot
  // or group chat it belongs to.
@@ -658,6 +666,11 @@ diff --git a/src/host/store.js b/src/host/store.js
 +// the prototype setter never swallows it (#1704, #1711).
 +export const ownEntry = (table, id) => (Object.hasOwn(table, id) ? table[id] : undefined)
 +export const setEntry = (table, id, value) => Object.defineProperty(table, id, { value, writable: true, enumerable: true, configurable: true })
++// Retired (#638): the record keeps its chat, parts and memory, but no host path may resolve it
++// into a turn, a capability, a memory write or a timer (#1700, #1709). One predicate, here,
++// because every such path imports it rather than growing its own copy.
++export const retiredBot = bot => bot?.fields?.['flybot-tree']?.retired === true
++
 +
  export function install(rt) {
 -  const { ctx, home, statePath } = rt
@@ -786,10 +799,9 @@ diff --git a/src/host/store.js b/src/host/store.js
 +        warn('ds-bot: unreadable state %s: %s', statePath, backupProblem)
 +        return undefined
 +      }
-       stuck = undefined
-       return parsed
-     }
--    stuck = 'saved by a newer DS Bot; update DS Bot'
++      stuck = undefined
++      return parsed
++    }
 +    if (parsed?.version === STATE_VERSION) {
 +      const problem = ownershipProblem(parsed)
 +      if (problem !== undefined) {
@@ -797,9 +809,10 @@ diff --git a/src/host/store.js b/src/host/store.js
 +        warn('ds-bot: state %s was refused: %s', statePath, problem)
 +        return undefined
 +      }
-+      stuck = undefined
-+      return parsed
-+    }
+       stuck = undefined
+       return parsed
+     }
+-    stuck = 'saved by a newer DS Bot; update DS Bot'
 +    stuck = 'saved by a newer FlyBot; update FlyBot'
      return undefined
    }
@@ -1396,7 +1409,7 @@ diff --git a/src/host/store.js b/src/host/store.js
 diff --git a/src/host/tools.js b/src/host/tools.js
 --- a/src/host/tools.js
 +++ b/src/host/tools.js
-@@ -1,9 +1,46 @@
+@@ -1,9 +1,47 @@
  // Team tools: the roster, bot-to-bot messages, group chat settings and posts, and the
  // question card. Group rounds and reading chats are in groups.js.
  import { randomUUID } from 'node:crypto'
@@ -1411,6 +1424,7 @@ diff --git a/src/host/tools.js b/src/host/tools.js
 +import { questionReply, replyText } from './parts.js'
 +import { OTHER, settled } from './turn-origin.js'
 +import { cleanName } from './delivery.js'
++import { retiredBot } from './store.js'
 +
 +// A run Bot (ephemeral) is not a team member: every tool below has an effect that reaches past
 +// the run Bot's own Session — it messages, stops or edits another Bot, edits a group, writes or
@@ -1587,16 +1601,12 @@ diff --git a/src/host/tools.js b/src/host/tools.js
        ].join('\n')
      },
    }))
-@@ -81,12 +81,22 @@ export function install(rt) {
+@@ -81,12 +81,18 @@ export function install(rt) {
  
    // A tool that throws shows as failed in the chat, instead of as sent or stopped.
    const refuse = (message) => { throw new Error(message) }
 +  // A run Bot keeps its name (findBot still sees it) but no team tool can address it (#1373).
 +  const teamBot = bot => bot !== undefined && bot.remote === undefined && bot.ephemeral === undefined
-+  // Retired (#638): the tree no longer counts it and the default Bot list leaves it out.
-+  // Retirement is terminal, so no team tool addresses it either (#1700): every tool that takes
-+  // a Bot name resolves through findTeamBot, which is where the rule belongs.
-+  const retiredBot = bot => bot?.fields?.['flybot-tree']?.retired === true
 +  const findTeamBot = (name) => {
 +    const bot = rt.findBot(name)
 +    return teamBot(bot) && !retiredBot(bot) ? bot : undefined
@@ -1712,7 +1722,7 @@ diff --git a/src/host/tools.js b/src/host/tools.js
        if (bot === undefined) return `No Bot named ${args.bot}.`
        if (bot.id !== caller.id && !rt.isMain(self)) return 'Only a Main Bot can change another Bot. Leave out bot to change yourself, or ask a Main Bot with message_bot.'
        try {
-@@ -230,6 +230,30 @@ export function install(rt) {
+@@ -230,6 +230,34 @@ export function install(rt) {
      },
    }))
  
@@ -1731,12 +1741,16 @@ diff --git a/src/host/tools.js b/src/host/tools.js
 +      const target = findTeamBot(args.bot)
 +      if (target === undefined) return `No Bot named ${args.bot}. Team: ${teamNames()}`
 +      if (target.id === sender.id) return 'You cannot archive yourself.'
++      let freed
 +      try {
-+        await rt.archiveBot(target.id, { reason: args.reason })
++        ;({ freed } = await rt.archiveBot(target.id, { reason: args.reason }))
 +      } catch (error) {
 +        return `Could not archive the Bot: ${error.message}`
 +      }
-+      return `Archived ${target.name}. It is out of the tree and the default Bot list; its chats and history stay readable, and it is not deleted.`
++      // A timer left armed is a Bot that still wakes on its own, so the answer counts them.
++      const paused = freed?.available === true && freed.paused > 0 ? ` Paused ${freed.paused} task(s) in its own chat.` : ''
++      const armed = freed?.available === true && freed.armed > 0 ? ` ${freed.armed} task(s) in its own chat are still armed.` : ''
++      return `Archived ${target.name}. It is out of the tree and the default Bot list; its chats and history stay readable, and it is not deleted.${paused}${armed}`
 +    },
 +  }))
 +
