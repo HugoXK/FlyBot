@@ -47,10 +47,15 @@ const durationInWindow = (items, from, to, now) => items.reduce((values, item) =
   return values
 }, [])
 
+// The task rows this read is about (#1848): one board's cards that its reader may see, not the
+// deployment's. The caller passes the same list its rows were built from; an object is still read
+// as a map, so a caller handing the whole store keeps its old answer.
+const taskList = tasks => (Array.isArray(tasks) ? tasks : Object.values(tasks ?? {}))
+
 // The task half: a card that reached `done` inside the window. `completedAt` is the store's own
 // stamp; a record written before the stamp reads `updatedAt` and is not counted as a duration the
 // store never recorded.
-const doneTaskDurations = (tasks, now) => Object.values(tasks ?? {}).reduce((values, task) => {
+const doneTaskDurations = (tasks, now) => taskList(tasks).reduce((values, task) => {
   if (task === null || typeof task !== 'object' || task.status !== 'done') return values
   const start = Number.isFinite(task.createdAt) ? task.createdAt : null
   const end = Number.isFinite(task.completedAt) ? task.completedAt : null
@@ -91,7 +96,10 @@ const emptyMetrics = () => Object.fromEntries(METRIC_KEYS.map(key => [key, null]
 // `source` is `{ ok, pullRequests, issues, reason }`; a failed half is answered as unavailable for
 // the metrics it feeds and never as zero.
 export function summarizeMetrics({ now = Date.now(), timeZone = 'UTC', source, tasks } = {}) {
-  const unavailable = (reason) => ({ ok: false, reason, timeZone, generatedAt: now, metrics: emptyMetrics(), running: [] })
+  // #1848: the running rows are the board's own visible cards in every branch, so a source that is
+  // missing or failed no longer empties a table that needs no token to read.
+  const running = () => taskList(tasks).map(task => runningOf(task, now)).filter(row => row !== null)
+  const unavailable = (reason) => ({ ok: false, reason, timeZone, generatedAt: now, metrics: emptyMetrics(), running: running() })
   if (source === undefined || source === null) return unavailable('no-source')
   if (source.ok !== true) return unavailable(text(source.reason) || 'source-unavailable')
   const pullRequests = Array.isArray(source.pullRequests) ? source.pullRequests : []
@@ -111,24 +119,26 @@ export function summarizeMetrics({ now = Date.now(), timeZone = 'UTC', source, t
       issueCloseMedianMs: median(durationInWindow(issues, item => item.created_at, item => item.closed_at, now)),
       taskDoneMedianMs: median(doneTaskDurations(tasks, now)),
     },
-    running: Object.values(tasks ?? {}).map(task => runningOf(task, now)).filter(row => row !== null),
+    running: running(),
   }
 }
 
 // The read the endpoint calls. `fetchImpl` and `token` are seams: no token answers unavailable
 // without a request, and one failed request answers unavailable for this tick rather than a cache
-// entry that would keep the failure for five minutes.
+// entry that would keep the failure for five minutes. `tasks` is the board's visible rows (#1848).
 export async function readMetrics({ repo, token, fetchImpl, timeZone = 'UTC', now = Date.now(), tasks, ttlMs = METRICS_TTL_MS, cacheStore = cache } = {}) {
-  // The cache carries the seven numbers only: a card claimed a moment ago must appear in the running
-  // table on the next read, so those rows are projected from the live tasks every time (#1829).
-  const liveRunning = () => Object.values(tasks ?? {}).map(task => runningOf(task, now)).filter(row => row !== null)
-  const withRunning = value => ({ ...value, running: liveRunning() })
+  // The cache key is the repository and the five-minute bucket, not the reader, so it carries the
+  // repository-level numbers only. Everything computed from `tasks` — the running rows and the done
+  // median — is projected from this caller's list on every read, hit or miss (#1829, #1880): a
+  // shared entry must not answer one board with the numbers of the board that filled it.
+  const liveRunning = () => taskList(tasks).map(task => runningOf(task, now)).filter(row => row !== null)
+  const withLive = value => ({ ...value, metrics: { ...value.metrics, taskDoneMedianMs: median(doneTaskDurations(tasks, now)) }, running: liveRunning() })
   const bearer = text(token)
-  if (bearer === '') return { ...summarizeMetrics({ now, timeZone, source: { ok: false, reason: 'no-credentials' } }), cache: 'miss' }
-  if (typeof fetchImpl !== 'function') return { ...summarizeMetrics({ now, timeZone, source: { ok: false, reason: 'no-fetch' } }), cache: 'miss' }
+  if (bearer === '') return { ...summarizeMetrics({ now, timeZone, tasks, source: { ok: false, reason: 'no-credentials' } }), cache: 'miss' }
+  if (typeof fetchImpl !== 'function') return { ...summarizeMetrics({ now, timeZone, tasks, source: { ok: false, reason: 'no-fetch' } }), cache: 'miss' }
   const key = `${repo}|${timeZone}|${Math.floor(now / ttlMs)}`
   const hit = cacheStore.get(key)
-  if (hit !== undefined && hit.expiresAt > now) return { ...withRunning(hit.value), cache: 'hit' }
+  if (hit !== undefined && hit.expiresAt > now) return { ...withLive(hit.value), cache: 'hit' }
   const since = new Date(now - RECENT_MS).toISOString()
   const headers = { Authorization: `Bearer ${bearer}`, Accept: 'application/vnd.github+json', 'User-Agent': 'flybot-project-metrics' }
   const get = async (path) => {
@@ -144,10 +154,18 @@ export async function readMetrics({ repo, token, fetchImpl, timeZone = 'UTC', no
     ])
     source = { ok: true, pullRequests, issues: issues.filter(item => item.pull_request === undefined) }
   } catch (error) {
-    return { ...summarizeMetrics({ now, timeZone, source: { ok: false, reason: `read-failed: ${error.message}` } }), cache: 'miss' }
+    return { ...summarizeMetrics({ now, timeZone, tasks, source: { ok: false, reason: `read-failed: ${error.message}` } }), cache: 'miss' }
   }
   const value = summarizeMetrics({ now, timeZone, source, tasks })
-  const { running: _live, ...cached } = value
-  cacheStore.set(key, { expiresAt: now + ttlMs, value: cached })
-  return { ...withRunning(value), cache: 'miss' }
+  // Written field by field rather than by spreading, so a caller-scoped number added later cannot
+  // ride into a shared entry by accident: this list is the whole shape the cache may hold.
+  const { prsOpenedToday, prsMergedToday, issuesOpenedToday, issuesClosedToday, prMergeMedianMs, issueCloseMedianMs } = value.metrics
+  const repositoryValue = {
+    ok: value.ok,
+    timeZone: value.timeZone,
+    generatedAt: value.generatedAt,
+    metrics: { prsOpenedToday, prsMergedToday, issuesOpenedToday, issuesClosedToday, prMergeMedianMs, issueCloseMedianMs },
+  }
+  cacheStore.set(key, { expiresAt: now + ttlMs, value: repositoryValue })
+  return { ...withLive(value), cache: 'miss' }
 }
