@@ -2851,6 +2851,108 @@ test('#1167: a hidden shared room stays hidden for a later line or a stale join,
   assert.equal(roomVisibleTo(rt.state, actorB, room.id), true)
 })
 
+// #1949: a rename is a room setting like the notice. `updateRoom` pushed a join only when the notice
+// changed, and a seated guest reads a room's name only from an envelope that carries `name`, so a quiet
+// shared room showed the old name until the next chat line. The same push now carries both settings,
+// once per call, and a name written back at its own value still sends nothing (#1939).
+test('#1949: renaming a shared room reaches the guests already seated, in one join', async (t) => {
+  const a = host(t, TEAM)
+  const b = host(t, BOB_HOME)
+  installRoster(a.rt)
+  await a.rt.load()
+  await b.rt.load()
+  const invite = await a.rt.createInvitation({ createdByMemberId: 'owner-1' })
+  const alice = await a.rt.redeemInvitation(invite.token, { displayName: 'Alice' })
+  const actorA = await a.rt.authenticate(alice.sessionToken)
+  const inviteB = await b.rt.createInvitation({ createdByMemberId: 'owner-b' })
+  await b.rt.redeemInvitation(inviteB.token, { displayName: 'Bob' })
+  a.rt.state.bots['chief-a'].fields = { social: { member: { handle: '@chief.alice.home', home: '@alice.home', ownerName: 'Alice' } } }
+  a.rt.state.bots['chief-b'].fields = { social: { member: { handle: '@helper.alice.home', home: '@alice.home', ownerName: 'Alice' } } }
+  publish(a.rt, [{ handle: '@chief.bob.home', name: 'Chief', home: '@bob.home', homeName: 'Bob', owner: 'Bob', plugin: 'social', remote: true }])
+  // No person-grant: an open link is the consent that lets this home's Bots speak in the room.
+  a.rt.roomInviteServer = { mint: async () => ({ ticket: 'Tkt0001AbCdEfGhIjKlMnO', expiresAt: null }) }
+  await a.rt.mintRoomInvite('war', actorA)
+  const sent = []
+  const wire = (from, to, home) => {
+    from.rt.flybotSend = async (msg) => {
+      const verdict = from.rt.reach(msg)
+      if (verdict.action !== 'allow') return { action: 'deny', reason: verdict.reason }
+      sent.push(msg)
+      const localBotId = Object.keys(to.rt.state.bots).find(id => to.rt.state.bots[id]?.fields?.social?.member?.handle === msg.to)
+      const sender = from.rt.state.bots[msg.from]
+      await to.rt.applyInboundRoomShare({
+        text: msg.text,
+        fromHandle: sender?.fields?.social?.member?.handle,
+        fromHome: home,
+        fromName: sender?.fields?.social?.member?.ownerName || 'Alice',
+        localBotId,
+      })
+      return { action: 'sent' }
+    }
+  }
+  wire(a, b, '@alice.home')
+  wire(b, a, '@bob.home')
+  const guest = () => Object.values(b.rt.state.rooms).find(room => room.origin === 'inbound-share')
+  const shares = () => sent.filter(msg => msg.via === 'room-share')
+
+  await a.rt.addRoomParticipant('war', { kind: 'bot', remote: true, handle: '@chief.bob.home' }, actorA)
+  await settleShares()
+  assert.ok(guest(), 'the add projected the room on the friend\'s home')
+  assert.equal(guest().name, 'War room', 'the seat opens with the name the host holds')
+  const seated = parseRoomShare(shares().at(-1).text)
+  assert.equal(seated.op, 'join', 'the seat joined through one envelope')
+  const lines = a.rt.state.rooms.war.log.length
+  sent.length = 0
+
+  // The rename itself: one join, and the seated guest reads the new name with nothing else sent.
+  await a.rt.updateRoom('war', { name: 'Renamed war' }, undefined, actorA)
+  await settleShares()
+  assert.equal(guest().name, 'Renamed war', 'the rename alone reaches the guest already seated')
+  assert.equal(shares().length, 1, 'one rename is one envelope')
+  const renamed = parseRoomShare(shares()[0].text)
+  assert.equal(renamed.op, 'join', 'the rename rides the join the notice change already uses')
+  assert.equal(renamed.name, 'Renamed war', 'the envelope carries the new name')
+  assert.deepEqual(renamed.roster, seated.roster, 'the same roster snapshot: no new row')
+  assert.deepEqual(renamed.history, seated.history, 'and no history the guest did not have')
+  assert.equal(a.rt.state.rooms.war.log.length, lines, 'the push is the envelope, not a chat line')
+
+  // The name written back at the value the room already holds pushes nothing (#1939 stays true).
+  sent.length = 0
+  await a.rt.updateRoom('war', { name: 'Renamed war' }, undefined, actorA)
+  await settleShares()
+  assert.equal(shares().length, 0, 'a name written back at its own value sends no envelope')
+
+  // A notice-only change still pushes, and the rename envelope is the same shape as that push.
+  await a.rt.updateRoom('war', { notice: 'Bring a plan.' }, undefined, actorA)
+  await settleShares()
+  assert.equal(shares().length, 1, 'a notice-only change is still one envelope')
+  const noticed = parseRoomShare(shares()[0].text)
+  assert.equal(noticed.name, 'Renamed war', 'the notice push carries the room\'s current name')
+  const { name: renameName, notice: renameNotice, ...renameRest } = renamed
+  const { name: noticeName, notice: noticeNotice, ...noticeRest } = noticed
+  assert.equal(renameName, 'Renamed war')
+  assert.equal(renameNotice, '', 'the rename carried the notice the room already had')
+  assert.equal(noticeName, 'Renamed war')
+  assert.equal(noticeNotice, 'Bring a plan.')
+  assert.deepEqual(renameRest, noticeRest, 'the rename envelope is the notice-push shape: only the two settings differ')
+
+  // Both settings in one call is still one envelope.
+  sent.length = 0
+  await a.rt.updateRoom('war', { name: 'Both war', notice: 'Both settings' }, undefined, actorA)
+  await settleShares()
+  assert.equal(shares().length, 1, 'a call that changes both sends one envelope, not two')
+  const both = parseRoomShare(shares()[0].text)
+  assert.equal(both.name, 'Both war')
+  assert.equal(both.notice, 'Both settings')
+  assert.equal(guest().name, 'Both war', 'the guest follows both settings')
+
+  // The boundary: a later line no longer has to carry the name, and does not undo it.
+  const hello = await a.rt.postRoomMessage('war', { text: 'still here' }, actorA)
+  await a.rt.fanoutRoomLine(a.rt.state.rooms.war, hello)
+  await settleShares()
+  assert.equal(guest().name, 'Both war', 'a later line does not undo the name the rename carried')
+})
+
 test('#1764: a face-to-face room is renamed without the two-Bot floor', async (t) => {
   const { call, rt } = startChannel(t, TEAM)
   await rt.load()

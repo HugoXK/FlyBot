@@ -1,0 +1,1 @@
+Renaming a shared room now reaches the friends' Bots already seated in it ([#1949](https://github.com/ThinkFlowLab/FlyBot/issues/1949)): a rename pushes the same room-share `join` the notice change already used — one envelope carrying the new name, the current roster and the notice — and a save that writes the name back at its own value still sends nothing.

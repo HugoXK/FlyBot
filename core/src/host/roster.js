@@ -462,15 +462,17 @@ export function install(rt) {
       for (const ref of patch.removeParticipants) await rt.removeRoomParticipant(room.id, ref, actor)
     }
     if (!room.named) room.name = autoRoomName(room.members, room)
-    if (room.name !== before) {
+    const nameChanged = room.name !== before
+    if (nameChanged) {
       changes.push(`renamed it "${room.name}"`)
       await retitleRoom(room)
     }
     await rt.save()
-    // A notice edit is a membership push like a seat change: the guests already in the room hold the old
-    // notice and nothing else tells them. The same roster snapshot carries it, only this field differs,
-    // so the envelope repeats no row. Sent after the save, like the join at creation.
-    if (noticeChanged) void rt.notifyRoomShare?.(room, { op: 'join' })
+    // A settings edit is a membership push like a seat change: the guests already in the room hold the
+    // old name and notice, and nothing else tells them. The same roster snapshot carries both, only
+    // these fields differ, so the envelope repeats no row — and one call sends one push, not two.
+    // Sent after the save, like the join at creation.
+    if (nameChanged || noticeChanged) void rt.notifyRoomShare?.(room, { op: 'join' })
     return { room, changes }
   }
 
