@@ -23535,7 +23535,7 @@ diff --git a/client.js b/client.js
          { key: "set-body", className: "bt-drawer-body bt-set-body", "data-move": move },
          errorLine,
 -        bot ? (0, import_react31.createElement)(BotSettingsForm, { bot, roster, actions, run }) : (0, import_react31.createElement)(GroupSettingsForm, { room: room2, roster, actions, run, onDeleted: close })
-+        bot ? (0, import_react44.createElement)(BotSettingsForm, { bot, roster, actions, run }) : (0, import_react44.createElement)(GroupSettingsForm, { room: room2, roster, actions, run, onDeleted: close })
++        bot && lockedWindow(roster) ? (0, import_react44.createElement)("div", { className: "bt-hint bt-read-only", role: "status" }, hostText(roster.readOnly)) : bot ? (0, import_react44.createElement)(BotSettingsForm, { bot, roster, actions, run }) : (0, import_react44.createElement)(GroupSettingsForm, { room: room2, roster, actions, run, onDeleted: close })
        )
      ];
    }

@@ -119,7 +119,7 @@ export function lastRunText(run) {
 
 // The window lock, read the way the rest of the client reads it (#2232): the Settings header draws
 // the sentence, and this page draws no write the host would refuse.
-const lockedWindow = roster => typeof roster?.readOnly === 'string' && roster.readOnly.trim() !== ''
+export const lockedWindow = roster => typeof roster?.readOnly === 'string' && roster.readOnly.trim() !== ''
 
 function TaskRow({ task, actions, onView, onEdit, onCopy, showBot, roster, locked }) {
   const [confirming, setConfirming] = useState(false)
