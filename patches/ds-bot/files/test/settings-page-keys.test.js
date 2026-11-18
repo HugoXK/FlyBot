@@ -83,8 +83,22 @@ test('PAGE_ICONS keys are settings pages', () => {
 
 // A page counts as rendered only when its branch paints something: a bare `shown === 'about'`
 // keeps the literal and still opens an empty dialog. Usage never branches on `shown` at all —
-// its panel stays mounted and one unconditional call draws it (#3153).
-const PAGE_PINS = { usage: /h\((UsagePage),/ }
+// its panel stays mounted behind `usageOpened`, and one call inside that block draws it (#3153).
+function usageBlock(source) {
+  const start = source.indexOf("usageOpened ? h('div', { key: 'usage'")
+  assert.ok(start >= 0, 'settings.js still gates the Usage panel on usageOpened')
+  const close = ': null)'
+  const end = source.indexOf(close, start)
+  assert.ok(end > start, `the usageOpened block still closes with ${close}`)
+  return source.slice(start, end + close.length)
+}
+
+// key -> the component that key's own render form draws, or undefined. `usage` is read inside
+// its usageOpened block, so moving `h(UsagePage, …)` out of that block no longer counts.
+function pinnedComponent(key, source) {
+  if (key !== 'usage') return undefined
+  return /h\((UsagePage),/.exec(usageBlock(source))?.[1]
+}
 
 function definedComponents(source) {
   const names = new Set()
@@ -111,12 +125,12 @@ test('every settings page has a rendered branch', () => {
   const pages = settingsPageKeys()
   const branches = new Set([...source.matchAll(/shown === '([^']+)'/g)].map(match => match[1]))
 
-  const unrendered = pages.filter(key => !painted.has(key) && !PAGE_PINS[key]?.test(source))
+  const unrendered = pages.filter(key => !painted.has(key) && pinnedComponent(key, source) === undefined)
   assert.deepEqual(unrendered, [], `settings pages with no rendered branch:\n${unrendered.join('\n')}`)
 
   const components = definedComponents(source)
   const loose = pages
-    .map(key => [key, painted.get(key) ?? PAGE_PINS[key]?.exec(source)?.[1]])
+    .map(key => [key, painted.get(key) ?? pinnedComponent(key, source)])
     .filter(([, name]) => name !== undefined && !components.has(name))
     .map(([key, name]) => `${key} -> ${name}`)
   assert.deepEqual(loose, [], `rendered branches that name an undefined component:\n${loose.join('\n')}`)
